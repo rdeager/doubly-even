@@ -77,10 +77,13 @@ Three independent checks the test suite relies on:
 - Bouyukliev–Bouyuklieva 2019 has `[N, k, ≥ d]` validation counts at
   `N = 31, 32`. Not yet wired into tests — we don't have a
   minimum-distance filter.
-- Performance ceiling in pure Python is now ≈ 28 s at `N = 20` (down
-  from 235 s in baseline). At the post-optimisation growth rate of
-  ~7×/`N+2`, `N = 22` runs in ~3 minutes. To get past that comfortably
-  we'd need C++/Rust hot kernels — see the next-session plan.
+- Performance ceiling in pure Python: ≈ 28 s at `N = 20` (down from
+  235 s baseline, 8.3× cumulative speedup). `N = 22` does **not**
+  follow the `N≤20` extrapolation — the actual `N = 20 → 22` growth
+  is ~21× (vs ~7× lower down), so `N = 22` runs > 10 minutes in pure
+  Python. That's the trigger to move on to C++/Rust kernels for the
+  next session. See `/workspace/markdown/architecture/04-optimisations.md`
+  for the per-step breakdown and the `N = 22` reality-check section.
 
 ## Recent algorithmic + representation wins (Python session, post-Phase 3)
 
