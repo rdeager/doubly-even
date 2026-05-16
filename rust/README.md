@@ -4,18 +4,33 @@ Native (Rust + PyO3) hot kernel for the `doubly_even` Python enumerator.
 
 ## Status
 
-Milestone 5(b) lands. Production hot path is
-`doubly_even_candidates_q(n, code_rref, pivots, dual_basis, aut_generators)
-→ list[u64]` — one fat FFI call per parent in the canonical-augmentation
-recursion. A `debug` submodule exposes each stage of the inner pipeline
-(`q_basis`, `aut_image_on_q`, `singular_reps_q`, `sigma_q_table`,
+Milestone 5(c) lands. Two production hot paths:
+
+1. `doubly_even_candidates_q(n, code_rref, pivots, dual_basis, aut_generators)
+   → list[u64]` — one fat FFI call per parent in the canonical-augmentation
+   recursion (Q-pipeline: σ_Q tables + singular BFS + orbit-min + lift).
+   Shipped in 5(b).
+2. `canon_info_native(rref, n)
+   → (canonical_column_order, aut_generators, grpsize1, grpsize2, column_orbits)`
+   — Replaces the per-parent `canon.bipartite.bipartite_graph` + `pynauty.autgrp`
+   + `pynauty.canon_label` chain with a single FFI call into nauty via
+   `nauty-Traces-sys`. The bipartite codeword × column sparsegraph is built
+   directly in Rust, eliminating the Python adjacency dict and pynauty's
+   internal dict→sparsegraph conversion. Shipped in 5(c).
+
+A `debug` submodule exposes each stage of the Q-pipeline (`q_basis`,
+`aut_image_on_q`, `singular_reps_q`, `sigma_q_table`,
 `aut_orbit_minima_q_table`, `aut_orbit_minima_q_witt`, `lift`, `project`)
 for the cross-check tests in `/workspace/src/tests/test_kernel.py`.
 
-The Python enumerator at `src/doubly_even/enumerate/filters.py` tries to
-import this kernel at module load; if present it marshals `Code` and
-`aut_generators` across the FFI. If the wheel isn't built the Python
-implementation in `enumerate/quotient.py` takes over.
+The Python enumerator's two entry points dispatch to the kernel when the
+extension is built:
+- `enumerate/filters.py::doubly_even_candidates` → `doubly_even_candidates_q`
+- `canon/nauty.py::canon_info` → `canon_info_native`
+
+If the wheel isn't built the Python implementations in
+`enumerate/quotient.py` and `canon/nauty.py::_canon_info_via_pynauty`
+take over (cross-check oracles).
 
 ## Layout
 
@@ -33,8 +48,18 @@ rust/
     ├── linalg.rs      row_reduce, apply_permutation
     ├── quotient.rs    Q_basis, lift, project, aut_image_on_q, reduce_mod_c
     ├── orbit.rs       singular_reps_q, sigma_q_table, orbit-min BFS (×2)
-    └── candidates.rs  doubly_even_candidates_q — the orchestrator
+    ├── candidates.rs  doubly_even_candidates_q — the Q-pipeline orchestrator
+    └── canon.rs       canon_info_native — bipartite encoding + sparsenauty
 ```
+
+## Build dependencies
+
+`nauty-Traces-sys` compiles nauty from vendored C during `cargo build`
+(via the `bundled` feature). It uses `bindgen` to generate the Rust FFI,
+which requires `libclang` on the host (the system package, e.g.
+`libclang-18-dev`, not the LLVM-only runtime). The crate's `tls` feature
+must stay enabled or nauty cannot be called concurrently (e.g. cargo's
+parallel test runner SIGSEGV's without it).
 
 ## Build / install for development
 
@@ -136,44 +161,52 @@ matching `uname -r`.
 uv run python scripts/bench.py --label kernel-5b --N 14,16,18,20,22
 ```
 
-5(b) results on the dev host:
+5(b) → 5(c) wall progression on the dev host:
 
-| N  | pre-kernel | kernel-5b | speedup |
-|----|-----------:|----------:|--------:|
-| 14 |   0.63 s   |  0.018 s  |  35×    |
-| 16 |   4.75 s   |  0.130 s  |  37×    |
-| 18 |   1.83 s   |  0.671 s  |  2.7×   |
-| 20 |   13.8 s   |  6.83 s   |  2.0×   |
-| 22 |    152 s   |   108 s   |  1.4×   |
+| N  | pre-kernel | kernel-5b | easy-wins (T1) | native-canon (T3) | weight-cache (T4) | total speedup |
+|----|-----------:|----------:|---------------:|------------------:|------------------:|--------------:|
+| 14 |   0.63 s   |  0.018 s  |    0.017 s     |     0.010 s       |    0.010 s        |   63×         |
+| 16 |   4.75 s   |  0.130 s  |    0.121 s     |     0.063 s       |    0.061 s        |   78×         |
+| 18 |   1.83 s   |  0.671 s  |    0.639 s     |     0.296 s       |    0.286 s        |   6.4×        |
+| 20 |   13.8 s   |  6.83 s   |    6.63 s      |     2.33 s        |    2.22 s         |   6.2×        |
+| 22 |    152 s   |   108 s   |     107 s      |     24.8 s        |    23.3 s         |   6.5×        |
 
 (Pre-kernel column is the post-D7 pure-Python baseline from the project
 memory; N=14,16 also include the recursion fixed-cost overhead that the
 larger `N` measurements amortise away.)
 
-## What's next (5(c) and beyond)
+## What's next (post-5(c))
 
-The N=18 cProfile under the kernel-active path shifts the dominant
-share to **pynauty + the canonical-augmentation parent test**:
+The N=22 cProfile under the kernel-active path is now dominated by
+nauty's own C algorithm:
 
 ```
-is_canonical_augmentation chain ............... 94% of wall
-  cached_canon_info  (pynauty.autgrp + canon_label) .. 66%
-  bipartite_graph encoding ........................... 20%
-  _in_aut_orbit_of_subspace BFS ...................... 19%
-doubly_even_candidates (kernel call) ........... 4.6%
+canon_info_native (nauty C core) .............. ~52% of wall
+codewords()/weight_enum chain (cacheable, T4) ~6-10%
+_compute_rref ................................. ~8%
+apply_permutation ............................. ~5%
+doubly_even_candidates_q (Q-pipeline FFI) ..... ~4%
 ```
 
-This makes the 5(c) targets data-driven:
+Beyond Milestone 5, the levers are:
 
-1. **Replace pynauty for our bipartite encoding** (`canon_info_fast` in
-   the kernel) — directly attacks the 66% slice. The biggest single win
-   available, but a big surface; estimate ~1 KLOC in Rust plus a custom
-   bipartite-graph canonicaliser.
-2. **Port `_in_aut_orbit_of_subspace`** — straightforward Rust port of
-   the column-permutation orbit BFS, eats the 19% slice.
-3. **Reduce per-parent marshalling** (the FFI overhead on the Q-pipeline
-   side is now visible) — pass `Code` as a frozen handle that lives on
-   the Rust side across multiple stages, or batch siblings.
+1. **Custom canonicaliser** in Rust (no nauty) — the only single port
+   that breaks the ~52% nauty ceiling. ~1-2 KLOC; oracle is
+   `pynauty.autgrp`/`canon_label` on every existing test case. Risk
+   concentrates on high-symmetry codes (which dominate at large N).
+2. **Length induction** (`(N, k) → (N+1, k|k+1)`, Bouyukliev style) —
+   structural restructure of the recursion. Different mass-formula
+   shape; one enumeration produces results across `N`. Larger surface
+   than canon, naturally the Milestone 6.
+3. **Sibling/cousin sharing** within `(N, k)` — cache `Q_basis` and
+   σ_Q tables across parents with isomorphic `Q_C`; cache
+   `_in_aut_orbit_of_subspace` BFS state across cousins. Plausibly
+   1.5-3× at large `N`, needs A/B measurement.
+4. **Mass-formula early pruning** — current pruning is *late*
+   (`augment.py:235-245`); predictive pruning at level `k` would need
+   a combinatorial bound on per-parent contribution.
 
-`scripts/bench-results/*.json` is the audit trail; compare to
-`20260516T125916Z-kernel-5b.json` for the 5(b) baseline.
+`scripts/bench-results/*.json` is the audit trail; compare
+`20260516T125916Z-kernel-5b.json` (5(b) baseline) →
+`20260516T141532Z-weight-enum-cache.json` (post-5(c) tip) for the
+session's wall-time arc.
