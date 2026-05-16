@@ -1,0 +1,199 @@
+"""Canonical augmentation for doubly even codes.
+
+Implements McKay's 1998 canonical-augmentation algorithm specialised to the
+problem of doubly even binary linear codes (DFGHILM Appendix B.4).
+
+Recursion shape::
+
+    enumerate(N):
+        traverse(zero_code(N))
+
+    traverse(C):
+        yield C
+        for v in candidates(C):                # filters.doubly_even_candidates
+            D = ⟨C, v⟩
+            if not is_canonical_augmentation(C, D):
+                continue
+            traverse(D)
+
+Where ``is_canonical_augmentation(C, D)`` is the McKay parent test: compute
+the canonical *parent* ``p(D)`` of ``D`` by
+
+1. applying the canonical column permutation of ``D`` (from nauty) to its
+   basis;
+2. taking the RREF of the result and dropping the last row (a fixed
+   choice of canonical generator);
+3. mapping back to the original column ordering.
+
+Then ``(C, D)`` is canonical iff ``C`` lies in the ``Aut(D)``-orbit of
+``p(D)``. Because both ``C`` and ``p(D)`` are ``(rank D − 1)``-dimensional
+subcodes of ``D``, this orbit has at most ``2^{rank D} − 1`` elements; BFS
+through the orbit is cheap.
+
+The driver :func:`enumerate_doubly_even` yields one canonical
+representative per permutation-equivalence class. The default ordering of
+yields is the depth-first order induced by sorted candidate cosets — this
+is stable across runs and useful for debugging.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+
+from ..canon.nauty import CanonInfo, canon_info
+from ..spec.codes import Code
+from ..spec.vectors import apply_permutation
+from .filters import doubly_even_candidates
+
+
+# ----------------------------------------------------------- canonical parent
+
+
+def canonical_parent(D: Code, info_D: CanonInfo | None = None) -> Code:
+    """Return ``p(D)`` — the canonical parent of ``D`` in the McKay sense.
+
+    Algorithm: apply ``D``'s canonical column permutation, RREF the result,
+    drop the last RREF row, then undo the column permutation. The output
+    is a ``(rank D − 1)``-dimensional subspace of ``F_2^N``.
+
+    ``info_D`` may be passed if it has already been computed (it usually
+    has, by the caller of :func:`is_canonical_augmentation`).
+    """
+    if D.rank == 0:
+        raise ValueError("canonical_parent undefined for the zero code")
+    if info_D is None:
+        info_D = canon_info(D)
+
+    sigma = list(info_D.canonical_column_order)
+    permuted_basis = tuple(apply_permutation(b, sigma) for b in D.basis)
+    permuted = Code(D.n, permuted_basis)
+
+    rref_rows, _ = permuted.rref_basis()
+    if len(rref_rows) != D.rank:
+        raise RuntimeError(
+            "canonical_parent: RREF rank mismatch with code rank"
+        )
+    parent_in_canon = rref_rows[:-1]
+
+    inv_sigma = [0] * D.n
+    for i, j in enumerate(sigma):
+        inv_sigma[j] = i
+    parent_basis = tuple(
+        apply_permutation(b, inv_sigma) for b in parent_in_canon
+    )
+    return Code(n=D.n, basis=parent_basis)
+
+
+# --------------------------------------------------- canonical augmentation
+
+
+def _subspace_key(C: Code) -> tuple[int, ...]:
+    """Stable subspace identifier: the RREF basis as a tuple."""
+    return C.rref_basis()[0]
+
+
+def is_canonical_augmentation(
+    C: Code, D: Code, info_D: CanonInfo | None = None
+) -> bool:
+    """Return True iff ``(C, D)`` is McKay-canonical.
+
+    ``C`` must be a subcode of ``D`` of one less dimension; we do not
+    verify that here, callers are responsible.
+    """
+    if info_D is None:
+        info_D = canon_info(D)
+    p_D = canonical_parent(D, info_D)
+    return _in_aut_orbit_of_subspace(C, p_D, info_D.aut_generators, D.n)
+
+
+def _in_aut_orbit_of_subspace(
+    C: Code,
+    target: Code,
+    aut_generators: Iterable[tuple[int, ...]],
+    n: int,
+) -> bool:
+    """Test whether some element of ``⟨aut_generators⟩`` maps ``C`` to ``target``.
+
+    BFS through the orbit of ``C``. Since both ``C`` and ``target`` are
+    subspaces of fixed dimension in ``F_2^n``, the action is via the
+    induced map on subspaces and the orbit has size at most ``2^{rank C}``.
+    """
+    target_key = _subspace_key(target)
+    start_key = _subspace_key(C)
+    if start_key == target_key:
+        return True
+    aut_gens = [tuple(g) for g in aut_generators]
+    if not aut_gens:
+        return False
+
+    seen = {start_key}
+    queue: list[Code] = [C]
+    while queue:
+        next_queue: list[Code] = []
+        for current in queue:
+            for sigma in aut_gens:
+                sigma_list = list(sigma)
+                new_basis = tuple(
+                    apply_permutation(b, sigma_list) for b in current.basis
+                )
+                new_code = Code(n=n, basis=new_basis)
+                key = _subspace_key(new_code)
+                if key == target_key:
+                    return True
+                if key in seen:
+                    continue
+                seen.add(key)
+                next_queue.append(new_code)
+        queue = next_queue
+    return False
+
+
+# ------------------------------------------------------------------ driver
+
+
+@dataclass(frozen=True)
+class EnumeratedCode:
+    """One canonical representative produced by :func:`enumerate_doubly_even`.
+
+    Carries the code itself plus the cached ``CanonInfo``, so callers who
+    want the automorphism order or canonical column ordering don't have to
+    recompute it.
+    """
+
+    code: Code
+    info: CanonInfo
+
+    @property
+    def aut_order(self) -> int:
+        return self.info.aut_order
+
+
+def enumerate_doubly_even(N: int, max_k: int | None = None) -> Iterator[EnumeratedCode]:
+    """Yield one canonical representative per equivalence class of doubly even
+    binary codes ``[N, k]``, for ``k = 0, 1, …, max_k`` (default: until the
+    augmentation tree dies, i.e. ``k = ⌊N / 2⌋`` for self-orthogonal codes).
+
+    Yields in depth-first canonical-augmentation order.
+    """
+    cap = N // 2 if max_k is None else max_k
+    yield from _traverse(Code.zero(N), cap)
+
+
+def _traverse(C: Code, max_k: int) -> Iterator[EnumeratedCode]:
+    info_C = canon_info(C)
+    yield EnumeratedCode(code=C, info=info_C)
+    if C.rank >= max_k:
+        return
+    for v in doubly_even_candidates(C, info_C.aut_generators):
+        D = C.extend(v)
+        if not is_canonical_augmentation(C, D):
+            continue
+        yield from _traverse(D, max_k)
+
+
+def enumerate_doubly_even_at(N: int, k: int) -> Iterator[EnumeratedCode]:
+    """Yield only the dimension-``k`` slice of :func:`enumerate_doubly_even`."""
+    for ec in enumerate_doubly_even(N, max_k=k):
+        if ec.code.rank == k:
+            yield ec
