@@ -67,23 +67,32 @@ class BipartiteEncoding:
 
 
 def bipartite_graph(C: Code) -> BipartiteEncoding:
-    """Build ``G(C)``, the bipartite codeword/column graph of ``C``."""
+    """Build ``G(C)``, the bipartite codeword/column graph of ``C``.
+
+    The adjacency dictionary is built in Python and passed in a single call
+    to :class:`pynauty.Graph`, which is significantly faster for large
+    codes than calling :meth:`pynauty.Graph.connect_vertex` once per left
+    vertex (the latter crosses the Python/C boundary per call).
+    """
     codewords = tuple(C.codewords())  # length 2^rank, all distinct
     L = len(codewords)
     R = C.n
     total = L + R
 
-    # Two-block colouring forces automorphisms to respect the bipartition.
-    vertex_coloring = [set(range(L)), set(range(L, total))]
-    g = pynauty.Graph(total, vertex_coloring=vertex_coloring)
-
+    adjacency: dict[int, list[int]] = {}
     for i, w in enumerate(codewords):
         # Neighbours on the right side: column j iff bit j of w is set.
-        neighbours = []
-        for j in range(R):
-            if (w >> j) & 1:
-                neighbours.append(L + j)
+        neighbours = [L + j for j in range(R) if (w >> j) & 1]
         if neighbours:
-            g.connect_vertex(i, neighbours)
+            adjacency[i] = neighbours
+
+    # Two-block colouring forces automorphisms to respect the bipartition.
+    vertex_coloring = [set(range(L)), set(range(L, total))]
+    g = pynauty.Graph(
+        number_of_vertices=total,
+        directed=False,
+        adjacency_dict=adjacency,
+        vertex_coloring=vertex_coloring,
+    )
 
     return BipartiteEncoding(graph=g, codewords=codewords, L=L, R=R)
