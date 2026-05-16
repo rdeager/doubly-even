@@ -3,9 +3,83 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Iterator
 
 from .vectors import BinVec, dot
+
+
+@lru_cache(maxsize=None)
+def _compute_rref(
+    n: int, basis: tuple[BinVec, ...]
+) -> tuple[tuple[BinVec, ...], tuple[int, ...]]:
+    """Module-level cached RREF. Pure function of ``(n, basis)``.
+
+    Key shape matches :func:`doubly_even.canon.nauty._canon_info_by_rref`,
+    so two ``Code`` instances representing the same subspace via different
+    bases will hit different entries here, but a second access through the
+    same instance is free.
+    """
+    rows = list(basis)
+    pivots: list[int] = []
+    r = 0
+    for c in range(n):
+        pivot = -1
+        for i in range(r, len(rows)):
+            if (rows[i] >> c) & 1:
+                pivot = i
+                break
+        if pivot == -1:
+            continue
+        rows[r], rows[pivot] = rows[pivot], rows[r]
+        for i in range(len(rows)):
+            if i != r and (rows[i] >> c) & 1:
+                rows[i] ^= rows[r]
+        pivots.append(c)
+        r += 1
+    return tuple(rows[:r]), tuple(pivots)
+
+
+def rref_cache_clear() -> None:
+    """Drop every entry from the :func:`_compute_rref` cache."""
+    _compute_rref.cache_clear()
+
+
+def rref_cache_info():
+    """Return ``functools.lru_cache.cache_info()`` for inspection."""
+    return _compute_rref.cache_info()
+
+
+@lru_cache(maxsize=None)
+def _compute_dual_basis(
+    n: int, rref: tuple[BinVec, ...], pivots: tuple[int, ...]
+) -> tuple[BinVec, ...]:
+    """Module-level cached dual basis, keyed by the subspace identifier
+    ``(n, rref, pivots)``.
+
+    Two ``Code`` instances representing the same subspace via different
+    bases collide on the same RREF and hit the same entry.
+    """
+    pivot_set = set(pivots)
+    free_cols = [c for c in range(n) if c not in pivot_set]
+    dual_basis: list[BinVec] = []
+    for j in free_cols:
+        v = 1 << j
+        for row, p in zip(rref, pivots):
+            if (row >> j) & 1:
+                v |= 1 << p
+        dual_basis.append(v)
+    return tuple(dual_basis)
+
+
+def dual_cache_clear() -> None:
+    """Drop every entry from the :func:`_compute_dual_basis` cache."""
+    _compute_dual_basis.cache_clear()
+
+
+def dual_cache_info():
+    """Return ``functools.lru_cache.cache_info()`` for inspection."""
+    return _compute_dual_basis.cache_info()
 
 
 @dataclass(frozen=True)
@@ -56,27 +130,10 @@ class Code:
         rowspace; its length is the code's rank. ``pivot_columns`` lists the
         leading-1 column for each row in order.
 
-        Process columns left to right (LSB to MSB). The reduction is over GF(2),
-        so subtraction is XOR.
+        Memoised at module level via :func:`_compute_rref` (frozen ``Code``
+        means the result is a pure function of ``(n, basis)``).
         """
-        rows = list(self.basis)
-        pivots: list[int] = []
-        r = 0
-        for c in range(self.n):
-            pivot = -1
-            for i in range(r, len(rows)):
-                if (rows[i] >> c) & 1:
-                    pivot = i
-                    break
-            if pivot == -1:
-                continue
-            rows[r], rows[pivot] = rows[pivot], rows[r]
-            for i in range(len(rows)):
-                if i != r and (rows[i] >> c) & 1:
-                    rows[i] ^= rows[r]
-            pivots.append(c)
-            r += 1
-        return tuple(rows[:r]), tuple(pivots)
+        return _compute_rref(self.n, self.basis)
 
     @property
     def rank(self) -> int:
@@ -122,18 +179,11 @@ class Code:
         ``v_j`` with bit ``j`` set and, for each ``i``, bit ``P[i]`` set iff
         the RREF row ``i`` has bit ``j`` set. Then ``{v_j : j ∈ Q}`` is a
         basis of ``C⊥``.
+
+        Memoised at module level via :func:`_compute_dual_basis`.
         """
         rows, pivots = self.rref_basis()
-        pivot_set = set(pivots)
-        free_cols = [c for c in range(self.n) if c not in pivot_set]
-        dual_basis: list[BinVec] = []
-        for j in free_cols:
-            v = 1 << j
-            for row, p in zip(rows, pivots):
-                if (row >> j) & 1:
-                    v |= 1 << p
-            dual_basis.append(v)
-        return Code(n=self.n, basis=tuple(dual_basis))
+        return Code(n=self.n, basis=_compute_dual_basis(self.n, rows, pivots))
 
     # ----------------------------------------------------------- augmentation
 

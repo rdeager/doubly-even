@@ -41,6 +41,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from doubly_even.canon.nauty import canon_info_cache_clear  # noqa: E402
 from doubly_even.enumerate.augment import enumerate_doubly_even  # noqa: E402
+from doubly_even.spec.codes import dual_cache_clear, rref_cache_clear  # noqa: E402
 
 
 # DFGHILM Appendix B Table 3 — number of permutation-equivalence classes
@@ -93,6 +94,8 @@ def run_one(N: int) -> PerNResult:
     # populated during earlier N's. (No cross-N hits in practice since the
     # key includes ``n``, but this is defensive and makes runs comparable.)
     canon_info_cache_clear()
+    rref_cache_clear()
+    dual_cache_clear()
     t0 = time.perf_counter()
     for ec in enumerate_doubly_even(N):
         k = ec.code.rank

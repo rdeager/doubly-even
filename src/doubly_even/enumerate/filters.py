@@ -236,12 +236,14 @@ def doubly_even_candidates(
     if _kernel is not None:
         rref, pivots = C.rref_basis()
         dual_basis = C.dual().basis
+        # PyO3 converts iterables (tuples included) into Vec<T> directly;
+        # pass tuples through as-is to avoid the per-call list rebuild.
         return _kernel.doubly_even_candidates_q(
             C.n,
-            list(rref),
-            list(pivots),
-            list(dual_basis),
-            [list(g) for g in aut_generators],
+            rref,
+            pivots,
+            dual_basis,
+            aut_generators,
         )
 
     from .quotient import doubly_even_candidates_Q

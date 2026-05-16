@@ -43,7 +43,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 from ..canon.nauty import CanonInfo, cached_canon_info
-from ..spec.codes import Code
+from ..spec.codes import Code, _compute_rref
 from ..spec.mass import gaborit_sigma
 from ..spec.vectors import apply_permutation
 from .filters import doubly_even_candidates
@@ -152,10 +152,9 @@ def _in_aut_orbit_of_subspace(
         return False
 
     seen = {start_key}
-    # Queue holds the basis tuples we still need to expand; we keep the
-    # current ``Code`` around only long enough to grab its RREF, since
-    # successive iterations would otherwise materialise duplicate
-    # ``Code`` objects per visited subspace.
+    # Queue holds RREF basis tuples (subspace identifiers). Going through
+    # ``_compute_rref`` directly skips the ``Code`` wrapper churn and lets
+    # repeated sibling expansions hit the module-level RREF cache.
     queue: list[tuple[int, ...]] = [start_key]
     while queue:
         next_queue: list[tuple[int, ...]] = []
@@ -164,7 +163,7 @@ def _in_aut_orbit_of_subspace(
                 new_basis = tuple(
                     apply_permutation(b, sigma_list) for b in current_basis
                 )
-                key = Code(n=n, basis=new_basis).rref_basis()[0]
+                key, _ = _compute_rref(n, new_basis)
                 if key == target_key:
                     return True
                 if key in seen:
