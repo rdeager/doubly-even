@@ -31,13 +31,20 @@ canon/       wraps pynauty for canonical labels + Aut(C)
   nauty.py       canon_info, canonical_form, are_equivalent
   permutations.py hand-rolled Schreier-Sims for exact |Aut| (pynauty
                   returns a float that loses precision past ~2^53)
+  matrix_group.py Schreier-Sims on GL(L, F_2) — phase-(b)
+                  scaffolding; reached only via the witt orbit path
 
 enumerate/   the canonical-augmentation search
   filters.py     coset reps in C-perp/C, weight-mod-4, Aut(C)-orbit-min
                   (now-oracle paths kept for cross-checks; entry point
                   doubly_even_candidates delegates to quotient.py)
   quotient.py    Q_C-coordinate orbit-min with σ_Q lookup tables
-                  (Milestone 4 phase (a); the hot path)
+                  (Milestone 4 phase (a); the hot path).
+                  aut_orbit_minima_Q_witt is the phase-(b) alternative
+                  (no σ_Q table build); reachable but dispatch defaults
+                  to phase (a) — see D7 in 04-optimisations.md.
+  witt.py        closed-form Witt-type counts; singular_vectors is a
+                  thin alias of singular_reps_Q (phase (b) stub)
   augment.py     canonical_parent(D); is_canonical_augmentation;
                   enumerate_doubly_even(N) -> EnumeratedCode iter
 ```
@@ -85,12 +92,15 @@ Three independent checks the test suite relies on:
   minimum-distance filter.
 - Performance after Milestone 4 phase (a): ≈ 14 s at `N = 20` (down
   from 235 s baseline, 17× cumulative speedup) and ≈ 152 s at
-  `N = 22` (down from the pre-D6 `> 10 min` wall). `N = 24` is now
-  reachable in pure Python but expensive; phases (b) and (c) of
-  `/workspace/markdown/notes/quotient-orbit-augmentation-plan.md`
-  are the remaining algorithmic levers before the C++/Rust kernel
-  session. See `/workspace/markdown/architecture/04-optimisations.md`
-  D6 for the per-step breakdown.
+  `N = 22` (down from the pre-D6 `> 10 min` wall). Phase (b)'s
+  Witt-structured orbit enumeration was built and tested (see D7)
+  but does not beat phase (a) in pure Python — the table-based BFS
+  step is faster per element than the structural alternative, even
+  after eliminating the `2^L` table build. Infrastructure is kept
+  for the C/Rust kernel session, where per-step cost drops far enough
+  that the witt path's structural advantage flips back to a win.
+  Phase (c)'s cheap-invariant prefilter (the next pure-Python lever)
+  is still open.
 
 ## Recent algorithmic + representation wins (Python sessions, post-Phase 3)
 

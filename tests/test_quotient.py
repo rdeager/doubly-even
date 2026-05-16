@@ -23,6 +23,7 @@ from doubly_even.enumerate.quotient import (
     Q_basis,
     aut_image_on_Q,
     aut_orbit_minima_Q,
+    aut_orbit_minima_Q_witt,
     doubly_even_candidates_Q,
     lift,
     project,
@@ -222,20 +223,33 @@ def _orbit_of_coset(start: int, gens: list[tuple[int, ...]], C: Code) -> set[int
     return seen
 
 
-def test_orbit_min_Q_partitions_match_oracle():
+@pytest.mark.parametrize("pipeline", ["table", "witt"])
+def test_orbit_min_Q_partitions_match_oracle(pipeline: str):
     """The set of orbit-min reps in Q coords (lifted) partitions the cosets
-    into the same orbits as the F_2^N pipeline."""
+    into the same orbits as the F_2^N pipeline.
+
+    Parametrised over the two Q-coord orbit-min implementations:
+
+    * ``"table"``: phase-(a) :func:`aut_orbit_minima_Q` (σ_Q lookup tables).
+    * ``"witt"``: phase-(b) :func:`aut_orbit_minima_Q_witt` (direct
+      ``mat_apply``, no ``2^L`` table build).
+
+    Both must produce the same orbit partition over the F_2^N oracle
+    orbits.
+    """
     for N in CROSS_CHECK_NS:
         for C, gens in _all_parents(N):
             V_basis, pivots_V = Q_basis(C)
             sigma_Qs = aut_image_on_Q(gens, C, V_basis, pivots_V)
             L = len(V_basis)
 
-            # New: Q-coord orbit-min, lifted to F_2^N reps.
-            new_reps_lift = {
-                lift(u, V_basis)
-                for u in aut_orbit_minima_Q(range(1, 1 << L), sigma_Qs)
-            }
+            if pipeline == "table":
+                orbit_min = aut_orbit_minima_Q(range(1, 1 << L), sigma_Qs)
+            else:
+                orbit_min = aut_orbit_minima_Q_witt(
+                    sigma_Qs, range(1, 1 << L), L
+                )
+            new_reps_lift = {lift(u, V_basis) for u in orbit_min}
 
             # Oracle: collect every orbit in F_2^N space and check both
             # pipelines produce one rep per orbit, with the same orbit
@@ -255,14 +269,16 @@ def test_orbit_min_Q_partitions_match_oracle():
             for orbit in oracle_orbits:
                 hits = orbit & new_reps_lift
                 assert len(hits) == 1, (
-                    f"orbit at N={N}, C={list(C.basis)} has {len(hits)} reps "
-                    f"in new pipeline (expected 1); orbit size={len(orbit)}"
+                    f"orbit at N={N}, C={list(C.basis)} ({pipeline}) has "
+                    f"{len(hits)} reps in new pipeline (expected 1); "
+                    f"orbit size={len(orbit)}"
                 )
 
             # And every new rep must lie in some orbit.
             union = set().union(*oracle_orbits) if oracle_orbits else set()
             assert new_reps_lift <= union, (
-                f"new pipeline produced a rep outside any oracle orbit"
+                f"new pipeline ({pipeline}) produced a rep outside any "
+                f"oracle orbit"
             )
 
 
