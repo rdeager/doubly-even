@@ -106,6 +106,23 @@ DFGHILM_TABLE_3: dict[tuple[int, int], int] = {
     (10, 1): 2, (10, 2): 3, (10, 3): 3, (10, 4): 2,
     (11, 1): 2, (11, 2): 3, (11, 3): 4, (11, 4): 3,
     (12, 1): 3, (12, 2): 5, (12, 3): 7, (12, 4): 7, (12, 5): 2,
+    (13, 1): 3, (13, 2): 5, (13, 3): 8, (13, 4): 8, (13, 5): 4,
+    (14, 1): 3, (14, 2): 7, (14, 3): 12, (14, 4): 14, (14, 5): 9,
+    (14, 6): 4,
+    (15, 1): 3, (15, 2): 7, (15, 3): 15, (15, 4): 20, (15, 5): 15,
+    (15, 6): 8, (15, 7): 2,
+    (16, 1): 4, (16, 2): 10, (16, 3): 23, (16, 4): 38, (16, 5): 36,
+    (16, 6): 23, (16, 7): 9, (16, 8): 2,
+}
+
+
+# Cells we have verified manually but mark "slow" so they are skipped by
+# default in the test suite. Run with ``pytest --run-slow`` to enable.
+DFGHILM_TABLE_3_SLOW: dict[tuple[int, int], int] = {
+    (17, 1): 4, (17, 2): 10, (17, 3): 25, (17, 4): 45, (17, 5): 50,
+    (17, 6): 34, (17, 7): 14, (17, 8): 3,
+    (18, 1): 4, (18, 2): 13, (18, 3): 34, (18, 4): 72, (18, 5): 94,
+    (18, 6): 79, (18, 7): 35, (18, 8): 9,
 }
 
 
@@ -114,6 +131,19 @@ DFGHILM_TABLE_3: dict[tuple[int, int], int] = {
 )
 def test_matches_dfghilm_table_3(Nk, expected):
     """Cross-check against DFGHILM Appendix B Table 3."""
+    N, k = Nk
+    classes = sum(1 for _ in enumerate_doubly_even_at(N, k))
+    assert classes == expected, (
+        f"N={N}, k={k}: enumerator={classes}, DFGHILM Table 3={expected}"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "Nk, expected", sorted(DFGHILM_TABLE_3_SLOW.items())
+)
+def test_matches_dfghilm_table_3_slow(Nk, expected):
+    """Slow Table 3 cells (N >= 17). Run with `pytest --run-slow`."""
     N, k = Nk
     classes = sum(1 for _ in enumerate_doubly_even_at(N, k))
     assert classes == expected, (
