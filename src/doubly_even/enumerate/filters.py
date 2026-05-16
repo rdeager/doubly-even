@@ -201,6 +201,12 @@ def _is_orbit_min(
     return True
 
 
+try:  # pragma: no cover -- import-side switch
+    import doubly_even_kernel as _kernel
+except ImportError:  # pragma: no cover
+    _kernel = None
+
+
 def doubly_even_candidates(
     C: Code, aut_generators: Iterable[tuple[int, ...]]
 ) -> list[int]:
@@ -209,8 +215,15 @@ def doubly_even_candidates(
     Returns a sorted list so callers that don't care about determinism
     don't have to think about it.
 
-    Delegates to :func:`doubly_even.enumerate.quotient.doubly_even_candidates_Q`,
-    which runs the orbit-min BFS in ``Q_C := C⊥/C`` coordinates
+    Dispatch:
+
+    * If ``doubly_even_kernel`` is importable (Rust extension built via
+      ``maturin develop``), the call marshals ``C`` and ``aut_generators``
+      across the FFI and runs the whole `Q_C`-pipeline natively.
+    * Otherwise falls back to
+      :func:`doubly_even.enumerate.quotient.doubly_even_candidates_Q`.
+
+    The Python path runs the orbit-min BFS in ``Q_C := C⊥/C`` coordinates
     (``L = n - 2k`` bits per element, no per-step reduce-mod-C). The
     return type and call convention match the previous ``F_2^N``-bit
     pipeline; ``F_2^N`` reps are produced by lifting orbit-min
@@ -220,6 +233,17 @@ def doubly_even_candidates(
     weight_mod_four_zero → aut_orbit_minima``) is preserved verbatim
     in this module as an oracle for cross-check tests.
     """
+    if _kernel is not None:
+        rref, pivots = C.rref_basis()
+        dual_basis = C.dual().basis
+        return _kernel.doubly_even_candidates_q(
+            C.n,
+            list(rref),
+            list(pivots),
+            list(dual_basis),
+            [list(g) for g in aut_generators],
+        )
+
     from .quotient import doubly_even_candidates_Q
 
     return doubly_even_candidates_Q(C, aut_generators)

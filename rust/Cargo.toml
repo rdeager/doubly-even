@@ -12,6 +12,14 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }
+fixedbitset = "0.5"
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["plotters", "cargo_bench_support"] }
+
+[[bench]]
+name = "candidates"
+harness = false
 
 [profile.release]
 lto = "thin"
