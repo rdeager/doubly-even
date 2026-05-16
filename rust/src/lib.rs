@@ -196,6 +196,23 @@ fn py_canon_info_feulner_native(
     ))
 }
 
+/// Feulner-style canonicaliser — returns (leaves_visited, prunes_fired)
+/// for diagnostics (Phase A).
+#[pyfunction]
+#[pyo3(name = "canon_info_feulner_counters")]
+fn py_canon_info_feulner_counters(
+    rref: Vec<BinVec>,
+    n: u32,
+) -> PyResult<(u64, u64)> {
+    if n > types::MAX_N {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "n = {n} exceeds MAX_N = {}", types::MAX_N,
+        )));
+    }
+    let info = feulner::canon_info_feulner(&rref, n);
+    Ok((info.leaves, info.prunes))
+}
+
 // ------------------------------------------------------ module assembly
 
 #[pymodule]
@@ -217,6 +234,7 @@ fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     debug.add_function(wrap_pyfunction!(py_sigma_q_table, &debug)?)?;
     debug.add_function(wrap_pyfunction!(py_aut_orbit_minima_q_table, &debug)?)?;
     debug.add_function(wrap_pyfunction!(py_aut_orbit_minima_q_witt, &debug)?)?;
+    debug.add_function(wrap_pyfunction!(py_canon_info_feulner_counters, &debug)?)?;
     m.add_submodule(&debug)?;
     Ok(())
 }

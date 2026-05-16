@@ -41,7 +41,6 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from ..spec.codes import Code
-from ..spec.vectors import apply_permutation
 from .nauty import CanonInfo
 from .permutations import Perm, compose, group_order, inverse
 
@@ -77,10 +76,14 @@ class _SearchState:
     """Mutable state carried through the recursive search."""
 
     n: int
-    rref_to_pi: dict[tuple[int, ...], Perm] = field(default_factory=dict)
-    best_rref: tuple[int, ...] | None = None
+    k: int
+    key_to_pi: dict[tuple[int, ...], Perm] = field(default_factory=dict)
+    best_key: tuple[int, ...] | None = None
     aut_gens: list[Perm] = field(default_factory=list)
     _seen_gens: set[Perm] = field(default_factory=set)
+    # Counters (Phase A diagnostic; tiny overhead, kept for Phase B tuning).
+    leaves_visited: int = 0
+    prune_fires: int = 0
 
     def push_aut(self, g: Perm) -> None:
         """Dedupe before pushing — a leaf that matches the canonical
@@ -91,6 +94,70 @@ class _SearchState:
             return
         self._seen_gens.add(g)
         self.aut_gens.append(g)
+
+
+@dataclass
+class _PartialKey:
+    """Incremental canonical-form key threaded through the search.
+
+    Encodes Sage's lex-from-low column trace: at each singleton emission
+    we Gaussian-eliminate that column to a unit vector and **swap the
+    pivot row to position `depth`** so the column trace is invariant
+    under the inner group `GL_k(F_2)` (i.e. independent of which
+    original row happened to be the pivot). The key is compared
+    **lex-from-low** (entry 0 most significant), so partial information
+    at depth `d` sits in the most-significant prefix and the prefix
+    prune is structurally strong.
+
+    Invariant: rows `0..depth-1` of `work` are pivot rows in pivot
+    order; rows `depth..k-1` are uncovered. For an absorbed pivot column
+    `c` the post-swap layout has bit `c` set exactly in row `depth-1`
+    (the just-placed pivot), so its key entry is `1 << (k-1-(depth-1))`.
+    For a non-pivot column, bits are confined to rows `0..depth-1`.
+
+    Recursive descents receive a fresh copy via `copy()`, so the
+    caller's state survives backtrack without explicit restore.
+    """
+
+    k: int
+    work: list[int]
+    depth: int = 0  # rows 0..depth-1 are pivot rows in pivot order
+    key: list[int] = field(default_factory=list)
+    absorbed_cols: int = 0  # bitmask: bit c set iff col c is absorbed
+
+    def copy(self) -> "_PartialKey":
+        return _PartialKey(
+            k=self.k,
+            work=list(self.work),
+            depth=self.depth,
+            key=list(self.key),
+            absorbed_cols=self.absorbed_cols,
+        )
+
+    def absorb(self, c: int) -> None:
+        """Absorb column `c`: pivot-swap + Gaussian elim + append to key."""
+        pivot = -1
+        for r in range(self.depth, self.k):
+            if (self.work[r] >> c) & 1:
+                pivot = r
+                break
+        if pivot >= 0:
+            if pivot != self.depth:
+                self.work[self.depth], self.work[pivot] = (
+                    self.work[pivot],
+                    self.work[self.depth],
+                )
+            pivot_val = self.work[self.depth]
+            for r in range(self.k):
+                if r != self.depth and (self.work[r] >> c) & 1:
+                    self.work[r] ^= pivot_val
+            self.depth += 1
+        col_bits = 0
+        for r in range(self.k):
+            if (self.work[r] >> c) & 1:
+                col_bits |= 1 << (self.k - 1 - r)
+        self.key.append(col_bits)
+        self.absorbed_cols |= 1 << c
 
 
 def canon_info_feulner(C: Code) -> CanonInfo:
@@ -110,13 +177,16 @@ def canon_info_feulner(C: Code) -> CanonInfo:
         return _sn_canon_info(n)
 
     refiners = _invariant_refiners(rref, k)
-    state = _SearchState(n=n)
-    _search(_initial_partition(rref, n), rref, refiners, state, path=())
+    state = _SearchState(n=n, k=k)
+    partial = _PartialKey(k=k, work=list(rref))
+    _search(
+        _initial_partition(rref, n), rref, refiners, state, path=(), partial=partial
+    )
 
     aut_gens = tuple(state.aut_gens)
     aut_order = group_order(aut_gens, n) if aut_gens else 1
-    assert state.best_rref is not None
-    transporter = state.rref_to_pi[state.best_rref]
+    assert state.best_key is not None
+    transporter = state.key_to_pi[state.best_key]
     column_orbits = _column_orbits(aut_gens, n)
 
     return CanonInfo(
@@ -259,60 +329,68 @@ def _individualise(
     return P[:cell_idx] + new_cells + P[cell_idx + 1 :]
 
 
-def _rref(rows: list[int], n: int) -> tuple[int, ...]:
-    """Row-reduce in place, return the nonzero rows as a tuple.
-
-    A local copy of the RREF kernel from `spec.codes` — we use a local
-    routine here instead of the module-level lru-cached one because the
-    permuted bases we feed are almost always unique (would pollute the
-    cache with one-shot entries).
-    """
-    pivots = 0
-    r = 0
-    for c in range(n):
-        pivot = -1
-        for i in range(r, len(rows)):
-            if (rows[i] >> c) & 1:
-                pivot = i
-                break
-        if pivot == -1:
-            continue
-        rows[r], rows[pivot] = rows[pivot], rows[r]
-        for i in range(len(rows)):
-            if i != r and (rows[i] >> c) & 1:
-                rows[i] ^= rows[r]
-        pivots += 1
-        r += 1
-    return tuple(rows[:pivots])
-
-
 def _search(
     P: list[list[int]],
     G: tuple[int, ...],
     refiners: list[int],
     state: _SearchState,
     path: tuple[int, ...],
+    partial: _PartialKey,
 ) -> None:
+    """One node of the McKay search.
+
+    Refines `P`, absorbs any new singletons into `partial.key` in cell
+    order, then checks the lex-from-low prefix against `state.best_key`.
+    If the partial key strictly exceeds the best's prefix, prune. If `P`
+    is fully discrete after absorption, this is a leaf: insert the
+    permutation into `key_to_pi` or extract an aut from a prior leaf
+    with the same key. Otherwise individualise from the first
+    non-trivial cell, refreshing `orbit_rep` between siblings.
+    """
     P = _refine(P, refiners)
 
+    # Absorb every singleton not yet in the key, in the order they appear
+    # in the refined partition. Check the prefix prune after each
+    # absorption to fail fast.
+    for cell in P:
+        if len(cell) == 1:
+            c = cell[0]
+            if not (partial.absorbed_cols >> c) & 1:
+                partial.absorb(c)
+                bk = state.best_key
+                if bk is not None:
+                    d = len(partial.key)
+                    if d <= len(bk):
+                        prefix = bk[:d]
+                        # partial.key is a list; compare to a tuple-slice
+                        # via list(tuple(...)) round-trip to use tuple lex.
+                        # Equivalent and faster: compare elementwise.
+                        for i in range(d):
+                            a = partial.key[i]
+                            b = prefix[i]
+                            if a < b:
+                                break  # winning; full key will be < best
+                            if a > b:
+                                state.prune_fires += 1
+                                return
+
     if all(len(cell) == 1 for cell in P):
+        state.leaves_visited += 1
         pi_list = [0] * state.n
         for new_pos, cell in enumerate(P):
             pi_list[cell[0]] = new_pos
         pi: Perm = tuple(pi_list)
+        key_tuple = tuple(partial.key)
 
-        permuted = [apply_permutation(g, pi_list) for g in G]
-        rref_tuple = _rref(permuted, state.n)
-
-        prior = state.rref_to_pi.get(rref_tuple)
+        prior = state.key_to_pi.get(key_tuple)
         if prior is not None:
-            # Two leaves with the same canonical RREF ⇒ pi · prior^-1 ∈ Aut.
+            # Two leaves with the same canonical key ⇒ pi · prior^-1 ∈ Aut.
             # In our convention this is compose(inverse(prior), pi).
             state.push_aut(compose(inverse(prior), pi))
         else:
-            state.rref_to_pi[rref_tuple] = pi
-            if state.best_rref is None or rref_tuple < state.best_rref:
-                state.best_rref = rref_tuple
+            state.key_to_pi[key_tuple] = pi
+            if state.best_key is None or key_tuple < state.best_key:
+                state.best_key = key_tuple
         return
 
     cell_idx = next(i for i, c in enumerate(P) if len(c) > 1)
@@ -345,6 +423,7 @@ def _search(
             refiners,
             state,
             path + (col,),
+            partial.copy(),
         )
 
 
