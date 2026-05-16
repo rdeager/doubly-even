@@ -242,9 +242,12 @@ fn initial_partition(rref: &[BinVec], n: u32) -> Vec<Vec<u32>> {
 
 /// Enumerate `Aut(C)`-invariant refiner codewords.
 ///
-/// Prefers weight-4 (the chromotopology stratum for doubly-even codes; most
-/// discriminative per Bouyukliev–Bouyuklieva §3.3). Falls back to the
-/// lowest non-zero weight stratum otherwise.
+/// Phase B: returns the **two lowest non-zero weight strata** of the
+/// code (Bouyukliev–Bouyuklieva 2019 §3.3 anchor). The Phase-A choice
+/// of weight-4 only left discriminative power on the table whenever
+/// weight-8 (or the next stratum up) also distinguished orbits. The
+/// extra refiner-incidence work in `refine` is paid back many-fold by
+/// the smaller search tree at large `N`.
 fn invariant_refiners(rref: &[BinVec]) -> Vec<BinVec> {
     let k = rref.len();
     let mut by_weight: BTreeMap<u32, Vec<BinVec>> = BTreeMap::new();
@@ -266,15 +269,11 @@ fn invariant_refiners(rref: &[BinVec]) -> Vec<BinVec> {
         let wt = w.count_ones();
         by_weight.entry(wt).or_default().push(w);
     }
-    if let Some(wt4) = by_weight.remove(&4) {
-        return wt4;
+    let mut out: Vec<BinVec> = Vec::new();
+    for (_, words) in by_weight.into_iter().take(2) {
+        out.extend(words);
     }
-    // first entry is the minimum weight
-    by_weight
-        .into_iter()
-        .next()
-        .map(|(_, v)| v)
-        .unwrap_or_default()
+    out
 }
 
 fn mask_of_cell(cell: &[u32]) -> u64 {

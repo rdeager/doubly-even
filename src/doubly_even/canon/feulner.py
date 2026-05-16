@@ -240,11 +240,13 @@ def _initial_partition(rref: tuple[int, ...], n: int) -> list[list[int]]:
 def _invariant_refiners(rref: tuple[int, ...], k: int) -> list[int]:
     """Enumerate `Aut(C)`-invariant refiner codewords.
 
-    Prefers weight-4 codewords (the chromotopology strata for doubly-even
-    codes; unusually discriminative per Bouyukliev–Bouyuklieva 2019).
-    Falls back to the lowest nonzero weight stratum if no weight-4 word
-    exists — for very low-dimensional codes this can be weight 8 or
-    higher. Empty for the zero code (handled by the special-case path).
+    Phase B: returns the **two lowest non-zero weight strata** of the
+    code — these are the most discriminative invariants under
+    Aut(C) (Bouyukliev–Bouyuklieva 2019 §3.3). The Phase-A choice of
+    only weight-4 codewords lost discriminative power on (n, k) cells
+    where weight-8 codewords also discriminate orbits. The cost is at
+    most ~2× more refiner-incidence work in ``_refine``, well worth the
+    finer refinement.
     """
     by_weight: dict[int, list[int]] = defaultdict(list)
     for mask in range(1, 1 << k):
@@ -253,11 +255,13 @@ def _invariant_refiners(rref: tuple[int, ...], k: int) -> list[int]:
             if (mask >> i) & 1:
                 w ^= rref[i]
         by_weight[w.bit_count()].append(w)
-    if 4 in by_weight:
-        return by_weight[4]
     if not by_weight:
         return []
-    return by_weight[min(by_weight)]
+    weights = sorted(by_weight.keys())[:2]
+    out: list[int] = []
+    for w in weights:
+        out.extend(by_weight[w])
+    return out
 
 
 def _refine(P: list[list[int]], refiners: list[int]) -> list[list[int]]:
@@ -341,11 +345,10 @@ def _search(
 
     Refines `P`, absorbs any new singletons into `partial.key` in cell
     order, then checks the lex-from-low prefix against `state.best_key`.
-    If the partial key strictly exceeds the best's prefix, prune. If `P`
-    is fully discrete after absorption, this is a leaf: insert the
-    permutation into `key_to_pi` or extract an aut from a prior leaf
-    with the same key. Otherwise individualise from the first
-    non-trivial cell, refreshing `orbit_rep` between siblings.
+    Pruning fires when the partial column-trace prefix strictly exceeds
+    the best's prefix. Target cell for individualisation is the
+    **smallest** non-trivial cell (Phase B heuristic; Feulner/nauty
+    default — smaller branching factor at each level).
     """
     P = _refine(P, refiners)
 
@@ -361,13 +364,9 @@ def _search(
                 if bk is not None:
                     d = len(partial.key)
                     if d <= len(bk):
-                        prefix = bk[:d]
-                        # partial.key is a list; compare to a tuple-slice
-                        # via list(tuple(...)) round-trip to use tuple lex.
-                        # Equivalent and faster: compare elementwise.
                         for i in range(d):
                             a = partial.key[i]
-                            b = prefix[i]
+                            b = bk[i]
                             if a < b:
                                 break  # winning; full key will be < best
                             if a > b:
@@ -385,7 +384,6 @@ def _search(
         prior = state.key_to_pi.get(key_tuple)
         if prior is not None:
             # Two leaves with the same canonical key ⇒ pi · prior^-1 ∈ Aut.
-            # In our convention this is compose(inverse(prior), pi).
             state.push_aut(compose(inverse(prior), pi))
         else:
             state.key_to_pi[key_tuple] = pi
