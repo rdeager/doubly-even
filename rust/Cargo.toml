@@ -1,0 +1,18 @@
+[package]
+name = "doubly-even-kernel"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Native hot kernel for the doubly-even enumerator (σ_Q tables, singular BFS, orbit-min)"
+publish = false
+
+[lib]
+name = "doubly_even_kernel"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

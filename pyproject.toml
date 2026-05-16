@@ -19,4 +19,5 @@ build-backend = "uv_build"
 dev = [
     "pytest>=8.0",
     "hypothesis>=6.100",
+    "maturin>=1.13.3",
 ]
