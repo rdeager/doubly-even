@@ -206,16 +206,20 @@ def doubly_even_candidates(
 ) -> list[int]:
     """All ``Aut(C)``-orbit reps of doubly even 1-dim extensions of ``C``.
 
-    Composes the three filters in order. Returns a sorted list so callers
-    that don't care about determinism don't have to think about it.
+    Returns a sorted list so callers that don't care about determinism
+    don't have to think about it.
 
-    Uses :func:`standard_form_coset_reps` (DFGHILM B.3 quotient-space
-    enumeration) as the coset source — strictly faster than the readable
-    :func:`coset_reps_in_dual_mod_code` reference (it skips the
-    ``2^(n-k)``-then-dedup pass), and equivalent for doubly even ``C``
-    (which is always the case on the augmentation tree).
+    Delegates to :func:`doubly_even.enumerate.quotient.doubly_even_candidates_Q`,
+    which runs the orbit-min BFS in ``Q_C := C⊥/C`` coordinates
+    (``L = n - 2k`` bits per element, no per-step reduce-mod-C). The
+    return type and call convention match the previous ``F_2^N``-bit
+    pipeline; ``F_2^N`` reps are produced by lifting orbit-min
+    survivors via the ``V_basis`` of ``Q_C``.
+
+    The previous pipeline (``standard_form_coset_reps →
+    weight_mod_four_zero → aut_orbit_minima``) is preserved verbatim
+    in this module as an oracle for cross-check tests.
     """
-    reps = standard_form_coset_reps(C)
-    weight_filtered = weight_mod_four_zero(reps)
-    orbit_minima = aut_orbit_minima(weight_filtered, aut_generators, C)
-    return sorted(orbit_minima)
+    from .quotient import doubly_even_candidates_Q
+
+    return doubly_even_candidates_Q(C, aut_generators)

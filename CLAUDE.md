@@ -34,6 +34,10 @@ canon/       wraps pynauty for canonical labels + Aut(C)
 
 enumerate/   the canonical-augmentation search
   filters.py     coset reps in C-perp/C, weight-mod-4, Aut(C)-orbit-min
+                  (now-oracle paths kept for cross-checks; entry point
+                  doubly_even_candidates delegates to quotient.py)
+  quotient.py    Q_C-coordinate orbit-min with σ_Q lookup tables
+                  (Milestone 4 phase (a); the hot path)
   augment.py     canonical_parent(D); is_canonical_augmentation;
                   enumerate_doubly_even(N) -> EnumeratedCode iter
 ```
@@ -64,7 +68,9 @@ Three independent checks the test suite relies on:
    consistency.
 2. **DFGHILM Table 3:** published equivalence-class counts of doubly
    even `[N, k]` codes. The enumerator matches every cell exactly
-   through `N = 16` in the default suite, `N = 18` with `--run-slow`.
+   through `N = 16` in the default suite, `N = 18` with `--run-slow`,
+   and `N = 20, 22` via `scripts/bench.py` (which runs the same
+   Table-3 check after each timed enumeration).
    Hardcoded in `tests/test_augment.py::DFGHILM_TABLE_3`.
 3. **Bouyukliev–Bouyuklieva 2019** (`inbox/mathpix/1907.10363v1.md`)
    gives counts for `[N, k, ≥ d]` codes at `N = 31, 32`. Not yet wired
@@ -77,33 +83,37 @@ Three independent checks the test suite relies on:
 - Bouyukliev–Bouyuklieva 2019 has `[N, k, ≥ d]` validation counts at
   `N = 31, 32`. Not yet wired into tests — we don't have a
   minimum-distance filter.
-- Performance ceiling in pure Python: ≈ 28 s at `N = 20` (down from
-  235 s baseline, 8.3× cumulative speedup). `N = 22` does **not**
-  follow the `N≤20` extrapolation — the actual `N = 20 → 22` growth
-  is ~21× (vs ~7× lower down), so `N = 22` runs > 10 minutes in pure
-  Python. That's the trigger to move on to C++/Rust kernels for the
-  next session. See `/workspace/markdown/architecture/04-optimisations.md`
-  for the per-step breakdown and the `N = 22` reality-check section.
+- Performance after Milestone 4 phase (a): ≈ 14 s at `N = 20` (down
+  from 235 s baseline, 17× cumulative speedup) and ≈ 152 s at
+  `N = 22` (down from the pre-D6 `> 10 min` wall). `N = 24` is now
+  reachable in pure Python but expensive; phases (b) and (c) of
+  `/workspace/markdown/notes/quotient-orbit-augmentation-plan.md`
+  are the remaining algorithmic levers before the C++/Rust kernel
+  session. See `/workspace/markdown/architecture/04-optimisations.md`
+  D6 for the per-step breakdown.
 
-## Recent algorithmic + representation wins (Python session, post-Phase 3)
+## Recent algorithmic + representation wins (Python sessions, post-Phase 3)
 
 See `/workspace/markdown/architecture/04-optimisations.md` for the
-full write-up. Headline: cumulative 7–8× speedup vs pre-session
-baseline, achieved by (1) quotient-space candidate enumeration
-(DFGHILM B.3), (2) LRU-cached `canon_info`, (3) verified closed-form
-`gaborit_sigma` + mass-stopping shortcut in the recursion, (4)
-hoisting `Code.rref_basis()` out of the orbit-min BFS, (5) weight-
-enumerator prefilter on the subspace orbit BFS, and (6) trusting
-pynauty's float order whenever it's within float64's exact-integer
-range. `bench.py` lives in `scripts/`; baseline + per-step JSON
-records are in `scripts/bench-results/` (gitignored).
+full write-up. Headline: cumulative 17× speedup vs pre-session
+baseline at `N = 20`, achieved by (1) quotient-space candidate
+enumeration (DFGHILM B.3), (2) LRU-cached `canon_info`, (3)
+verified closed-form `gaborit_sigma` + mass-stopping shortcut in
+the recursion, (4) hoisting `Code.rref_basis()` out of the
+orbit-min BFS, (5) weight-enumerator prefilter on the subspace
+orbit BFS, (6) trusting pynauty's float order whenever it's
+within float64's exact-integer range, and (D6, this session)
+`Q_C`-coordinate orbit-min with σ_Q lookup tables, global
+orbit decomposition, and a Gray-code wt-mod-4 prefilter.
+`bench.py` lives in `scripts/`; baseline + per-step JSON records
+are in `scripts/bench-results/` (gitignored).
 
 ## Useful commands
 
 ```sh
 uv sync --all-extras --dev               # bootstrap a fresh checkout
-uv run pytest                            # 263 fast tests, ~10 s
-uv run pytest --run-slow                 # adds slow mass + Table 3 cells (~45 s total)
+uv run pytest                            # 273 fast tests, ~7 s
+uv run pytest --run-slow                 # adds slow mass + Table 3 cells (~120 s total)
 uv run python scripts/bench.py --label baseline  # benchmark; writes JSON
 
 # Enumerate doubly even codes of length N (yields EnumeratedCode objects)
