@@ -73,6 +73,14 @@ def bipartite_graph(C: Code) -> BipartiteEncoding:
     to :class:`pynauty.Graph`, which is significantly faster for large
     codes than calling :meth:`pynauty.Graph.connect_vertex` once per left
     vertex (the latter crosses the Python/C boundary per call).
+
+    The vertex colouring partitions both sides by degree: codewords by
+    Hamming weight on the left, columns by codeword-incidence count on the
+    right. Degree is automorphism-invariant, so this initial partition is
+    a strict refinement nauty would otherwise compute on its first pass —
+    seeding it skips that iteration (Bouyukliev §3.3; same default Sage's
+    code-canon machinery uses). Side comes first in the partition key so
+    codewords and columns never share a cell, preserving the bipartition.
     """
     codewords = tuple(C.codewords())  # length 2^rank, all distinct
     L = len(codewords)
@@ -80,14 +88,28 @@ def bipartite_graph(C: Code) -> BipartiteEncoding:
     total = L + R
 
     adjacency: dict[int, list[int]] = {}
+    column_degree = [0] * R
     for i, w in enumerate(codewords):
         # Neighbours on the right side: column j iff bit j of w is set.
         neighbours = [L + j for j in range(R) if (w >> j) & 1]
         if neighbours:
             adjacency[i] = neighbours
+        for nb in neighbours:
+            column_degree[nb - L] += 1
 
-    # Two-block colouring forces automorphisms to respect the bipartition.
-    vertex_coloring = [set(range(L)), set(range(L, total))]
+    # Partition by (side, degree). Left side first → codewords and columns
+    # never collide even when a codeword-weight matches a column-degree.
+    left_cells: dict[int, set[int]] = {}
+    for i, w in enumerate(codewords):
+        left_cells.setdefault(w.bit_count(), set()).add(i)
+    right_cells: dict[int, set[int]] = {}
+    for j, deg in enumerate(column_degree):
+        right_cells.setdefault(deg, set()).add(L + j)
+
+    vertex_coloring: list[set[int]] = [
+        left_cells[k] for k in sorted(left_cells)
+    ] + [right_cells[k] for k in sorted(right_cells)]
+
     g = pynauty.Graph(
         number_of_vertices=total,
         directed=False,

@@ -258,8 +258,10 @@ def _traverse(
     quota: dict[int, int],
     mass_at_k: dict[int, int],
     factorial_N: int,
+    info_C: CanonInfo | None = None,
 ) -> Iterator[EnumeratedCode]:
-    info_C = cached_canon_info(C)
+    if info_C is None:
+        info_C = cached_canon_info(C)
     k = C.rank
     yield EnumeratedCode(code=C, info=info_C)
     mass_at_k[k] += factorial_N // info_C.aut_order
@@ -280,9 +282,15 @@ def _traverse(
         if mass_at_k[k + 1] >= quota[k + 1]:
             return
         D = C.extend(v)
-        if not is_canonical_augmentation(C, D):
+        # Compute D's canon info once and forward it: both the McKay test
+        # and the recursive _traverse on D need it. Without threading it
+        # through, the recursion's entry would re-fetch via the LRU cache.
+        info_D = cached_canon_info(D)
+        if not is_canonical_augmentation(C, D, info_D=info_D):
             continue
-        yield from _traverse(D, max_k, quota, mass_at_k, factorial_N)
+        yield from _traverse(
+            D, max_k, quota, mass_at_k, factorial_N, info_C=info_D
+        )
 
 
 def enumerate_doubly_even_at(N: int, k: int) -> Iterator[EnumeratedCode]:

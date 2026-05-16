@@ -178,15 +178,33 @@ pub fn canon_info_native(rref: &[BinVec], n: u32) -> NativeCanonInfo {
         wlen: 0,
     };
 
-    // Two-block colouring: codewords (left) form colour 0, columns (right)
-    // form colour 1. `lab` is the identity ordering; `ptn[i] = 0` marks the
-    // last vertex of its colour cell.
-    let mut lab: Vec<c_int> = (0..total as c_int).collect();
+    // Initial partition by (side, degree). Side first keeps codewords (left)
+    // and columns (right) in separate cells — automorphisms must respect the
+    // bipartition. Within each side, sub-cells by degree: codeword weight
+    // on the left, column-incidence count on the right. Degree is Aut-
+    // invariant so distinct degrees imply distinct orbits, letting nauty
+    // skip its own initial degree-refinement pass (Bouyukliev §3.3,
+    // matches Sage's default behaviour).
+    let mut by_cell: Vec<(u8, i32, c_int)> = (0..total as c_int)
+        .map(|v| {
+            let side: u8 = if (v as usize) < l { 0 } else { 1 };
+            (side, d[v as usize], v)
+        })
+        .collect();
+    by_cell.sort_unstable_by_key(|&(side, deg, _)| (side, deg));
+
+    let mut lab: Vec<c_int> = by_cell.iter().map(|&(_, _, v)| v).collect();
     let mut ptn = vec![1i32; total];
-    if l > 0 {
-        ptn[l - 1] = 0;
+    // ptn[i] = 0 marks the last vertex of a cell. Set 0 wherever the
+    // (side, degree) key changes at position i+1; always set 0 at the end.
+    for i in 0..total.saturating_sub(1) {
+        let (s1, d1, _) = by_cell[i];
+        let (s2, d2, _) = by_cell[i + 1];
+        if s1 != s2 || d1 != d2 {
+            ptn[i] = 0;
+        }
     }
-    if r > 0 {
+    if total > 0 {
         ptn[total - 1] = 0;
     }
     let mut orbits = vec![0i32; total];
