@@ -72,22 +72,36 @@ Three independent checks the test suite relies on:
 
 ## Open / parked items
 
-- `gaborit_sigma(N, k)` raises `NotImplementedError`. The Mathpix
-  rendering of DFGHILM eq. (B.2) for `N ≡ 0 (mod 8)` is mangled and
-  doesn't reproduce `σ(8, 4) = 30`. We need Gaborit (1996) directly.
 - `/workspace/markdown/` is not under git. If we want it versioned,
   either move it under `src/markdown/` or `git init` `/workspace/`.
-- Performance ceiling in pure Python: `N = 14` 0.6 s, `N = 18` 26 s,
-  growth ~3-4× per N. To hit the project target of `N = 32` we'll need
-  algorithmic + bit-packing wins next, then native code. See
-  `/workspace/markdown/notes/next-session-plan.md`.
+- Bouyukliev–Bouyuklieva 2019 has `[N, k, ≥ d]` validation counts at
+  `N = 31, 32`. Not yet wired into tests — we don't have a
+  minimum-distance filter.
+- Performance ceiling in pure Python is now ≈ 28 s at `N = 20` (down
+  from 235 s in baseline). At the post-optimisation growth rate of
+  ~7×/`N+2`, `N = 22` runs in ~3 minutes. To get past that comfortably
+  we'd need C++/Rust hot kernels — see the next-session plan.
+
+## Recent algorithmic + representation wins (Python session, post-Phase 3)
+
+See `/workspace/markdown/architecture/04-optimisations.md` for the
+full write-up. Headline: cumulative 7–8× speedup vs pre-session
+baseline, achieved by (1) quotient-space candidate enumeration
+(DFGHILM B.3), (2) LRU-cached `canon_info`, (3) verified closed-form
+`gaborit_sigma` + mass-stopping shortcut in the recursion, (4)
+hoisting `Code.rref_basis()` out of the orbit-min BFS, (5) weight-
+enumerator prefilter on the subspace orbit BFS, and (6) trusting
+pynauty's float order whenever it's within float64's exact-integer
+range. `bench.py` lives in `scripts/`; baseline + per-step JSON
+records are in `scripts/bench-results/` (gitignored).
 
 ## Useful commands
 
 ```sh
 uv sync --all-extras --dev               # bootstrap a fresh checkout
-uv run pytest                            # 182 fast tests, ~0.4 s
-uv run pytest --run-slow                 # adds N=17, 18 cells, ~36 s
+uv run pytest                            # 263 fast tests, ~10 s
+uv run pytest --run-slow                 # adds slow mass + Table 3 cells (~45 s total)
+uv run python scripts/bench.py --label baseline  # benchmark; writes JSON
 
 # Enumerate doubly even codes of length N (yields EnumeratedCode objects)
 uv run python -c '

@@ -19,15 +19,21 @@ the cheap pre-canonical filter.
 What this module exposes:
 
 * :func:`coset_reps_in_dual_mod_code` — one element per coset of ``C`` in
-  ``C⊥``.
+  ``C⊥``. Readable spec; enumerates all ``2^(n-k)`` dual codewords and
+  deduplicates. Retained as the reference oracle for tests.
+* :func:`standard_form_coset_reps` — DFGHILM B.3 quotient-space
+  enumeration: directly emits each of the ``2^(n-2k)`` coset reps of
+  doubly even ``C`` in ``C⊥`` without going through ``C⊥``'s full
+  ``2^(n-k)`` elements. This is the function used by
+  :func:`doubly_even_candidates` in the hot path.
 * :func:`weight_mod_four_zero` — keeps cosets whose representative has
   weight ``≡ 0 (mod 4)``.
 * :func:`aut_orbit_minima` — among a set of candidate cosets, keeps only
   those that are the lex-min in their ``Aut(C)``-orbit.
 
-The chain ``coset_reps → weight_mod_four_zero → aut_orbit_minima`` is the
-candidate set that feeds the canonical-augmentation test in
-:mod:`.augment`.
+The chain ``standard_form_coset_reps → weight_mod_four_zero →
+aut_orbit_minima`` is the candidate set that feeds the canonical-
+augmentation test in :mod:`.augment`.
 """
 
 from __future__ import annotations
@@ -70,6 +76,58 @@ def coset_reps_in_dual_mod_code(C: Code) -> Iterator[int]:
         yield rep
 
 
+def standard_form_coset_reps(C: Code) -> Iterator[int]:
+    """Yield each coset of ``C`` in ``C⊥`` exactly once, by canonical rep.
+
+    Direct quotient-space construction (DFGHILM Appendix B.3): for doubly
+    even ``C`` (so ``C ⊆ C⊥``) the unique canonical reps of ``C`` in
+    ``C⊥`` are exactly the vectors of ``C⊥`` that are zero at every pivot
+    column of ``C``. They form a subspace ``V`` of dimension ``n - 2k``,
+    and this function enumerates its ``2^(n - 2k)`` elements via
+    Gray-code XOR — strictly faster than
+    :func:`coset_reps_in_dual_mod_code`, which iterates the full
+    ``2^(n-k)`` dual and dedupes.
+
+    Precondition: ``C ⊆ C⊥``. (Always satisfied along the doubly-even
+    augmentation tree.) If ``C ⊄ C⊥`` the function still terminates but
+    the enumerated set will not be the C-coset reps in C⊥ — use
+    :func:`coset_reps_in_dual_mod_code` instead.
+
+    The zero coset is yielded first (matching the convention of
+    :func:`coset_reps_in_dual_mod_code`).
+    """
+    rref_rows, pivots = C.rref_basis()
+    dual_basis = C.dual().basis
+
+    # Reduce each dual basis vector mod ``C`` — clears pivot column bits.
+    # The result lies in ``V = C⊥ ∩ {v : v_p = 0 ∀ p ∈ pivots(C)}``.
+    reduced: list[int] = []
+    for v in dual_basis:
+        rep = v
+        for row, p in zip(rref_rows, pivots):
+            if (rep >> p) & 1:
+                rep ^= row
+        if rep != 0:
+            reduced.append(rep)
+
+    # Row-reduce to get a basis of V. The reduced set may be linearly
+    # dependent: ``dual.basis`` has ``n - k`` vectors, but ``dim V = n - 2k``.
+    V_basis, _ = Code(C.n, tuple(reduced)).rref_basis()
+    L = len(V_basis)
+
+    # Gray-code enumeration of the ``2^L`` elements of V. Each step toggles
+    # the basis vector at the lowest set bit position of the step counter,
+    # so we perform a single XOR per yielded value.
+    yield 0
+    if L == 0:
+        return
+    current = 0
+    for i in range(1, 1 << L):
+        flip = (i & -i).bit_length() - 1
+        current ^= V_basis[flip]
+        yield current
+
+
 def weight_mod_four_zero(reps: Iterable[int]) -> Iterator[int]:
     """Keep only ``v`` with ``wt(v) ≡ 0 (mod 4)``."""
     for v in reps:
@@ -88,29 +146,52 @@ def aut_orbit_minima(
     compare *cosets*, not vectors). A rep ``v`` is kept iff BFS through its
     orbit never produces a coset rep strictly less than ``v`` itself.
     """
-    aut_gens = [tuple(g) for g in aut_generators]
-    if not aut_gens:
+    # Hoist work that depends only on ``C`` or on the generators out of the
+    # per-``v`` loop. Without this, profiling showed ``C.rref_basis()`` being
+    # recomputed millions of times per ``aut_orbit_minima`` call from inside
+    # the inner ``reduce_mod_code`` invocation.
+    sigma_lists = [list(g) for g in aut_generators]
+    if not sigma_lists:
         # Trivial automorphism group: every rep is its own orbit min.
         yield from reps
         return
+    rref_rows, pivots = C.rref_basis()
+    rref_pivots = list(zip(rref_rows, pivots))
 
     for v in reps:
-        if _is_orbit_min(v, aut_gens, C):
+        if _is_orbit_min(v, sigma_lists, rref_pivots):
             yield v
 
 
 def _is_orbit_min(
-    v: int, aut_gens: list[tuple[int, ...]], C: Code
+    v: int,
+    sigma_lists: list[list[int]],
+    rref_pivots: list[tuple[int, int]],
 ) -> bool:
-    """Lex-min check for ``v`` under ``Aut(C)`` acting on cosets of ``C``."""
+    """Lex-min check for ``v`` under a permutation group acting on cosets.
+
+    ``sigma_lists`` is the list of generators of the acting group, each as
+    a Python list (so we don't pay ``list(sigma)`` per inner-loop step).
+    ``rref_pivots`` is ``list(zip(rref_rows, pivots))`` of the underlying
+    code's RREF; reduction is inlined here to avoid per-call
+    ``Code.rref_basis()`` work.
+    """
     seen = {v}
     queue: list[int] = [v]
     while queue:
         next_queue: list[int] = []
         for current in queue:
-            for sigma in aut_gens:
-                sigma_list = list(sigma)
-                new_v = reduce_mod_code(apply_permutation(current, sigma_list), C)
+            for sigma_list in sigma_lists:
+                # Inlined apply_permutation(current, sigma_list).
+                permuted = 0
+                for i, j in enumerate(sigma_list):
+                    if (current >> i) & 1:
+                        permuted |= 1 << j
+                # Inlined reduce_mod_code with hoisted RREF.
+                new_v = permuted
+                for row, p in rref_pivots:
+                    if (new_v >> p) & 1:
+                        new_v ^= row
                 if new_v < v:
                     return False
                 if new_v not in seen:
@@ -127,8 +208,14 @@ def doubly_even_candidates(
 
     Composes the three filters in order. Returns a sorted list so callers
     that don't care about determinism don't have to think about it.
+
+    Uses :func:`standard_form_coset_reps` (DFGHILM B.3 quotient-space
+    enumeration) as the coset source — strictly faster than the readable
+    :func:`coset_reps_in_dual_mod_code` reference (it skips the
+    ``2^(n-k)``-then-dedup pass), and equivalent for doubly even ``C``
+    (which is always the case on the augmentation tree).
     """
-    reps = coset_reps_in_dual_mod_code(C)
+    reps = standard_form_coset_reps(C)
     weight_filtered = weight_mod_four_zero(reps)
     orbit_minima = aut_orbit_minima(weight_filtered, aut_generators, C)
     return sorted(orbit_minima)

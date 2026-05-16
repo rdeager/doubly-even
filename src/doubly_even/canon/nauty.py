@@ -26,6 +26,7 @@ is always exact.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import pynauty
 
@@ -66,12 +67,36 @@ class CanonInfo:
     column_orbits: tuple[int, ...]
 
 
+_FLOAT_INT_LIMIT = 1 << 53  # 2^53; largest integer exactly representable in float64.
+
+
+def _trustable_pynauty_order(grpsize1: float, grpsize2: int) -> int | None:
+    """Return the pynauty-reported order as an exact int when it can be
+    trusted, otherwise ``None``.
+
+    pynauty reports ``|Aut| = grpsize1 * 10**grpsize2`` with ``grpsize1`` a
+    Python ``float``. Empirically ``grpsize1`` is **not** normalised to
+    ``[1, 10)``: pynauty may return e.g. ``(2092.27..., 10)`` at ``n =
+    16`` whose product is still exactly ``16!``. The precision limit that
+    matters is whether ``grpsize1 * 10**grpsize2`` fits in float64's
+    exact-integer range (``< 2^53 ≈ 9.0e15``). Above that, the rounded
+    product is wrong; below, it is exact.
+
+    If we can't trust the float, we punt to :func:`group_order`
+    (Schreier–Sims), which gives an exact integer regardless of the size.
+    """
+    raw = grpsize1 * (10 ** grpsize2)
+    if raw < _FLOAT_INT_LIMIT:
+        return int(round(raw))
+    return None
+
+
 def canon_info(C: Code) -> CanonInfo:
     """Compute canonical form and automorphism group of ``C``."""
     enc = bipartite_graph(C)
 
     # ---- automorphism group --------------------------------------------------
-    gens, _grpsize1, _grpsize2, orbits, _numorbits = pynauty.autgrp(enc.graph)
+    gens, grpsize1, grpsize2, orbits, _numorbits = pynauty.autgrp(enc.graph)
 
     # Project graph-automorphism generators onto column actions. The induced
     # left-side action is determined by the right-side action, so the column
@@ -81,10 +106,14 @@ def canon_info(C: Code) -> CanonInfo:
         col_perm = _column_part(sigma, enc.L, enc.R)
         aut_generators.append(col_perm)
 
-    # pynauty's grpsize1 is a double — beyond ~10^16 the rounded product
-    # drifts from the true integer (20! is already off by ~512). Recompute
-    # exactly from the projected generators via Schreier–Sims.
-    aut_order = group_order(aut_generators, enc.R)
+    # Prefer pynauty's reported order when it is within float precision —
+    # that's the case for the vast majority of codes in the recursion,
+    # which have ``|Aut|`` well below ``2^53``. Fall back to Schreier–Sims
+    # only when the float order is too large to be exact (e.g. the zero
+    # code at ``N ≥ 19`` has ``|Aut| = N!``).
+    aut_order = _trustable_pynauty_order(grpsize1, grpsize2)
+    if aut_order is None:
+        aut_order = group_order(aut_generators, enc.R)
 
     column_orbits = tuple(orbits[enc.L:])
 
@@ -113,6 +142,43 @@ def canon_info(C: Code) -> CanonInfo:
         aut_order=aut_order,
         column_orbits=column_orbits,
     )
+
+
+@lru_cache(maxsize=None)
+def _canon_info_by_rref(n: int, rref: tuple[int, ...]) -> CanonInfo:
+    """Internal cache hook for :func:`cached_canon_info`.
+
+    Keyed by the canonical RREF subspace identifier so that two ``Code``
+    instances representing the same subspace via different bases collide
+    on the same entry.
+    """
+    return canon_info(Code(n=n, basis=rref))
+
+
+def cached_canon_info(C: Code) -> CanonInfo:
+    """Memoised :func:`canon_info`, keyed by ``C``'s RREF subspace.
+
+    The McKay parent test re-enters ``canon_info`` for every candidate
+    extension; many candidates share ancestors via the subspace orbit
+    BFS in :func:`doubly_even.enumerate.augment._in_aut_orbit_of_subspace`
+    and the recursion re-encounters the same subspace from different
+    sibling branches. Each cache hit replaces a pynauty call plus
+    Schreier–Sims with a dict lookup.
+
+    The cache grows unbounded; call :func:`canon_info_cache_clear` to
+    reset (e.g. between benchmark runs that want cold-cache timings).
+    """
+    return _canon_info_by_rref(C.n, C.rref_basis()[0])
+
+
+def canon_info_cache_clear() -> None:
+    """Drop every entry from the :func:`cached_canon_info` cache."""
+    _canon_info_by_rref.cache_clear()
+
+
+def canon_info_cache_info():
+    """Return ``functools.lru_cache.cache_info()`` for inspection."""
+    return _canon_info_by_rref.cache_info()
 
 
 def canonical_form(C: Code) -> Code:

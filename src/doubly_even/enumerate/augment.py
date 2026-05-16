@@ -38,11 +38,13 @@ is stable across runs and useful for debugging.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
-from ..canon.nauty import CanonInfo, canon_info
+from ..canon.nauty import CanonInfo, cached_canon_info
 from ..spec.codes import Code
+from ..spec.mass import gaborit_sigma
 from ..spec.vectors import apply_permutation
 from .filters import doubly_even_candidates
 
@@ -63,7 +65,7 @@ def canonical_parent(D: Code, info_D: CanonInfo | None = None) -> Code:
     if D.rank == 0:
         raise ValueError("canonical_parent undefined for the zero code")
     if info_D is None:
-        info_D = canon_info(D)
+        info_D = cached_canon_info(D)
 
     sigma = list(info_D.canonical_column_order)
     permuted_basis = tuple(apply_permutation(b, sigma) for b in D.basis)
@@ -93,6 +95,18 @@ def _subspace_key(C: Code) -> tuple[int, ...]:
     return C.rref_basis()[0]
 
 
+def _weight_enum(C: Code) -> tuple[int, ...]:
+    """Sorted tuple of codeword weights. ``Aut``-orbit invariant on subspaces.
+
+    Used as a cheap necessary-condition prefilter in
+    :func:`_in_aut_orbit_of_subspace`: two subspaces with different
+    weight enumerators are guaranteed to lie in different orbits of any
+    column-permutation group, so we can short-circuit the orbit BFS
+    without doing any ``apply_permutation`` work.
+    """
+    return tuple(sorted(w.bit_count() for w in C.codewords()))
+
+
 def is_canonical_augmentation(
     C: Code, D: Code, info_D: CanonInfo | None = None
 ) -> bool:
@@ -102,7 +116,7 @@ def is_canonical_augmentation(
     verify that here, callers are responsible.
     """
     if info_D is None:
-        info_D = canon_info(D)
+        info_D = cached_canon_info(D)
     p_D = canonical_parent(D, info_D)
     return _in_aut_orbit_of_subspace(C, p_D, info_D.aut_generators, D.n)
 
@@ -118,33 +132,45 @@ def _in_aut_orbit_of_subspace(
     BFS through the orbit of ``C``. Since both ``C`` and ``target`` are
     subspaces of fixed dimension in ``F_2^n``, the action is via the
     induced map on subspaces and the orbit has size at most ``2^{rank C}``.
+
+    Two prefilters before the BFS:
+
+    * ``_subspace_key`` equality short-circuits when ``C == target`` as
+      subspaces (the common case at the root of the McKay test).
+    * Sorted-codeword-weight tuples must match — every column-permutation
+      preserves weights, so unequal weight enumerators guarantee that
+      ``C`` and ``target`` are in different orbits.
     """
     target_key = _subspace_key(target)
     start_key = _subspace_key(C)
     if start_key == target_key:
         return True
-    aut_gens = [tuple(g) for g in aut_generators]
-    if not aut_gens:
+    if _weight_enum(C) != _weight_enum(target):
+        return False
+    sigma_lists = [list(g) for g in aut_generators]
+    if not sigma_lists:
         return False
 
     seen = {start_key}
-    queue: list[Code] = [C]
+    # Queue holds the basis tuples we still need to expand; we keep the
+    # current ``Code`` around only long enough to grab its RREF, since
+    # successive iterations would otherwise materialise duplicate
+    # ``Code`` objects per visited subspace.
+    queue: list[tuple[int, ...]] = [start_key]
     while queue:
-        next_queue: list[Code] = []
-        for current in queue:
-            for sigma in aut_gens:
-                sigma_list = list(sigma)
+        next_queue: list[tuple[int, ...]] = []
+        for current_basis in queue:
+            for sigma_list in sigma_lists:
                 new_basis = tuple(
-                    apply_permutation(b, sigma_list) for b in current.basis
+                    apply_permutation(b, sigma_list) for b in current_basis
                 )
-                new_code = Code(n=n, basis=new_basis)
-                key = _subspace_key(new_code)
+                key = Code(n=n, basis=new_basis).rref_basis()[0]
                 if key == target_key:
                     return True
                 if key in seen:
                     continue
                 seen.add(key)
-                next_queue.append(new_code)
+                next_queue.append(key)
         queue = next_queue
     return False
 
@@ -175,21 +201,57 @@ def enumerate_doubly_even(N: int, max_k: int | None = None) -> Iterator[Enumerat
     augmentation tree dies, i.e. ``k = ⌊N / 2⌋`` for self-orthogonal codes).
 
     Yields in depth-first canonical-augmentation order.
+
+    Uses the verified closed-form ``σ(N, k)`` from
+    :func:`doubly_even.spec.mass.gaborit_sigma` as a mass-stopping
+    shortcut: once the running tally ``Σ N!/|Aut(C_i)|`` over emitted
+    rank-``k`` classes reaches ``σ(N, k)``, no further candidates at
+    level ``k`` can be canonical augmentations, so the recursion at the
+    parent level skips its remaining work. Correctness is preserved
+    because the McKay parent test already guarantees one canonical
+    representative per equivalence class — the shortcut just lets us
+    return as soon as we know we've found them all.
     """
     cap = N // 2 if max_k is None else max_k
-    yield from _traverse(Code.zero(N), cap)
+    # Quotas per rank from Gaborit's closed form. ``mass_at_k`` accumulates
+    # ``N! // aut_order`` over emitted classes at each rank.
+    quota: dict[int, int] = {k: gaborit_sigma(N, k) for k in range(cap + 1)}
+    mass_at_k: dict[int, int] = dict.fromkeys(range(cap + 1), 0)
+    factorial_N = math.factorial(N)
+    yield from _traverse(Code.zero(N), cap, quota, mass_at_k, factorial_N)
 
 
-def _traverse(C: Code, max_k: int) -> Iterator[EnumeratedCode]:
-    info_C = canon_info(C)
+def _traverse(
+    C: Code,
+    max_k: int,
+    quota: dict[int, int],
+    mass_at_k: dict[int, int],
+    factorial_N: int,
+) -> Iterator[EnumeratedCode]:
+    info_C = cached_canon_info(C)
+    k = C.rank
     yield EnumeratedCode(code=C, info=info_C)
-    if C.rank >= max_k:
+    mass_at_k[k] += factorial_N // info_C.aut_order
+    if mass_at_k[k] > quota[k]:
+        # Should be impossible: McKay parent test gives one canonical rep
+        # per equivalence class, and Gaborit gives the exact labelled count.
+        # Exceeding the quota means either a classification bug or a wrong
+        # closed-form value — surface loudly rather than silently miscount.
+        raise RuntimeError(
+            f"level-{k} mass {mass_at_k[k]} exceeded σ(N={C.n}, k={k}) "
+            f"= {quota[k]}; classification bug or σ formula off."
+        )
+    if k >= max_k:
+        return
+    if mass_at_k[k + 1] >= quota[k + 1]:
         return
     for v in doubly_even_candidates(C, info_C.aut_generators):
+        if mass_at_k[k + 1] >= quota[k + 1]:
+            return
         D = C.extend(v)
         if not is_canonical_augmentation(C, D):
             continue
-        yield from _traverse(D, max_k)
+        yield from _traverse(D, max_k, quota, mass_at_k, factorial_N)
 
 
 def enumerate_doubly_even_at(N: int, k: int) -> Iterator[EnumeratedCode]:

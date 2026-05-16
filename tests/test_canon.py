@@ -8,7 +8,10 @@ import pytest
 
 from doubly_even.canon.nauty import (
     are_equivalent,
+    cached_canon_info,
     canon_info,
+    canon_info_cache_clear,
+    canon_info_cache_info,
     canonical_form,
 )
 from doubly_even.spec.codes import Code
@@ -160,3 +163,36 @@ def test_aut_generators_preserve_code():
             assert permuted in C, (
                 f"generator {sigma} sent basis vector {b:#010b} outside C"
             )
+
+
+# ----------------------------------------------------- cached_canon_info
+
+
+def test_cached_canon_info_equals_canon_info():
+    """The cached wrapper must return values equal to the raw function."""
+    canon_info_cache_clear()
+    C = Code(8, (0b00001111, 0b11110000))
+    assert cached_canon_info(C) == canon_info(C)
+
+
+def test_cached_canon_info_collides_on_subspace():
+    """Two ``Code`` instances with different bases for the same subspace
+    must collide on a single cache entry."""
+    canon_info_cache_clear()
+    # Same subspace as ⟨0b0011, 0b1100⟩ on n=4, presented two ways.
+    C1 = Code(4, (0b0011, 0b1100))
+    C2 = Code(4, (0b1100, 0b1111))  # 0b1111 = 0b0011 XOR 0b1100, span unchanged
+    info1 = cached_canon_info(C1)
+    info2 = cached_canon_info(C2)
+    assert info1 == info2
+    # Exactly one entry in the cache: both calls hit the same key.
+    assert canon_info_cache_info().currsize == 1
+
+
+def test_cached_canon_info_cache_clear():
+    canon_info_cache_clear()
+    assert canon_info_cache_info().currsize == 0
+    cached_canon_info(Code.zero(4))
+    assert canon_info_cache_info().currsize == 1
+    canon_info_cache_clear()
+    assert canon_info_cache_info().currsize == 0

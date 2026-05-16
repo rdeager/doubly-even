@@ -9,6 +9,7 @@ import pytest
 
 from doubly_even.canon.nauty import canon_info
 from doubly_even.enumerate.augment import (
+    _weight_enum,
     canonical_parent,
     enumerate_doubly_even,
     enumerate_doubly_even_at,
@@ -17,9 +18,35 @@ from doubly_even.enumerate.augment import (
 from doubly_even.spec.codes import Code
 from doubly_even.spec.doubly_even import is_doubly_even
 from doubly_even.spec.mass import sigma_brute
+from doubly_even.spec.vectors import apply_permutation
 
 
 # -------------------------------------------------------- canonical parent
+
+
+# ------------------------------------- _weight_enum (Aut-orbit prefilter)
+
+
+def test_weight_enum_invariant_under_aut_generators():
+    """Every codeword weight is preserved by column permutation, so applying
+    any ``σ ∈ Aut(C)`` to ``C``'s basis must give a code with the same
+    sorted weight enumerator."""
+    C = Code(8, (0b00001111, 0b11110000))
+    info = canon_info(C)
+    base = _weight_enum(C)
+    for sigma in info.aut_generators:
+        sigma_list = list(sigma)
+        permuted_basis = tuple(apply_permutation(b, sigma_list) for b in C.basis)
+        C_sigma = Code(C.n, permuted_basis)
+        assert _weight_enum(C_sigma) == base
+
+
+def test_weight_enum_distinguishes_inequivalent_codes():
+    """Two codes with different weight enumerators are guaranteed in
+    different Aut-orbits; the prefilter relies on this direction."""
+    C1 = Code(8, (0b00001111,))            # weight enumerator: {0, 4}
+    C2 = Code(8, (0b11111111,))            # weight enumerator: {0, 8}
+    assert _weight_enum(C1) != _weight_enum(C2)
 
 
 def test_canonical_parent_drops_one_dimension():

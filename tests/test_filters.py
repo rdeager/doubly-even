@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import pytest
+
 from doubly_even.canon.nauty import canon_info
+from doubly_even.enumerate.augment import enumerate_doubly_even
 from doubly_even.enumerate.filters import (
     aut_orbit_minima,
     coset_reps_in_dual_mod_code,
     doubly_even_candidates,
     reduce_mod_code,
+    standard_form_coset_reps,
     weight_mod_four_zero,
 )
 from doubly_even.spec.codes import Code
@@ -47,6 +51,49 @@ def test_coset_reps_include_zero():
     C = Code(6, (0b001111,))
     reps = list(coset_reps_in_dual_mod_code(C))
     assert 0 in reps
+
+
+# ----------------------------------- standard-form (B.3) quotient enumeration
+
+
+@pytest.mark.parametrize("N", [4, 6, 8, 10, 12])
+def test_standard_form_matches_dual_enum(N):
+    """Across every doubly even code at length N, standard_form_coset_reps
+    agrees set-wise with the reduce(coset_reps_in_dual_mod_code) reference.
+    """
+    for ec in enumerate_doubly_even(N):
+        C = ec.code
+        old = {reduce_mod_code(v, C) for v in coset_reps_in_dual_mod_code(C)}
+        new = set(standard_form_coset_reps(C))
+        assert old == new, (
+            f"standard_form_coset_reps disagrees with dual enum at "
+            f"N={N}, k={C.rank}, basis={list(C.basis)!r}"
+        )
+
+
+@pytest.mark.parametrize(
+    "C",
+    [
+        Code.zero(4),
+        Code.zero(8),
+        Code(8, (0b00001111,)),
+        Code(8, (0b00001111, 0b11110000)),
+    ],
+)
+def test_standard_form_count_matches_quotient_dim(C):
+    """For doubly even ``C``, ``standard_form_coset_reps`` enumerates
+    exactly ``2^(n - 2k)`` cosets — the dimension of ``C⊥ / C``."""
+    reps = list(standard_form_coset_reps(C))
+    assert len(reps) == 2 ** (C.n - 2 * C.rank)
+
+
+def test_standard_form_reps_zero_on_pivots():
+    """Every emitted rep should have zero bits at C's pivot columns."""
+    C = Code(8, (0b00001111, 0b11110000))
+    _, pivots = C.rref_basis()
+    mask = sum(1 << p for p in pivots)
+    for v in standard_form_coset_reps(C):
+        assert v & mask == 0
 
 
 # ----------------------------------------------------- weight-mod-4 filter

@@ -7,23 +7,37 @@ it because completeness of enumeration is certified by
     Σ_{[C]} N! / |Aut(C)| == σ(N, k).
 
 There is a closed-form expression (Gaborit 1996) that handles all ``N`` and
-``k``. We do not yet have Gaborit's paper — DFGHILM eq. (B.2) provides a
-transcription, but the Mathpix rendering is partially mangled and the
-``N ≡ 0 (mod 8)`` branch does not reproduce the small cases. Until we have
-the original paper to verify, this module exposes:
+``k``. We use the *quadratic-space* recast (cleaner around ``N ≡ 0, 4 mod 8``
+than the original DFGHILM B.1 form): doubly even codes are totally singular
+subspaces of the binary quadratic form ``q(x) = wt(x)/2 mod 2`` on the
+even-weight hyperplane. Letting
+
+    Ω_ε(2m, t) = Π_{i=0}^{t-1} (2^{2m-2i-1} + ε·2^{m-i-1} − 1) / (2^{i+1} − 1)
+
+with the convention "empty product = 1, ``t < 0`` or ``t > m`` is outside
+the Witt range and contributes 0", we have
+
+    σ(N, k) =
+        Ω_+(N-1, k)                                    if N ≡ 1, 7 (mod 8)
+        Ω_-(N-1, k)                                    if N ≡ 3, 5 (mod 8)
+        Π_{i=0}^{k-1} (2^{N-2i-2} − 1) / (2^{i+1} − 1)  if N ≡ 2, 6 (mod 8)
+        Ω_+(N-2, k-1) + 2^k · Ω_+(N-2, k)              if N ≡ 0 (mod 8)
+        Ω_-(N-2, k-1) + 2^k · Ω_-(N-2, k)              if N ≡ 4 (mod 8)
+
+This module exposes:
 
 * :func:`sigma_brute` — direct enumeration. Slow but correct. Tractable for
-  ``N`` up to about 10.
-* :func:`gaborit_sigma` — provisional closed form. Currently raises
-  ``NotImplementedError`` for cases we have not verified.
+  ``N`` up to about 10. Stays as the ground-truth oracle.
+* :func:`gaborit_sigma` — the closed form above. Cached.
 
-When Gaborit's paper arrives we will fill in :func:`gaborit_sigma` and add
-agreement tests against :func:`sigma_brute` on the overlap.
+The two functions are cross-checked in ``tests/test_mass_small.py`` for
+every ``(N, k)`` with ``N ≤ 10``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from fractions import Fraction
 from functools import lru_cache
 
 from .codes import Code
@@ -90,19 +104,39 @@ def _candidates(C: Code, words: frozenset[int]) -> Iterator[int]:
 # -------------------------------------------------------------- closed form
 
 
+def _omega(m: int, t: int, eps: int) -> int:
+    """The ``Ω_ε(2m, t)`` factor of Gaborit's quadratic-space form.
+
+    Returns ``0`` for ``t < 0`` or ``t > m`` (outside the Witt range).
+    The product is computed over :class:`fractions.Fraction` so the
+    individual (non-integer) factors don't lose precision before the
+    whole product simplifies to an integer.
+    """
+    if t < 0 or t > m:
+        return 0
+    if t == 0:
+        return 1
+    result = Fraction(1)
+    for i in range(t):
+        numer = (1 << (2 * m - 2 * i - 1)) + eps * (1 << (m - i - 1)) - 1
+        denom = (1 << (i + 1)) - 1
+        result *= Fraction(numer, denom)
+    if result.denominator != 1:
+        raise RuntimeError(
+            f"Ω_{'+' if eps > 0 else '-'}({2 * m}, {t}) did not simplify to "
+            f"an integer: got {result}; formula or domain bug"
+        )
+    return int(result)
+
+
+@lru_cache(maxsize=None)
 def gaborit_sigma(N: int, k: int) -> int:
-    """Provisional closed form for ``σ(N, k)``.
+    """Closed-form ``σ(N, k)``, the number of labelled doubly even
+    ``[N, k]`` codes.
 
-    **Currently unimplemented.** The DFGHILM Mathpix transcription of
-    Gaborit's formula does not reproduce small cases for ``N ≡ 0 (mod 8)``
-    (concretely, the ``ϖ`` correction factor is wrong or the wrong sign).
-    Rather than guess, we raise here and let the caller fall back to
-    :func:`sigma_brute` until we have Gaborit's paper to verify the formula.
-
-    Cases handled trivially:
-
-    * ``k == 0``: returns 1 (the zero code).
-    * ``2k > N``: returns 0 (no doubly even code can be larger than half-rank).
+    Uses the quadratic-space form documented at the top of this module.
+    Cross-checked against :func:`sigma_brute` for ``N ≤ 10`` and against
+    the enumerator's mass output ``Σ N!/|Aut(C_i)|`` for ``N ≤ 18``.
     """
     if k < 0 or N < 0:
         raise ValueError(f"need N, k ≥ 0, got N={N}, k={k}")
@@ -110,10 +144,33 @@ def gaborit_sigma(N: int, k: int) -> int:
         return 1
     if 2 * k > N:
         return 0
-    raise NotImplementedError(
-        "gaborit_sigma needs verification against Gaborit (1996); "
-        f"use sigma_brute({N}, {k}) for small N in the meantime"
-    )
+
+    r = N % 8
+    if r in (1, 7):
+        return _omega((N - 1) // 2, k, +1)
+    if r in (3, 5):
+        return _omega((N - 1) // 2, k, -1)
+    if r in (2, 6):
+        # Π_{i=0}^{k-1} (2^{N-2i-2} − 1) / (2^{i+1} − 1)
+        result = Fraction(1)
+        for i in range(k):
+            result *= Fraction(
+                (1 << (N - 2 * i - 2)) - 1,
+                (1 << (i + 1)) - 1,
+            )
+        if result.denominator != 1:
+            raise RuntimeError(
+                f"σ({N}, {k}) [N≡2,6 mod 8 branch] did not simplify to "
+                f"an integer: got {result}"
+            )
+        return int(result)
+    if r == 0:
+        m = (N - 2) // 2
+        return _omega(m, k - 1, +1) + (1 << k) * _omega(m, k, +1)
+    if r == 4:
+        m = (N - 2) // 2
+        return _omega(m, k - 1, -1) + (1 << k) * _omega(m, k, -1)
+    raise AssertionError(f"unreachable: N % 8 = {r}")
 
 
 # ------------------------------------------------------------------- helpers
