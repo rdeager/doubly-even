@@ -7,6 +7,7 @@
 
 pub mod candidates;
 pub mod canon;
+pub mod feulner;
 pub mod linalg;
 pub mod orbit;
 pub mod quotient;
@@ -168,6 +169,33 @@ fn py_canon_info_native(
     )
 }
 
+/// Feulner-style canonicaliser — column-side partition refinement, no nauty.
+///
+/// Same contract as [`py_canon_info_native`] but the algorithm avoids
+/// materialising the `2^k + N`-vertex bipartite graph. Returns
+/// `(canonical_column_order, aut_generators, aut_order_decimal,
+/// column_orbits)`; Python converts the decimal string to an int.
+#[pyfunction]
+#[pyo3(name = "canon_info_feulner_native")]
+fn py_canon_info_feulner_native(
+    rref: Vec<BinVec>,
+    n: u32,
+) -> PyResult<(Vec<u32>, Vec<Vec<u32>>, String, Vec<u32>)> {
+    if n > types::MAX_N {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "n = {n} exceeds MAX_N = {}; the u64 kernel supports N up to 64",
+            types::MAX_N,
+        )));
+    }
+    let info = feulner::canon_info_feulner(&rref, n);
+    Ok((
+        info.canonical_column_order,
+        info.aut_generators,
+        info.aut_order_decimal,
+        info.column_orbits,
+    ))
+}
+
 // ------------------------------------------------------ module assembly
 
 #[pymodule]
@@ -175,6 +203,7 @@ fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Production entry points.
     m.add_function(wrap_pyfunction!(py_doubly_even_candidates_q, m)?)?;
     m.add_function(wrap_pyfunction!(py_canon_info_native, m)?)?;
+    m.add_function(wrap_pyfunction!(py_canon_info_feulner_native, m)?)?;
 
     // Stage-level helpers under `doubly_even_kernel.debug`.
     let debug = PyModule::new(m.py(), "debug")?;

@@ -25,6 +25,7 @@ is always exact.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -39,6 +40,11 @@ try:  # pragma: no cover -- import-side switch
     import doubly_even_kernel as _kernel
 except ImportError:  # pragma: no cover
     _kernel = None
+
+# Selecting `feulner` makes `canon_info` route through the Rust Feulner
+# canonicaliser instead of nauty. Defaults to nauty for safety until
+# benchmarks confirm Feulner is faster on the doubly-even shape.
+_CANON_BACKEND = os.environ.get("DOUBLY_EVEN_CANON_BACKEND", "nauty").lower()
 
 
 @dataclass(frozen=True)
@@ -97,7 +103,19 @@ def _trustable_pynauty_order(grpsize1: float, grpsize2: int) -> int | None:
 
 
 def canon_info(C: Code) -> CanonInfo:
-    """Compute canonical form and automorphism group of ``C``."""
+    """Compute canonical form and automorphism group of ``C``.
+
+    Backend dispatch (in order):
+
+    1. ``DOUBLY_EVEN_CANON_BACKEND=feulner`` with the Rust kernel built →
+       :func:`doubly_even.canon.feulner.canon_info_feulner_native`.
+    2. Rust kernel built → :func:`_canon_info_via_kernel` (nauty bipartite path).
+    3. Pure Python fallback → :func:`_canon_info_via_pynauty`.
+    """
+    if _CANON_BACKEND == "feulner" and _kernel is not None:
+        # Local import to avoid a top-level circular dep with .feulner.
+        from .feulner import canon_info_feulner_native
+        return canon_info_feulner_native(C)
     if _kernel is not None:
         return _canon_info_via_kernel(C)
     return _canon_info_via_pynauty(C)
