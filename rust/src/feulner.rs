@@ -206,6 +206,37 @@ fn orbits_on_subset(gens: &[&Perm], subset: &[u32]) -> HashMap<u32, u32> {
     subset.iter().map(|&c| (c, find(&mut parent, c))).collect()
 }
 
+// ------------------------------------------------- initial column partition
+
+/// Aut-invariant 2-cell start: split columns by "lies in `support(C)`".
+///
+/// A column `j` is covered by the code iff some RREF row has bit `j` set
+/// (equivalent to: some codeword has bit `j` set, since the RREF spans
+/// the support). `Aut(C)` permutes covered and uncovered columns
+/// separately, so this split is free and strictly finer than `{0..n-1}`
+/// whenever `C` has any uncovered column.
+fn initial_partition(rref: &[BinVec], n: u32) -> Vec<Vec<u32>> {
+    let mut support: BinVec = 0;
+    for &row in rref {
+        support |= row;
+    }
+    let nonzero: Vec<u32> =
+        (0..n).filter(|&j| (support >> j) & 1 == 1).collect();
+    let zero: Vec<u32> =
+        (0..n).filter(|&j| (support >> j) & 1 == 0).collect();
+    let mut cells: Vec<Vec<u32>> = Vec::new();
+    if !nonzero.is_empty() {
+        cells.push(nonzero);
+    }
+    if !zero.is_empty() {
+        cells.push(zero);
+    }
+    if cells.is_empty() {
+        cells.push((0..n).collect());
+    }
+    cells
+}
+
 // ------------------------------------- refiner enumeration + partition refine
 
 /// Enumerate `Aut(C)`-invariant refiner codewords.
@@ -338,6 +369,7 @@ struct SearchState {
     rref_to_pi: HashMap<Vec<BinVec>, Perm>,
     best_rref: Option<Vec<BinVec>>,
     aut_gens: Vec<Perm>,
+    seen_gens: HashSet<Perm>,
 }
 
 impl SearchState {
@@ -347,6 +379,16 @@ impl SearchState {
             rref_to_pi: HashMap::new(),
             best_rref: None,
             aut_gens: Vec::new(),
+            seen_gens: HashSet::new(),
+        }
+    }
+
+    /// Push an aut generator only if it hasn't already been collected.
+    /// Many leaves yield the same permutation via different paths; deduping
+    /// keeps `aut_gens` small and the per-iteration `fixing_gens` filter cheap.
+    fn push_aut(&mut self, g: Perm) {
+        if self.seen_gens.insert(g.clone()) {
+            self.aut_gens.push(g);
         }
     }
 }
@@ -376,7 +418,7 @@ fn search(
             // In our convention compose(inverse(prior), pi).
             let inv_prior = perm_inverse(prior);
             let aut_gen = perm_compose(&inv_prior, &pi);
-            state.aut_gens.push(aut_gen);
+            state.push_aut(aut_gen);
         } else {
             let is_new_best =
                 state.best_rref.as_ref().map_or(true, |b| &rref_tuple < b);
@@ -392,21 +434,29 @@ fn search(
     let cell_idx = p.iter().position(|c| c.len() > 1).unwrap();
     let cell = p[cell_idx].clone();
 
-    // Pruning: orbits of cell under aut-gens that fix the current path.
-    let fixing_gens: Vec<&Perm> = state
-        .aut_gens
-        .iter()
-        .filter(|g| path.iter().all(|&pj| g[pj as usize] == pj))
-        .collect();
-    let orbit_rep: HashMap<u32, u32> = if !fixing_gens.is_empty() {
-        orbits_on_subset(&fixing_gens, &cell)
-    } else {
-        cell.iter().map(|&c| (c, c)).collect()
-    };
-
+    // Iterate cell columns, refreshing orbit_rep every step new generators
+    // arrive. Descendants of earlier iterations push auts; those auts may
+    // identify later siblings with already-explored ones — we must catch
+    // that or the search will redo work it has already proven equivalent.
     let mut seen: HashSet<u32> = HashSet::new();
     let mut new_path: Vec<u32> = path.to_vec();
+    let mut orbit_rep: HashMap<u32, u32> =
+        cell.iter().map(|&c| (c, c)).collect();
+    let mut last_n_gens: usize = usize::MAX;
     for &col in &cell {
+        if state.aut_gens.len() != last_n_gens {
+            last_n_gens = state.aut_gens.len();
+            let fixing_gens: Vec<&Perm> = state
+                .aut_gens
+                .iter()
+                .filter(|g| path.iter().all(|&pj| g[pj as usize] == pj))
+                .collect();
+            orbit_rep = if !fixing_gens.is_empty() {
+                orbits_on_subset(&fixing_gens, &cell)
+            } else {
+                cell.iter().map(|&c| (c, c)).collect()
+            };
+        }
         let rep = orbit_rep[&col];
         if !seen.insert(rep) {
             continue;
@@ -471,7 +521,7 @@ pub fn canon_info_feulner(rref: &[BinVec], n: u32) -> FeulnerCanonInfo {
 
     let refiners = invariant_refiners(rref);
     let mut state = SearchState::new(n);
-    let initial: Vec<Vec<u32>> = vec![(0..n).collect()];
+    let initial = initial_partition(rref, n);
     search(initial, rref, &refiners, &mut state, &[]);
 
     let aut_order = group_order(&state.aut_gens, n);

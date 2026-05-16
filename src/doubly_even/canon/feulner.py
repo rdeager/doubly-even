@@ -80,6 +80,17 @@ class _SearchState:
     rref_to_pi: dict[tuple[int, ...], Perm] = field(default_factory=dict)
     best_rref: tuple[int, ...] | None = None
     aut_gens: list[Perm] = field(default_factory=list)
+    _seen_gens: set[Perm] = field(default_factory=set)
+
+    def push_aut(self, g: Perm) -> None:
+        """Dedupe before pushing — a leaf that matches the canonical
+        re-yields the same permutation through different paths often
+        enough that uniqueness saves both memory and per-iteration
+        ``fixing_gens`` filter work."""
+        if g in self._seen_gens:
+            return
+        self._seen_gens.add(g)
+        self.aut_gens.append(g)
 
 
 def canon_info_feulner(C: Code) -> CanonInfo:
@@ -100,7 +111,7 @@ def canon_info_feulner(C: Code) -> CanonInfo:
 
     refiners = _invariant_refiners(rref, k)
     state = _SearchState(n=n)
-    _search([list(range(n))], rref, refiners, state, path=())
+    _search(_initial_partition(rref, n), rref, refiners, state, path=())
 
     aut_gens = tuple(state.aut_gens)
     aut_order = group_order(aut_gens, n) if aut_gens else 1
@@ -131,6 +142,29 @@ def _sn_canon_info(n: int) -> CanonInfo:
         aut_order=math.factorial(n),
         column_orbits=(0,) * n,
     )
+
+
+def _initial_partition(rref: tuple[int, ...], n: int) -> list[list[int]]:
+    """Aut-invariant initial column partition.
+
+    A column `j` is "covered" by `C` iff some codeword has bit `j` set —
+    equivalently iff some rref row does (rref spans the same support set
+    as the code). Aut(C) is a subgroup of the support's symmetric group
+    direct sum with the non-support's symmetric group, so this two-cell
+    split costs nothing and is strictly finer than `{0..n-1}` whenever
+    `C` has any non-covered column.
+    """
+    support_mask = 0
+    for row in rref:
+        support_mask |= row
+    nonzero = [j for j in range(n) if (support_mask >> j) & 1]
+    zero = [j for j in range(n) if not (support_mask >> j) & 1]
+    cells: list[list[int]] = []
+    if nonzero:
+        cells.append(nonzero)
+    if zero:
+        cells.append(zero)
+    return cells or [list(range(n))]
 
 
 def _invariant_refiners(rref: tuple[int, ...], k: int) -> list[int]:
@@ -274,7 +308,7 @@ def _search(
         if prior is not None:
             # Two leaves with the same canonical RREF ⇒ pi · prior^-1 ∈ Aut.
             # In our convention this is compose(inverse(prior), pi).
-            state.aut_gens.append(compose(inverse(prior), pi))
+            state.push_aut(compose(inverse(prior), pi))
         else:
             state.rref_to_pi[rref_tuple] = pi
             if state.best_rref is None or rref_tuple < state.best_rref:
@@ -284,18 +318,23 @@ def _search(
     cell_idx = next(i for i, c in enumerate(P) if len(c) > 1)
     cell = P[cell_idx]
 
-    if state.aut_gens:
-        fixing_gens = [g for g in state.aut_gens if all(g[p] == p for p in path)]
-    else:
-        fixing_gens = []
-    orbit_rep = (
-        _orbits_on_subset(fixing_gens, cell)
-        if fixing_gens
-        else {c: c for c in cell}
-    )
-
+    # Iterate cell columns, refreshing orbit_rep every step so newly
+    # discovered automorphisms (added by descendant leaves of earlier
+    # iterations) prune later siblings that lie in their orbit.
     seen: set[int] = set()
+    last_n_gens = -1
+    orbit_rep: dict[int, int] = {c: c for c in cell}
     for col in cell:
+        if len(state.aut_gens) != last_n_gens:
+            last_n_gens = len(state.aut_gens)
+            fixing_gens = [
+                g for g in state.aut_gens if all(g[p] == p for p in path)
+            ]
+            orbit_rep = (
+                _orbits_on_subset(fixing_gens, cell)
+                if fixing_gens
+                else {c: c for c in cell}
+            )
         rep = orbit_rep[col]
         if rep in seen:
             continue
