@@ -41,6 +41,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
+from functools import lru_cache
 
 from ..canon.nauty import CanonInfo, cached_canon_info
 from ..spec.codes import Code, _compute_rref
@@ -95,6 +96,30 @@ def _subspace_key(C: Code) -> tuple[int, ...]:
     return C.rref_basis()[0]
 
 
+@lru_cache(maxsize=None)
+def _weight_enum_by_rref(rref: tuple[int, ...]) -> tuple[int, ...]:
+    """Sorted codeword-weight tuple, keyed by RREF basis.
+
+    Pure function of the subspace (the RREF basis is the canonical
+    subspace identifier), so memoising here collapses repeated calls
+    from sibling expansions of the parent-test BFS.
+    """
+    k = len(rref)
+    weights: list[int] = []
+    for mask in range(1 << k):
+        w = 0
+        m = mask
+        i = 0
+        while m:
+            if m & 1:
+                w ^= rref[i]
+            m >>= 1
+            i += 1
+        weights.append(w.bit_count())
+    weights.sort()
+    return tuple(weights)
+
+
 def _weight_enum(C: Code) -> tuple[int, ...]:
     """Sorted tuple of codeword weights. ``Aut``-orbit invariant on subspaces.
 
@@ -103,8 +128,15 @@ def _weight_enum(C: Code) -> tuple[int, ...]:
     weight enumerators are guaranteed to lie in different orbits of any
     column-permutation group, so we can short-circuit the orbit BFS
     without doing any ``apply_permutation`` work.
+
+    Delegates to the RREF-keyed cache :func:`_weight_enum_by_rref`.
     """
-    return tuple(sorted(w.bit_count() for w in C.codewords()))
+    return _weight_enum_by_rref(C.rref_basis()[0])
+
+
+def weight_enum_cache_clear() -> None:
+    """Drop every entry from the :func:`_weight_enum_by_rref` cache."""
+    _weight_enum_by_rref.cache_clear()
 
 
 def is_canonical_augmentation(
@@ -145,7 +177,7 @@ def _in_aut_orbit_of_subspace(
     start_key = _subspace_key(C)
     if start_key == target_key:
         return True
-    if _weight_enum(C) != _weight_enum(target):
+    if _weight_enum_by_rref(start_key) != _weight_enum_by_rref(target_key):
         return False
     sigma_lists = [list(g) for g in aut_generators]
     if not sigma_lists:
