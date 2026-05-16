@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Enumerate doubly even binary linear codes up to permutation equivalence"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pynauty>=2.8.8.1",
+]
 
 [project.scripts]
 dec = "doubly_even.cli:main"
