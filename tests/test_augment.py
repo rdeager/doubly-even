@@ -92,6 +92,35 @@ def test_equivalence_class_counts(N, k, expected_classes):
     assert len(codes) == expected_classes
 
 
+# DFGHILM Appendix B Table 3 — number of permutation-equivalence classes
+# of doubly even [N, k] codes. Independent published values; our enumerator
+# must match exactly. (Only the cells that fit in the table; some larger
+# N, k cases were starred (*) in the paper as "still being enumerated".)
+DFGHILM_TABLE_3: dict[tuple[int, int], int] = {
+    (4, 1): 1,
+    (5, 1): 1,
+    (6, 1): 1, (6, 2): 1,
+    (7, 1): 1, (7, 2): 1, (7, 3): 1,
+    (8, 1): 2, (8, 2): 2, (8, 3): 2, (8, 4): 1,
+    (9, 1): 2, (9, 2): 2, (9, 3): 2, (9, 4): 1,
+    (10, 1): 2, (10, 2): 3, (10, 3): 3, (10, 4): 2,
+    (11, 1): 2, (11, 2): 3, (11, 3): 4, (11, 4): 3,
+    (12, 1): 3, (12, 2): 5, (12, 3): 7, (12, 4): 7, (12, 5): 2,
+}
+
+
+@pytest.mark.parametrize(
+    "Nk, expected", sorted(DFGHILM_TABLE_3.items())
+)
+def test_matches_dfghilm_table_3(Nk, expected):
+    """Cross-check against DFGHILM Appendix B Table 3."""
+    N, k = Nk
+    classes = sum(1 for _ in enumerate_doubly_even_at(N, k))
+    assert classes == expected, (
+        f"N={N}, k={k}: enumerator={classes}, DFGHILM Table 3={expected}"
+    )
+
+
 # --------------------------------------------------- emitted codes valid
 
 
