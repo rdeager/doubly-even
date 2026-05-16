@@ -35,6 +35,11 @@ from ..spec.vectors import apply_permutation
 from .bipartite import bipartite_graph
 from .permutations import group_order
 
+try:  # pragma: no cover -- import-side switch
+    import doubly_even_kernel as _kernel
+except ImportError:  # pragma: no cover
+    _kernel = None
+
 
 @dataclass(frozen=True)
 class CanonInfo:
@@ -93,6 +98,37 @@ def _trustable_pynauty_order(grpsize1: float, grpsize2: int) -> int | None:
 
 def canon_info(C: Code) -> CanonInfo:
     """Compute canonical form and automorphism group of ``C``."""
+    if _kernel is not None:
+        return _canon_info_via_kernel(C)
+    return _canon_info_via_pynauty(C)
+
+
+def _canon_info_via_kernel(C: Code) -> CanonInfo:
+    """Same contract as :func:`canon_info`, via the Rust kernel.
+
+    Builds the bipartite codeword × column sparsegraph entirely in Rust and
+    runs `sparsenauty` directly — no Python `bipartite_graph` dict, no
+    pynauty wrapper. One FFI call per parent vs pynauty's two (`autgrp` +
+    `canon_label`).
+    """
+    rref, _ = C.rref_basis()
+    canonical_column_order, aut_generators, grpsize1, grpsize2, column_orbits = (
+        _kernel.canon_info_native(rref, C.n)
+    )
+    aut_generators_tuple = tuple(tuple(g) for g in aut_generators)
+    aut_order = _trustable_pynauty_order(grpsize1, grpsize2)
+    if aut_order is None:
+        aut_order = group_order(aut_generators_tuple, C.n)
+    return CanonInfo(
+        canonical_column_order=tuple(canonical_column_order),
+        aut_generators=aut_generators_tuple,
+        aut_order=aut_order,
+        column_orbits=tuple(column_orbits),
+    )
+
+
+def _canon_info_via_pynauty(C: Code) -> CanonInfo:
+    """Reference Python path; preserved as the cross-check oracle."""
     enc = bipartite_graph(C)
 
     # ---- automorphism group --------------------------------------------------

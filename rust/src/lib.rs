@@ -6,6 +6,7 @@
 //! `debug` submodule exposes each stage individually for cross-check tests.
 
 pub mod candidates;
+pub mod canon;
 pub mod linalg;
 pub mod orbit;
 pub mod quotient;
@@ -138,12 +139,42 @@ fn py_aut_orbit_minima_q_witt(
     orbit::aut_orbit_minima_q_witt(&reps_q, &sigma_qs, l)
 }
 
+// ------------------------------------------------------ canon FFI surface
+
+/// Native replacement for `canon.nauty.canon_info` + `canon.bipartite.bipartite_graph`.
+///
+/// Takes the RREF basis of a code and its length; runs nauty on the bipartite
+/// codeword × column encoding internally (no Python dict, no double FFI hop).
+/// Returns a tuple matching the fields of `CanonInfo`:
+///
+///   `(canonical_column_order, aut_generators, grpsize1, grpsize2, column_orbits)`
+///
+/// `grpsize1`/`grpsize2` are nauty's native group-order float pair; Python is
+/// already set up to convert these to an exact int via `_trustable_pynauty_order`
+/// (falling back to Schreier-Sims when the float is past `2^53`).
+#[pyfunction]
+#[pyo3(name = "canon_info_native")]
+fn py_canon_info_native(
+    rref: Vec<BinVec>,
+    n: u32,
+) -> (Vec<u32>, Vec<Vec<u32>>, f64, i32, Vec<u32>) {
+    let info = canon::canon_info_native(&rref, n);
+    (
+        info.canonical_column_order,
+        info.aut_generators,
+        info.grpsize1,
+        info.grpsize2,
+        info.column_orbits,
+    )
+}
+
 // ------------------------------------------------------ module assembly
 
 #[pymodule]
 fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Production entry point.
+    // Production entry points.
     m.add_function(wrap_pyfunction!(py_doubly_even_candidates_q, m)?)?;
+    m.add_function(wrap_pyfunction!(py_canon_info_native, m)?)?;
 
     // Stage-level helpers under `doubly_even_kernel.debug`.
     let debug = PyModule::new(m.py(), "debug")?;

@@ -14,3 +14,4 @@ dist/
 # Local-only profiler + benchmark outputs.
 scripts/bench-results/
 *.prof
+/rust/core
