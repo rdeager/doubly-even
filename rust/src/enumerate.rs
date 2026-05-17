@@ -54,6 +54,20 @@ struct State {
     /// Counter of true cache misses (one nauty call apiece).
     pub stats_canon_calls: u64,
     pub stats_primary_hits: u64,
+    /// Secondary cache: weight enumerator → list of canonical forms already
+    /// computed for that bucket. Instrumentation only — we still call nauty
+    /// on every primary miss, but we record whether the new RREF turns out
+    /// to be permutation-equivalent to an entry already in its bucket. If
+    /// the would-be-hit rate is high, there's room for a real verification
+    /// scheme that skips the nauty call when a bucket entry matches.
+    secondary_cache: HashMap<Vec<u32>, Vec<Vec<BinVec>>>,
+    /// Times we consulted the secondary cache (primary missed AND bucket non-empty).
+    pub stats_secondary_attempts: u64,
+    /// Times the new RREF's canonical form already lived in the bucket —
+    /// i.e., we just paid for a nauty call on something we'd recognised.
+    pub stats_secondary_hits: u64,
+    /// Whether to populate the secondary cache (env-gated).
+    instrument_secondary: bool,
     output: Vec<EnumeratedRaw>,
 }
 
@@ -103,8 +117,27 @@ impl State {
             canon_cache: HashMap::new(),
             stats_canon_calls: 0,
             stats_primary_hits: 0,
+            secondary_cache: HashMap::new(),
+            stats_secondary_attempts: 0,
+            stats_secondary_hits: 0,
+            instrument_secondary: std::env::var("DOUBLY_EVEN_SECONDARY_CACHE_INSTRUMENTATION")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
             output: Vec::new(),
         }
+    }
+
+    /// Compute the canonical-form RREF of `rref` given its canonical column
+    /// order: apply σ to each row, then RREF. Two permutation-equivalent
+    /// subspaces produce the same canonical form, so this acts as an
+    /// equivalence-class identifier.
+    fn canonical_form(&self, rref: &[BinVec], canonical_column_order: &[u32]) -> Vec<BinVec> {
+        let permuted: Vec<BinVec> = rref
+            .iter()
+            .map(|&b| apply_permutation(b, canonical_column_order))
+            .collect();
+        let (rr, _) = row_reduce(&permuted, self.n);
+        rr
     }
 
     /// Compute canon info for the code given by `rref`, or recover from cache.
@@ -116,13 +149,36 @@ impl State {
         }
 
         // True miss: call nauty.
-        // (A secondary perm-equivalence cache was tried here, keyed on
-        // `weight_enum`. It cannot work as a verification cache: the BFS
-        // `Aut(D') · D' = {D'}` because aut generators preserve D' as a
-        // subspace — they never reach an equivalent-but-distinct subspace.
-        // Without a cheap permutation-equivalence test, there is no path
-        // around running nauty.)
         self.stats_canon_calls += 1;
+
+        // Secondary-cache instrumentation: opt-in via the
+        // `DOUBLY_EVEN_SECONDARY_CACHE_INSTRUMENTATION=1` env var. When
+        // disabled (the default), the recursion has no secondary-cache
+        // overhead. When enabled, we count how often a new RREF is
+        // permutation-equivalent to one already cached under a different
+        // basis — useful for measuring headroom of a future cheap-
+        // verification dedup scheme. We still call nauty unconditionally;
+        // the counter answers "what fraction of nauty calls land on a code
+        // we already canonised under another basis?".
+        let we_key = if self.instrument_secondary {
+            Some(weight_enum(rref))
+        } else {
+            None
+        };
+        let bucket_was_nonempty = if let Some(key) = we_key.as_ref() {
+            let nonempty = self
+                .secondary_cache
+                .get(key)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            if nonempty {
+                self.stats_secondary_attempts += 1;
+            }
+            nonempty
+        } else {
+            false
+        };
+
         // Dispatch: when 2^k is large the low-weight-incidence graph (Q_D)
         // beats the full bipartite by a factor that grows with 2^k / |C_low|.
         // For small k the full graph is already cheap, so we skip the span
@@ -140,6 +196,20 @@ impl State {
             &native.aut_generators,
             self.n,
         );
+
+        if let Some(key) = we_key {
+            // Compute canonical form to check secondary-cache membership.
+            let canonical = self.canonical_form(rref, &native.canonical_column_order);
+            if bucket_was_nonempty {
+                if let Some(bucket) = self.secondary_cache.get(&key) {
+                    if bucket.iter().any(|cf| cf == &canonical) {
+                        self.stats_secondary_hits += 1;
+                    }
+                }
+            }
+            self.secondary_cache.entry(key).or_default().push(canonical);
+        }
+
         let info = Rc::new(CachedInfo {
             canonical_column_order: native.canonical_column_order,
             aut_generators: native.aut_generators,
@@ -269,13 +339,18 @@ pub fn enumerate_doubly_even(
     max_k: u32,
     quota: Vec<u128>,
     factorial_n: u128,
-) -> (Vec<EnumeratedRaw>, (u64, u64)) {
+) -> (Vec<EnumeratedRaw>, (u64, u64, u64, u64)) {
     let mut state = State::new(n, max_k, quota, factorial_n);
     // Zero code: rref empty, pivots empty.
     let zero_rref: Vec<BinVec> = Vec::new();
     let zero_pivots: Vec<u32> = Vec::new();
     let info = state.canon_info(&zero_rref);
     state.traverse(zero_rref, zero_pivots, info);
-    let stats = (state.stats_canon_calls, state.stats_primary_hits);
+    let stats = (
+        state.stats_canon_calls,
+        state.stats_primary_hits,
+        state.stats_secondary_attempts,
+        state.stats_secondary_hits,
+    );
     (state.output, stats)
 }

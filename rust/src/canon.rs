@@ -450,9 +450,11 @@ fn build_low_weight_sparsegraph(
         cursor += size;
     }
     // Columns sub-cells by degree. Stable sort by degree, then put each
-    // distinct-degree run into its own cell. Side is implicit: columns
-    // come after all codewords in `lab`, so they can never collide with
-    // a codeword cell.
+    // distinct-degree run into its own cell. (Tried Bouyukliev §3.3's
+    // per-stratum-incidence fingerprint here as a strictly finer initial
+    // partition; the fingerprint-construction cost outweighed nauty's
+    // refinement savings at every N from 18 through 22 — measured ~1-5%
+    // regression. Reverted to degree-only.)
     let mut col_by_deg: Vec<(i32, c_int)> =
         (0..r as c_int).map(|j| (d[l + j as usize], (l as c_int) + j)).collect();
     col_by_deg.sort_unstable_by_key(|&(deg, _)| deg);
@@ -461,7 +463,6 @@ fn build_low_weight_sparsegraph(
         lab.push(vid);
         ptn.push(1);
     }
-    // Mark cell boundaries inside the column block where degree changes.
     for i in 0..r.saturating_sub(1) {
         if col_by_deg[i].0 != col_by_deg[i + 1].0 {
             ptn[col_start + i] = 0;

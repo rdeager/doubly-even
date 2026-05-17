@@ -292,7 +292,7 @@ fn py_enumerate_doubly_even(
     factorial_n: u128,
 ) -> PyResult<(
     Vec<(Vec<BinVec>, Vec<u32>, Vec<Vec<u32>>, String, Vec<u32>)>,
-    (u64, u64),
+    (u64, u64, u64, u64),
 )> {
     if n > types::MAX_N {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
