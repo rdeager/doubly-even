@@ -24,19 +24,27 @@ spec/        readable executable spec (math, no perf work)
   vectors.py     BinVec=int with bit ops, wt, dot, polarisation
   codes.py       Code dataclass (n, basis), rref, dual, contains, extend
   doubly_even.py is_doubly_even via Corollary B.1; augmentation predicate
-  mass.py        sigma_brute (works), gaborit_sigma (stub, see below)
+  mass.py        sigma_brute (works), gaborit_sigma (closed form)
 
-canon/       wraps pynauty for canonical labels + Aut(C)
+canon/       canonical labels + Aut(C); active backend is the Rust kernel
   bipartite.py   G(C) bipartite encoding (codewords × columns)
-  nauty.py       canon_info, canonical_form, are_equivalent
-  permutations.py hand-rolled Schreier-Sims for exact |Aut| (pynauty
-                  returns a float that loses precision past ~2^53)
-  matrix_group.py Schreier-Sims on GL(L, F_2) — phase-(b)
-                  scaffolding; reached only via the witt orbit path
+  nauty.py       canon_info, canonical_form, are_equivalent — dispatches
+                  to doubly_even_kernel when available (Rust + sparsenauty
+                  via nauty-Traces-sys); pynauty kept as Python fallback
+  permutations.py hand-rolled Schreier-Sims for exact |Aut| when nauty's
+                  float grpsize would lose precision past ~2^53
+  matrix_group.py Schreier-Sims on GL(L, F_2) — phase-(b) scaffolding,
+                  reachable via witt orbit path but not in active dispatch
+  feulner.py     Python oracle for the Rust Feulner column-side
+                  canonicaliser (rust/src/feulner.rs); D9 — 6× slower
+                  than nauty per call, kept as diff oracle / verifier
+                  substrate, not active default
+  paired_iso.py  Python prototype + reconstruction algebra for the
+                  Leon §10(i) paired-iso prefilter (D12, dormant)
 
 enumerate/   the canonical-augmentation search
   filters.py     coset reps in C-perp/C, weight-mod-4, Aut(C)-orbit-min
-                  (now-oracle paths kept for cross-checks; entry point
+                  (oracle paths kept for cross-checks; entry point
                   doubly_even_candidates delegates to quotient.py)
   quotient.py    Q_C-coordinate orbit-min with σ_Q lookup tables
                   (Milestone 4 phase (a); the hot path).
@@ -46,7 +54,20 @@ enumerate/   the canonical-augmentation search
   witt.py        closed-form Witt-type counts; singular_vectors is a
                   thin alias of singular_reps_Q (phase (b) stub)
   augment.py     canonical_parent(D); is_canonical_augmentation;
-                  enumerate_doubly_even(N) -> EnumeratedCode iter
+                  enumerate_doubly_even(N) -> EnumeratedCode iter.
+                  Dispatches the whole recursion to the Rust kernel
+                  via _kernel.enumerate_doubly_even (D11) when loaded.
+
+rust/        Rust kernel (doubly_even_kernel), built with maturin
+  src/canon.rs       Q_D-graph low-weight-incidence canonicaliser (D10)
+                      + native sparsenauty path; default dispatch.
+  src/feulner.rs     Feulner column-side canonicaliser (D9, ~1000 LOC,
+                      reference / diff oracle).
+  src/enumerate.rs   Native enumerate_doubly_even recursion (D11) +
+                      paired-iso prefilter dispatch (D12, gated).
+  src/paired_iso.rs  Leon §10(i) paired-iso witness search (D12).
+  Cargo.toml          'equivalence_verifier' feature flag (default OFF)
+                      gates the D12 prefilter.
 ```
 
 ## Conventions
@@ -90,40 +111,73 @@ Three independent checks the test suite relies on:
 - Bouyukliev–Bouyuklieva 2019 has `[N, k, ≥ d]` validation counts at
   `N = 31, 32`. Not yet wired into tests — we don't have a
   minimum-distance filter.
-- Performance after Milestone 4 phase (a): ≈ 14 s at `N = 20` (down
-  from 235 s baseline, 17× cumulative speedup) and ≈ 152 s at
-  `N = 22` (down from the pre-D6 `> 10 min` wall). Phase (b)'s
-  Witt-structured orbit enumeration was built and tested (see D7)
-  but does not beat phase (a) in pure Python — the table-based BFS
-  step is faster per element than the structural alternative, even
-  after eliminating the `2^L` table build. Infrastructure is kept
-  for the C/Rust kernel session, where per-step cost drops far enough
-  that the witt path's structural advantage flips back to a win.
-  Phase (c)'s cheap-invariant prefilter (the next pure-Python lever)
-  is still open.
+- **D12 paired-iso verifier shipped dormant.** Behind
+  `cargo feature equivalence_verifier`, default OFF; per-probe cost ties
+  nauty in Rust so net −29 % at `N = 18`. Recovery needs a flat-array
+  Feulner refactor + static cf refinement tree to drop per-probe
+  to ~40 µs. See `architecture/04-optimisations.md` §D12 and
+  `architecture/05-retrospective.md`.
+- **Phase (c) cheap-invariant prefilter (Q_C-recursion lever)** is
+  formally open but now classified as a **blocked-prefilter category**
+  alongside D12: every prefilter we have measured shares nauty's
+  refinement primitives so per-probe cost ≈ per-call cost. Not
+  expected to break 2× without a per-probe-cost unlock.
+- **Engine A (§5 column-multiset / Fourier-domain) Rust port** is
+  the unblocked next deliverable — Python prototype exists in
+  `scripts/multiset_*.py`, `scripts/collision_experiment.py`. Target:
+  `N = 32, k ≤ 4` frontier (the existing pipeline dies at `N ≥ 28`).
+  Does not speed up `N ≤ 22`.
+- **GPU canonicaliser (PEACE-style)** is the only published
+  direction with > 5× headroom at `N ≤ 22`. Multi-week.
 
-## Recent algorithmic + representation wins (Python sessions, post-Phase 3)
+## Performance state (post-D10/D11/D12 sprint)
 
 See `/workspace/markdown/architecture/04-optimisations.md` for the
-full write-up. Headline: cumulative 17× speedup vs pre-session
-baseline at `N = 20`, achieved by (1) quotient-space candidate
-enumeration (DFGHILM B.3), (2) LRU-cached `canon_info`, (3)
-verified closed-form `gaborit_sigma` + mass-stopping shortcut in
-the recursion, (4) hoisting `Code.rref_basis()` out of the
-orbit-min BFS, (5) weight-enumerator prefilter on the subspace
-orbit BFS, (6) trusting pynauty's float order whenever it's
-within float64's exact-integer range, and (D6, this session)
-`Q_C`-coordinate orbit-min with σ_Q lookup tables, global
-orbit decomposition, and a Gray-code wt-mod-4 prefilter.
-`bench.py` lives in `scripts/`; baseline + per-step JSON records
-are in `scripts/bench-results/` (gitignored).
+per-lever write-up and `architecture/05-retrospective.md` for the
+sign-off retrospective.
+
+Headline: **~20× cumulative at `N = 22`** since the pre-kernel
+D6 baseline (152 s → 7.57 s); **> 80×** since the pre-Q_C original
+baseline (> 600 s → 7.57 s at `N = 22`). `N = 20` runs in 1.07 s;
+`N = 24` in 107 s. We beat Sage's `self_orthogonal_binary_codes`
+by 25× end-to-end at `N = 22`.
+
+Cumulative levers, oldest first:
+
+1. **D2** Quotient-space candidate enumeration (DFGHILM B.3).
+2. **D3** LRU-cached `canon_info`.
+3. **D4** Weight-enumerator prefilter on the orbit BFS.
+4. **D5a/b** Verified closed-form `gaborit_sigma` + mass-stop
+   shortcut in the recursion.
+5. **D6** `Q_C`-coordinate orbit-min with σ_Q lookup tables.
+6. **D7** Witt-structured orbit infrastructure (kept; not active).
+7. **D8** Degree-based initial vertex partition for nauty.
+8. **D9** Feulner Rust+Python canonicaliser (reference, 6× slower
+   than nauty per call; substrate for D12).
+9. **D10** Q_D-graph low-weight-incidence canonicaliser
+   (**1.91× at `N = 22`**, active default).
+10. **D11** Native Rust `enumerate_doubly_even` + incremental Feulner
+    (**1.32× at `N = 22`**; eliminates Python ↔ Rust crossings).
+11. **D12** Paired-iso (Leon §10(i)) prefilter — shipped **dormant**.
+
+`bench.py` lives in `scripts/`; per-step JSON records are in
+`scripts/bench-results/` (gitignored).
+
+**The `N ≤ 22` frontier is saturated at the pure-algorithmic level**
+with this canonicaliser — see `architecture/05-retrospective.md` for
+the failure-mode analysis of recent 2× attempts and the recommended
+next-direction decision (push the `N ≥ 28` frontier via Engine A; or
+multi-week GPU port; or ship-what-we-have).
 
 ## Useful commands
 
 ```sh
 uv sync --all-extras --dev               # bootstrap a fresh checkout
-uv run pytest                            # 273 fast tests, ~7 s
-uv run pytest --run-slow                 # adds slow mass + Table 3 cells (~120 s total)
+maturin build --release -m rust/Cargo.toml \
+  && uv pip install rust/target/wheels/doubly_even_kernel-*.whl
+# verifier build (D12, dormant): add --features equivalence_verifier
+uv run pytest                            # 508 fast tests + 31 slow-skipped (~7 s)
+uv run pytest --run-slow                 # adds N=17, 18 Table 3 cells (~10 s total)
 uv run python scripts/bench.py --label baseline  # benchmark; writes JSON
 
 # Enumerate doubly even codes of length N (yields EnumeratedCode objects)
