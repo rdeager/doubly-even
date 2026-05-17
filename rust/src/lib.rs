@@ -172,6 +172,27 @@ fn py_canon_info_native(
     )
 }
 
+/// Q_D-graph canonicaliser: nauty over the low-weight-codeword × column
+/// bipartite encoding. Returns `None` when the span-aware build gives up
+/// (caller falls back to [`py_canon_info_native`]). Used for differential
+/// tests; the production hot path is inside `enumerate_doubly_even`.
+#[pyfunction]
+#[pyo3(name = "canon_info_qd_native")]
+fn py_canon_info_qd_native(
+    rref: Vec<BinVec>,
+    n: u32,
+) -> Option<(Vec<u32>, Vec<Vec<u32>>, f64, i32, Vec<u32>)> {
+    canon::canon_info_qd_native(&rref, n).map(|info| {
+        (
+            info.canonical_column_order,
+            info.aut_generators,
+            info.grpsize1,
+            info.grpsize2,
+            info.column_orbits,
+        )
+    })
+}
+
 /// Feulner-style canonicaliser — column-side partition refinement, no nauty.
 ///
 /// Same contract as [`py_canon_info_native`] but the algorithm avoids
@@ -302,6 +323,7 @@ fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Production entry points.
     m.add_function(wrap_pyfunction!(py_doubly_even_candidates_q, m)?)?;
     m.add_function(wrap_pyfunction!(py_canon_info_native, m)?)?;
+    m.add_function(wrap_pyfunction!(py_canon_info_qd_native, m)?)?;
     m.add_function(wrap_pyfunction!(py_canon_info_feulner_native, m)?)?;
     m.add_function(wrap_pyfunction!(py_subspace_in_orbit, m)?)?;
     m.add_function(wrap_pyfunction!(py_enumerate_doubly_even, m)?)?;
