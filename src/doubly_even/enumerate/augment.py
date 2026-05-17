@@ -49,6 +49,11 @@ from ..spec.mass import gaborit_sigma
 from ..spec.vectors import apply_permutation
 from .filters import doubly_even_candidates
 
+try:  # pragma: no cover -- import-side switch
+    import doubly_even_kernel as _kernel
+except ImportError:  # pragma: no cover
+    _kernel = None
+
 
 # ----------------------------------------------------------- canonical parent
 
@@ -172,6 +177,10 @@ def _in_aut_orbit_of_subspace(
     * Sorted-codeword-weight tuples must match — every column-permutation
       preserves weights, so unequal weight enumerators guarantee that
       ``C`` and ``target`` are in different orbits.
+
+    When the Rust kernel is available the BFS itself runs natively via
+    :func:`doubly_even_kernel.subspace_in_orbit`; the Python body below
+    is the fallback / diff oracle.
     """
     target_key = _subspace_key(target)
     start_key = _subspace_key(C)
@@ -182,6 +191,11 @@ def _in_aut_orbit_of_subspace(
     sigma_lists = [list(g) for g in aut_generators]
     if not sigma_lists:
         return False
+
+    if _kernel is not None:
+        return _kernel.subspace_in_orbit(
+            n, list(start_key), list(target_key), sigma_lists
+        )
 
     seen = {start_key}
     # Queue holds RREF basis tuples (subspace identifiers). Going through
@@ -242,8 +256,29 @@ def enumerate_doubly_even(N: int, max_k: int | None = None) -> Iterator[Enumerat
     because the McKay parent test already guarantees one canonical
     representative per equivalence class — the shortcut just lets us
     return as soon as we know we've found them all.
+
+    When the Rust kernel is loaded the entire canonical-augmentation
+    recursion runs natively via :func:`doubly_even_kernel.enumerate_doubly_even`
+    — no Python ↔ Rust boundary crossing inside the loop. The Python body
+    below is the fallback / oracle.
     """
     cap = N // 2 if max_k is None else max_k
+
+    if _kernel is not None:
+        quota_vec = [gaborit_sigma(N, k) for k in range(cap + 1)]
+        factorial_N = math.factorial(N)
+        raw, _stats = _kernel.enumerate_doubly_even(N, cap, quota_vec, factorial_N)
+        for rref, ccol, gens, aord_str, orbits in raw:
+            c = Code(N, tuple(rref))
+            info = CanonInfo(
+                canonical_column_order=tuple(ccol),
+                aut_generators=tuple(tuple(g) for g in gens),
+                aut_order=int(aord_str),
+                column_orbits=tuple(orbits),
+            )
+            yield EnumeratedCode(code=c, info=info)
+        return
+
     # Quotas per rank from Gaborit's closed form. ``mass_at_k`` accumulates
     # ``N! // aut_order`` over emitted classes at each rank.
     quota: dict[int, int] = {k: gaborit_sigma(N, k) for k in range(cap + 1)}

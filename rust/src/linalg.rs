@@ -47,7 +47,7 @@ pub fn row_reduce(rows_in: &[BinVec], n: u32) -> (Vec<BinVec>, Vec<u32>) {
 /// `sigma.len()` is the code length `n`; bits of `v` outside `[0, n)` are
 /// ignored. Pure port of `doubly_even.spec.vectors.apply_permutation`.
 #[inline]
-pub fn apply_permutation(v: BinVec, sigma: &ColPerm) -> BinVec {
+pub fn apply_permutation(v: BinVec, sigma: &[u32]) -> BinVec {
     let mut out: BinVec = 0;
     let mut bits = v;
     while bits != 0 {

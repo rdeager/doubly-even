@@ -7,10 +7,13 @@
 
 pub mod candidates;
 pub mod canon;
+pub mod enumerate;
 pub mod feulner;
 pub mod linalg;
 pub mod orbit;
+pub mod permutations;
 pub mod quotient;
+pub mod subspace_orbit;
 pub mod types;
 
 use pyo3::prelude::*;
@@ -213,6 +216,85 @@ fn py_canon_info_feulner_counters(
     Ok((info.leaves, info.prunes))
 }
 
+// ---------------------------------------- McKay subspace-orbit BFS surface
+
+/// BFS test for `_in_aut_orbit_of_subspace` — the inner loop of the McKay
+/// parent test.
+///
+/// Returns `true` iff some element of `⟨generators⟩` maps the subspace
+/// with RREF basis `start_rref` to the subspace with RREF basis
+/// `target_rref` under the column-permutation action on `F_2^n`.
+///
+/// Both `start_rref` and `target_rref` are already in RREF (the Python
+/// side ensures it). The BFS applies each generator to every basis row,
+/// re-RREFs, and compares; the seen-set is keyed on the RREF tuple.
+#[pyfunction]
+#[pyo3(name = "subspace_in_orbit")]
+fn py_subspace_in_orbit(
+    n: u32,
+    start_rref: Vec<BinVec>,
+    target_rref: Vec<BinVec>,
+    generators: Vec<ColPerm>,
+) -> PyResult<bool> {
+    if n > types::MAX_N {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "n = {n} exceeds MAX_N = {}; the u64 kernel supports N up to 64",
+            types::MAX_N,
+        )));
+    }
+    Ok(subspace_orbit::subspace_in_orbit(
+        n,
+        &start_rref,
+        &target_rref,
+        &generators,
+    ))
+}
+
+// ----------------------------------------- enumerate_doubly_even (native)
+
+/// Native canonical-augmentation enumerator for doubly-even codes.
+///
+/// Returns one tuple per canonical class:
+///
+///   `(rref, canonical_column_order, aut_generators, aut_order_decimal, column_orbits)`
+///
+/// Plus stats: `(true_canon_calls, primary_hits, secondary_hits, secondary_attempts)`.
+///
+/// `quota[k]` must be `σ(N, k)`; `factorial_n` must be `N!`. Python computes
+/// these via `gaborit_sigma` / `math.factorial` before the call.
+#[pyfunction]
+#[pyo3(name = "enumerate_doubly_even")]
+fn py_enumerate_doubly_even(
+    n: u32,
+    max_k: u32,
+    quota: Vec<u128>,
+    factorial_n: u128,
+) -> PyResult<(
+    Vec<(Vec<BinVec>, Vec<u32>, Vec<Vec<u32>>, String, Vec<u32>)>,
+    (u64, u64),
+)> {
+    if n > types::MAX_N {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "n = {n} exceeds MAX_N = {}; the u64 kernel supports N up to 64",
+            types::MAX_N,
+        )));
+    }
+    let (out, stats) = enumerate::enumerate_doubly_even(n, max_k, quota, factorial_n);
+    let result: Vec<_> = out
+        .into_iter()
+        .map(|e| {
+            (
+                e.rref,
+                e.canonical_column_order,
+                e.aut_generators,
+                e.aut_order.to_string(),
+                e.column_orbits,
+            )
+        })
+        .collect();
+    Ok((result, stats))
+}
+
 // ------------------------------------------------------ module assembly
 
 #[pymodule]
@@ -221,6 +303,8 @@ fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_doubly_even_candidates_q, m)?)?;
     m.add_function(wrap_pyfunction!(py_canon_info_native, m)?)?;
     m.add_function(wrap_pyfunction!(py_canon_info_feulner_native, m)?)?;
+    m.add_function(wrap_pyfunction!(py_subspace_in_orbit, m)?)?;
+    m.add_function(wrap_pyfunction!(py_enumerate_doubly_even, m)?)?;
 
     // Stage-level helpers under `doubly_even_kernel.debug`.
     let debug = PyModule::new(m.py(), "debug")?;

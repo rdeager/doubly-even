@@ -285,68 +285,268 @@ fn mask_of_cell(cell: &[u32]) -> u64 {
 }
 
 /// Equitable refinement of column partition `p` by refiner-incidence
-/// signatures. Returns a new partition (sorted within each cell).
-fn refine(mut p: Vec<Vec<u32>>, refiners: &[BinVec]) -> Vec<Vec<u32>> {
-    loop {
-        let cell_masks: Vec<u64> = p.iter().map(|c| mask_of_cell(c)).collect();
-
-        // Group refiners by their cell-histogram type (Aut-invariant under
-        // the current partition).
-        let mut groups: BTreeMap<Vec<u32>, Vec<BinVec>> = BTreeMap::new();
-        for &w in refiners {
-            let t: Vec<u32> =
-                cell_masks.iter().map(|m| (w & m).count_ones()).collect();
-            groups.entry(t).or_default().push(w);
-        }
-        // Ordered (BTreeMap iterates by key); flatten to a Vec for indexed
-        // signature construction.
-        let ordered: Vec<Vec<BinVec>> =
-            groups.into_iter().map(|(_, v)| v).collect();
-
-        // Per-column signature: for each refiner type group, count how many
-        // members include column j.
-        let n_cols: usize = p.iter().map(|c| c.len()).sum();
-        let mut sig_of: HashMap<u32, Vec<u32>> = HashMap::with_capacity(n_cols);
-        for cell in &p {
-            for &j in cell {
-                let mut s = Vec::with_capacity(ordered.len());
-                for words in &ordered {
-                    let mut count: u32 = 0;
-                    for &w in words {
-                        if (w >> j) & 1 == 1 {
-                            count += 1;
-                        }
-                    }
-                    s.push(count);
-                }
-                sig_of.insert(j, s);
-            }
-        }
-
-        let mut new_p: Vec<Vec<u32>> = Vec::with_capacity(p.len());
-        let mut changed = false;
-        for cell in &p {
-            if cell.len() == 1 {
-                new_p.push(cell.clone());
-                continue;
-            }
-            let mut buckets: BTreeMap<Vec<u32>, Vec<u32>> = BTreeMap::new();
-            for &j in cell {
-                buckets.entry(sig_of[&j].clone()).or_default().push(j);
-            }
-            if buckets.len() > 1 {
-                changed = true;
-            }
-            for (_, mut bucket) in buckets {
-                bucket.sort();
-                new_p.push(bucket);
-            }
-        }
-        if !changed {
-            return p;
-        }
-        p = new_p;
+/// signatures, via a nauty-style worklist of refiner groups.
+///
+/// Mirrors `_refine_incremental` in `doubly_even.canon.feulner` — see
+/// that docstring for the algorithm. State: refiner groups indexed by
+/// stable slot; `p_table[g][j]` = count of refiners in group `g` with
+/// bit `j` set; `worklist` of pending groups that may still cause cell
+/// splits.
+///
+/// Output cell-order: lex by `(input_lineage, signature, min_col)` so
+/// each input cell's split products form a contiguous block — this
+/// preserves the McKay convention the search expects (individualised
+/// singleton inherits the parent's slot index in the output).
+fn refine(p: Vec<Vec<u32>>, refiners: &[BinVec]) -> Vec<Vec<u32>> {
+    if p.is_empty() {
+        return p;
     }
+    // n_cols_max is "one past the highest column index" — column
+    // indices live in [0, n_cols_max), used to size the per-column
+    // p_table rows.
+    let mut n_cols_max: usize = 1;
+    for cell in &p {
+        if let Some(&max_j) = cell.iter().max() {
+            n_cols_max = n_cols_max.max(max_j as usize + 1);
+        }
+    }
+
+    let mut cells: Vec<Vec<u32>> = p;
+    let mut cell_mask: Vec<u64> =
+        cells.iter().map(|c| mask_of_cell(c)).collect();
+    let mut cell_lineage: Vec<u32> = (0..cells.len() as u32).collect();
+
+    if refiners.is_empty() {
+        return emit_sorted(cells, &Vec::new(), &cell_lineage);
+    }
+
+    // Initial groups by cell-histogram tuple.
+    let mut init_buckets: BTreeMap<Vec<u32>, Vec<u32>> = BTreeMap::new();
+    for (ri, &w) in refiners.iter().enumerate() {
+        let t: Vec<u32> =
+            cell_mask.iter().map(|m| (w & m).count_ones()).collect();
+        init_buckets.entry(t).or_default().push(ri as u32);
+    }
+    let mut groups: Vec<Vec<u32>> =
+        init_buckets.into_iter().map(|(_, v)| v).collect();
+
+    // p_table[g][j] = #{r in groups[g] : (refiners[r] >> j) & 1}
+    let mut p_table: Vec<Vec<u32>> = groups
+        .iter()
+        .map(|g| recompute_p(g, refiners, n_cols_max))
+        .collect();
+
+    let mut worklist: Vec<u32> = (0..groups.len() as u32).collect();
+    let mut in_worklist: Vec<bool> = vec![true; groups.len()];
+
+    while let Some(g) = worklist.pop() {
+        in_worklist[g as usize] = false;
+
+        // Snapshot length; sub-cells appended during this iteration
+        // are processed in later worklist iterations (their own groups
+        // are pushed onto the worklist when they split).
+        let n_snapshot = cells.len();
+        let mut ci = 0usize;
+        while ci < n_snapshot {
+            if cells[ci].len() > 1 {
+                let mut buckets: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+                for &j in &cells[ci] {
+                    buckets
+                        .entry(p_table[g as usize][j as usize])
+                        .or_default()
+                        .push(j);
+                }
+                if buckets.len() > 1 {
+                    apply_cell_split(
+                        ci,
+                        buckets,
+                        &mut cells,
+                        &mut cell_mask,
+                        &mut cell_lineage,
+                        &mut groups,
+                        &mut p_table,
+                        &mut worklist,
+                        &mut in_worklist,
+                        refiners,
+                        n_cols_max,
+                    );
+                }
+            }
+            ci += 1;
+        }
+    }
+
+    emit_sorted(cells, &p_table, &cell_lineage)
+}
+
+/// Replace `cells[ci]` with its bucketed sub-cells (largest fragment
+/// stays in slot `ci`; others appended). Then propagate the cell split
+/// to every refiner group whose refiners had any bit in the old cell
+/// mask: re-bucket their refiners by per-sub-cell histogram, split
+/// groups that distinguish sub-cells, and queue new groups onto the
+/// worklist via the Hopcroft smallest-fragment rule.
+#[allow(clippy::too_many_arguments)]
+fn apply_cell_split(
+    ci: usize,
+    buckets: BTreeMap<u32, Vec<u32>>,
+    cells: &mut Vec<Vec<u32>>,
+    cell_mask: &mut Vec<u64>,
+    cell_lineage: &mut Vec<u32>,
+    groups: &mut Vec<Vec<u32>>,
+    p_table: &mut Vec<Vec<u32>>,
+    worklist: &mut Vec<u32>,
+    in_worklist: &mut Vec<bool>,
+    refiners: &[BinVec],
+    n_cols_max: usize,
+) {
+    let old_mask = cell_mask[ci];
+    // Sub-cells in lex-by-bucket-key order, each internally sorted.
+    let mut sub_cells: Vec<Vec<u32>> = buckets
+        .into_iter()
+        .map(|(_, mut v)| {
+            v.sort();
+            v
+        })
+        .collect();
+    let sub_masks: Vec<u64> =
+        sub_cells.iter().map(|c| mask_of_cell(c)).collect();
+
+    // Largest fragment (ties broken by earliest sub-cell index) keeps
+    // slot ci; the others append.
+    let largest_idx: usize = (0..sub_cells.len())
+        .max_by_key(|&i| (sub_cells[i].len(), std::cmp::Reverse(i)))
+        .unwrap();
+    let parent_lineage = cell_lineage[ci];
+
+    cells[ci] = std::mem::take(&mut sub_cells[largest_idx]);
+    cell_mask[ci] = sub_masks[largest_idx];
+    for (idx, sub) in sub_cells.into_iter().enumerate() {
+        if idx == largest_idx {
+            continue;
+        }
+        cell_mask.push(sub_masks[idx]);
+        cell_lineage.push(parent_lineage);
+        cells.push(sub);
+    }
+
+    // Propagate to groups. A group `gi` "touches" the old cell iff any
+    // of its refiners has a bit in `old_mask`. Iterate by index over a
+    // snapshot since we push new groups inside the loop.
+    let n_groups_snapshot = groups.len();
+    for gi in 0..n_groups_snapshot {
+        if groups[gi].is_empty() {
+            continue;
+        }
+        let touches = groups[gi]
+            .iter()
+            .any(|&ri| refiners[ri as usize] & old_mask != 0);
+        if !touches {
+            continue;
+        }
+
+        // Bucket refiners in this group by their per-sub-cell histogram.
+        let mut rbuckets: BTreeMap<Vec<u32>, Vec<u32>> = BTreeMap::new();
+        for &ri in &groups[gi] {
+            let w = refiners[ri as usize];
+            let hist: Vec<u32> = sub_masks
+                .iter()
+                .map(|m| (w & m).count_ones())
+                .collect();
+            rbuckets.entry(hist).or_default().push(ri);
+        }
+        if rbuckets.len() == 1 {
+            continue;
+        }
+
+        // Group gi splits. Largest fragment keeps slot gi; others append.
+        let frag_lists: Vec<Vec<u32>> =
+            rbuckets.into_values().collect();
+        let largest_g_idx: usize = (0..frag_lists.len())
+            .max_by_key(|&i| {
+                (frag_lists[i].len(), std::cmp::Reverse(i))
+            })
+            .unwrap();
+
+        let mut new_group_ids: Vec<u32> = vec![0; frag_lists.len()];
+        for (fi, frag) in frag_lists.into_iter().enumerate() {
+            if fi == largest_g_idx {
+                p_table[gi] = recompute_p(&frag, refiners, n_cols_max);
+                groups[gi] = frag;
+                new_group_ids[fi] = gi as u32;
+            } else {
+                let new_gi = groups.len();
+                p_table.push(recompute_p(&frag, refiners, n_cols_max));
+                groups.push(frag);
+                in_worklist.push(false);
+                new_group_ids[fi] = new_gi as u32;
+            }
+        }
+
+        // Smallest-fragment rule: if gi was on worklist, push all new
+        // groups; else push all but the largest.
+        if in_worklist[gi] {
+            for &gid in &new_group_ids {
+                if !in_worklist[gid as usize] {
+                    in_worklist[gid as usize] = true;
+                    worklist.push(gid);
+                }
+            }
+        } else {
+            for (fi, &gid) in new_group_ids.iter().enumerate() {
+                if fi == largest_g_idx {
+                    continue;
+                }
+                if !in_worklist[gid as usize] {
+                    in_worklist[gid as usize] = true;
+                    worklist.push(gid);
+                }
+            }
+        }
+    }
+}
+
+/// `p[g][j] = #{r in refs : (refiners[r] >> j) & 1}`. Iterates set
+/// bits of each refiner; cost is `O(sum_r weight(r))`, not `O(N · |refs|)`.
+fn recompute_p(refs: &[u32], refiners: &[BinVec], n_cols_max: usize) -> Vec<u32> {
+    let mut row = vec![0u32; n_cols_max];
+    for &ri in refs {
+        let mut bits = refiners[ri as usize];
+        while bits != 0 {
+            let j = bits.trailing_zeros() as usize;
+            row[j] += 1;
+            bits &= bits - 1;
+        }
+    }
+    row
+}
+
+/// Emit cells in deterministic order. Primary key: input lineage
+/// (preserves the McKay convention that each input cell's split
+/// products form a contiguous block in the output, with cells before
+/// the parent slot appearing first). Secondary: full final signature
+/// across all groups. Tertiary: min column.
+fn emit_sorted(
+    cells: Vec<Vec<u32>>,
+    p_table: &[Vec<u32>],
+    cell_lineage: &[u32],
+) -> Vec<Vec<u32>> {
+    let n_groups = p_table.len();
+    let mut keyed: Vec<(u32, Vec<u32>, u32, Vec<u32>)> = cells
+        .into_iter()
+        .enumerate()
+        .filter(|(_, c)| !c.is_empty())
+        .map(|(i, mut c)| {
+            c.sort();
+            let rep = c[0];
+            let sig: Vec<u32> =
+                (0..n_groups).map(|g| p_table[g][rep as usize]).collect();
+            (cell_lineage[i], sig, rep, c)
+        })
+        .collect();
+    keyed.sort_by(|a, b| {
+        (a.0, &a.1, a.2).cmp(&(b.0, &b.1, b.2))
+    });
+    keyed.into_iter().map(|(_, _, _, c)| c).collect()
 }
 
 fn individualise(p: &[Vec<u32>], cell_idx: usize, col: u32) -> Vec<Vec<u32>> {

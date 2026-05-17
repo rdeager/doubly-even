@@ -264,7 +264,7 @@ def _invariant_refiners(rref: tuple[int, ...], k: int) -> list[int]:
     return out
 
 
-def _refine(P: list[list[int]], refiners: list[int]) -> list[list[int]]:
+def _refine_naive(P: list[list[int]], refiners: list[int]) -> list[list[int]]:
     """Equitable refinement of column partition `P` using `refiners`.
 
     A column `j`'s signature is the tuple, over types of refiner, of how
@@ -274,7 +274,9 @@ def _refine(P: list[list[int]], refiners: list[int]) -> list[list[int]]:
     the caller) the refiner types split too, and the column signatures
     distinguish more columns.
 
-    Returns a new partition. The input is not mutated.
+    Returns a new partition. The input is not mutated. Kept as the
+    correctness oracle for :func:`_refine_incremental` — at this point
+    it is not on the hot path of :func:`_search`.
     """
     while True:
         cell_masks = [_mask_of_cell(c) for c in P]
@@ -312,6 +314,294 @@ def _refine(P: list[list[int]], refiners: list[int]) -> list[list[int]]:
         if not changed:
             return P
         P = new_P
+
+
+def _refine_incremental(
+    P: list[list[int]], refiners: list[int]
+) -> list[list[int]]:
+    """Equitable refinement via a nauty-style worklist of refiner groups.
+
+    Same contract as :func:`_refine_naive` (the correctness oracle): the
+    output partition is equitable under the refiner-incidence signature
+    and is a deterministic function of `(P, refiners)`. The cell-order in
+    the output is **not** guaranteed to match `_refine_naive` — it's the
+    lex-by-signature order of an equitable partition, which is invariant
+    under code permutation (so the canonical form is still canonical,
+    and aut order / orbits / mass / Table 3 counts are unchanged).
+
+    State maintained across the worklist loop:
+
+    * ``groups[g]``: list of refiner indices in group ``g``.
+    * ``p[g][j]``: count of refiners in ``g`` whose bit ``j`` is set.
+    * ``worklist`` / ``in_worklist``: pending groups that still need to
+      act as splitters.
+    * ``cells`` / ``cell_of`` / ``cell_mask``: the current partition, an
+      inverse map, and per-cell bitmasks.
+
+    Initial groups are produced by bucketing refiners by their
+    cell-histogram (same equivalence as the first iteration of
+    :func:`_refine_naive`).
+    """
+    n_cols_max = 1
+    for cell in P:
+        if cell:
+            n_cols_max = max(n_cols_max, max(cell) + 1)
+
+    # cells / cell_of / cell_mask / cell_lineage. Lineage is the
+    # caller's input-cell index; sub-cells inherit their parent's
+    # lineage so :func:`_emit_sorted` can group output cells by input
+    # cell (preserving the McKay convention that the partition order at
+    # any node is "input cells in order, each replaced by its split
+    # products").
+    cells: list[list[int]] = [list(c) for c in P]
+    cell_of: list[int] = [0] * n_cols_max
+    cell_mask: list[int] = []
+    cell_lineage: list[int] = []
+    for ci, cell in enumerate(cells):
+        m = 0
+        for j in cell:
+            cell_of[j] = ci
+            m |= 1 << j
+        cell_mask.append(m)
+        cell_lineage.append(ci)
+
+    if not refiners:
+        return _emit_sorted(cells, p=[], cell_lineage=cell_lineage)
+
+    # Initial refiner groups by cell-histogram tuple.
+    init_buckets: dict[tuple[int, ...], list[int]] = defaultdict(list)
+    for ri, w in enumerate(refiners):
+        t = tuple((w & m).bit_count() for m in cell_mask)
+        init_buckets[t].append(ri)
+    groups: list[list[int]] = [init_buckets[t] for t in sorted(init_buckets.keys())]
+    group_of: list[int] = [0] * len(refiners)
+    for gi, g in enumerate(groups):
+        for ri in g:
+            group_of[ri] = gi
+
+    # p[g][j] for each initial group.
+    p: list[list[int]] = []
+    for g in groups:
+        row = [0] * n_cols_max
+        for ri in g:
+            w = refiners[ri]
+            bits = w
+            while bits:
+                lsb = bits & -bits
+                j = lsb.bit_length() - 1
+                row[j] += 1
+                bits ^= lsb
+        p.append(row)
+
+    worklist: list[int] = list(range(len(groups)))
+    in_worklist: list[bool] = [True] * len(groups)
+
+    while worklist:
+        g = worklist.pop()
+        in_worklist[g] = False
+
+        # Find all non-singleton cells that split under p[g][·].
+        # Snapshot current cells (we'll mutate `cells` as we go); but
+        # cells we haven't touched in this iteration keep stable indices.
+        # We iterate by index over a snapshot length; appended sub-cells
+        # are processed in subsequent worklist iterations (their own
+        # groups go on the worklist).
+        ci = 0
+        n_snapshot = len(cells)
+        while ci < n_snapshot:
+            cell = cells[ci]
+            if len(cell) > 1:
+                buckets: dict[int, list[int]] = defaultdict(list)
+                for j in cell:
+                    buckets[p[g][j]].append(j)
+                if len(buckets) > 1:
+                    _apply_cell_split(
+                        ci,
+                        buckets,
+                        cells,
+                        cell_of,
+                        cell_mask,
+                        cell_lineage,
+                        groups,
+                        group_of,
+                        p,
+                        worklist,
+                        in_worklist,
+                        refiners,
+                        n_cols_max,
+                    )
+            ci += 1
+
+    return _emit_sorted(cells, p, cell_lineage)
+
+
+def _apply_cell_split(
+    ci: int,
+    buckets: dict[int, list[int]],
+    cells: list[list[int]],
+    cell_of: list[int],
+    cell_mask: list[int],
+    cell_lineage: list[int],
+    groups: list[list[int]],
+    group_of: list[int],
+    p: list[list[int]],
+    worklist: list[int],
+    in_worklist: list[bool],
+    refiners: list[int],
+    n_cols_max: int,
+) -> None:
+    """Replace ``cells[ci]`` with its bucketed sub-cells and propagate.
+
+    The largest sub-cell keeps slot ``ci`` (smallest-fragment-style
+    bookkeeping at the cell level); the others append to ``cells``. Then
+    every refiner group whose refiners had bits in old cell ``ci`` is
+    re-bucketed by per-sub-cell histogram; any group that splits is
+    propagated to the worklist using the Hopcroft smallest-fragment
+    rule.
+    """
+    old_mask = cell_mask[ci]
+    sub_cells_sorted = [sorted(buckets[k]) for k in sorted(buckets.keys())]
+    sub_masks = [_mask_of_cell(c) for c in sub_cells_sorted]
+
+    # Largest fragment keeps slot ci.
+    sizes = [len(c) for c in sub_cells_sorted]
+    largest = max(range(len(sizes)), key=lambda i: (sizes[i], -i))
+    parent_lineage = cell_lineage[ci]
+    new_cell_ids: list[int] = [0] * len(sub_cells_sorted)
+    new_cell_ids[largest] = ci
+    cells[ci] = sub_cells_sorted[largest]
+    cell_mask[ci] = sub_masks[largest]
+    for idx, sub in enumerate(sub_cells_sorted):
+        if idx == largest:
+            continue
+        new_cell_ids[idx] = len(cells)
+        cells.append(sub)
+        cell_mask.append(sub_masks[idx])
+        cell_lineage.append(parent_lineage)
+    # cell_of for the (possibly moved) columns.
+    for idx, sub in enumerate(sub_cells_sorted):
+        cid = new_cell_ids[idx]
+        for j in sub:
+            cell_of[j] = cid
+
+    # Propagate to groups. Touching groups: any g' with some refiner
+    # having a bit in old_mask.
+    n_groups_snapshot = len(groups)
+    for gi in range(n_groups_snapshot):
+        g_refs = groups[gi]
+        if not g_refs:
+            continue
+        if not any((refiners[ri] & old_mask) for ri in g_refs):
+            continue
+
+        # Bucket refiners by their histogram across the new sub-cells.
+        # Histogram is a tuple of length len(sub_cells_sorted); since
+        # the largest sub-cell stayed in slot ci, the histogram is in
+        # *sub-cell-order* (ascending by bucket key).
+        rbuckets: dict[tuple[int, ...], list[int]] = defaultdict(list)
+        for ri in g_refs:
+            w = refiners[ri]
+            hist = tuple((w & sm).bit_count() for sm in sub_masks)
+            rbuckets[hist].append(ri)
+        if len(rbuckets) == 1:
+            continue
+
+        # Group gi splits. Replace gi's content with the largest
+        # fragment; allocate fresh slots for the others.
+        sorted_keys = sorted(rbuckets.keys())
+        frag_lists = [rbuckets[k] for k in sorted_keys]
+        frag_sizes = [len(f) for f in frag_lists]
+        largest_g = max(
+            range(len(frag_sizes)), key=lambda i: (frag_sizes[i], -i)
+        )
+
+        new_group_ids: list[int] = [0] * len(frag_lists)
+        new_group_ids[largest_g] = gi
+        groups[gi] = frag_lists[largest_g]
+        # Recompute p[gi] from scratch for the largest fragment.
+        p[gi] = _recompute_p(frag_lists[largest_g], refiners, n_cols_max)
+        for fi, frag in enumerate(frag_lists):
+            if fi == largest_g:
+                continue
+            new_gi = len(groups)
+            new_group_ids[fi] = new_gi
+            groups.append(frag)
+            p.append(_recompute_p(frag, refiners, n_cols_max))
+            in_worklist.append(False)
+            for ri in frag:
+                group_of[ri] = new_gi
+
+        # Smallest-fragment rule: if gi was on worklist, add all new
+        # groups (incl. gi); else add all but the largest.
+        if in_worklist[gi]:
+            for fi in range(len(frag_lists)):
+                gid = new_group_ids[fi]
+                if not in_worklist[gid]:
+                    in_worklist[gid] = True
+                    worklist.append(gid)
+        else:
+            for fi in range(len(frag_lists)):
+                if fi == largest_g:
+                    continue
+                gid = new_group_ids[fi]
+                if not in_worklist[gid]:
+                    in_worklist[gid] = True
+                    worklist.append(gid)
+
+
+def _recompute_p(
+    refs: list[int], refiners: list[int], n_cols_max: int
+) -> list[int]:
+    """``p[g][j] = #{r in refs : (refiners[r] >> j) & 1}``.
+
+    Iterates set bits of each refiner — cost proportional to weight,
+    not ``n_cols_max``.
+    """
+    row = [0] * n_cols_max
+    for ri in refs:
+        w = refiners[ri]
+        bits = w
+        while bits:
+            lsb = bits & -bits
+            j = lsb.bit_length() - 1
+            row[j] += 1
+            bits ^= lsb
+    return row
+
+
+def _emit_sorted(
+    cells: list[list[int]], p: list[list[int]], cell_lineage: list[int]
+) -> list[list[int]]:
+    """Sort cells deterministically before returning.
+
+    Cell order: lex by ``(input_lineage, signature, min_col)``. The
+    lineage primary key preserves the McKay convention that input cell
+    order is respected at the top level — each input cell's split
+    products form a contiguous block in the output. Within a block,
+    sub-cells are ordered by full signature, then by min column for
+    ties. Within each cell, columns are sorted. Empty cells are
+    dropped.
+    """
+    n_groups = len(p)
+
+    def cell_key(idx: int) -> tuple:
+        cell = cells[idx]
+        rep = min(cell)
+        sig = tuple(p[g][rep] for g in range(n_groups))
+        return (cell_lineage[idx], sig, rep)
+
+    keyed = [
+        (cell_key(i), sorted(cells[i]))
+        for i in range(len(cells))
+        if cells[i]
+    ]
+    keyed.sort(key=lambda x: x[0])
+    return [c for _, c in keyed]
+
+
+# Public alias: the search uses the incremental implementation. The
+# naive form is retained for the differential oracle test only.
+_refine = _refine_incremental
 
 
 def _mask_of_cell(cell: list[int]) -> int:
