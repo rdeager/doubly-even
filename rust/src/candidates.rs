@@ -42,20 +42,24 @@ pub fn doubly_even_candidates_q(
     out
 }
 
-/// Cheap predicate deciding which orbit-min path to take.
+/// Pick the structural witt-path BFS over the `2^L` σ_Q lookup table.
 ///
-/// In Rust the per-step costs of the table-lookup BFS vs. the
-/// `mat_apply` bit-walk are much closer than they were in CPython
-/// ([[phase-b-empirical-finding]]). The 5(b) criterion benches in
-/// `benches/candidates.rs` measure this directly; the dispatch
-/// threshold here is set from that data in 5(b)-7.
+/// In Rust the per-step cost of the `mat_apply` bit-walk inside the
+/// witt BFS is ~2× cheaper than building the per-generator `2^L` table
+/// and walking it. Measured at N ∈ {18, 20, 22} via
+/// `scripts/bench_witt_profile.py` (see `04-optimisations.md` §D13):
+/// mean `doubly_even_candidates_q` latency 245 → 116 µs at N=22,
+/// 1.08–1.11× total wall reduction. Phase (b) wins at every benched
+/// `(N, L)`, so dispatch is unconditional — no `L` threshold needed.
 ///
-/// Default for 5(b): table path everywhere. A profile-driven `L`
-/// threshold can flip the witt branch on later.
+/// Note: this is the *inverted* finding from CPython phase-(b), where
+/// the table beat the bit-walk by 13–15 % (see D7). The flip happens
+/// because Rust closes the per-step interpreter overhead that made the
+/// table's precompute-once model dominate in CPython.
 fn use_witt_path(sigma_qs: &[Mat], l: u32) -> bool {
     let _ = sigma_qs;
     let _ = l;
-    false
+    true
 }
 
 #[cfg(test)]

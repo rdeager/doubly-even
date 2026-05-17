@@ -130,6 +130,13 @@ struct State {
     pub stats_verifier_compares: u64,
     /// Cumulative ns spent inside the verifier path (scan + reconstruct).
     pub stats_verifier_ns: u128,
+    /// Times `doubly_even_candidates_q` was invoked.
+    pub stats_candidates_q_calls: u64,
+    /// Cumulative ns spent inside `doubly_even_candidates_q`. Bounds the
+    /// upper limit of any candidate-side optimisation (e.g. flipping the
+    /// witt-path dispatch). See plan file
+    /// `the-last-several-sessions-scalable-bear.md` Stage 0.
+    pub stats_candidates_q_ns: u128,
     output: Vec<EnumeratedRaw>,
 }
 
@@ -202,6 +209,8 @@ impl State {
             stats_verifier_hits: 0,
             stats_verifier_compares: 0,
             stats_verifier_ns: 0,
+            stats_candidates_q_calls: 0,
+            stats_candidates_q_ns: 0,
             output: Vec::new(),
         }
     }
@@ -536,8 +545,10 @@ impl State {
         if self.mass_at_k[k as usize + 1] >= self.quota[k as usize + 1] {
             return;
         }
-        // Generate candidates.
+        // Generate candidates. Time the call: Stage 0 of the Witt-dispatch
+        // plan wants the candidates_q / wall ratio at N ∈ {18, 20, 22}.
         let dual = dual_basis(&rref, &pivots, self.n);
+        let cq_t0 = std::time::Instant::now();
         let candidates = doubly_even_candidates_q(
             self.n,
             &rref,
@@ -545,6 +556,8 @@ impl State {
             &dual,
             &info.aut_generators,
         );
+        self.stats_candidates_q_ns += cq_t0.elapsed().as_nanos();
+        self.stats_candidates_q_calls += 1;
         for v in candidates {
             if self.mass_at_k[k as usize + 1] >= self.quota[k as usize + 1] {
                 return;
@@ -570,7 +583,7 @@ impl State {
 ///
 /// The result is a `Vec<EnumeratedRaw>` in DFS order.
 ///
-/// Stats vector layout (19 u128 fields, packed for pyo3 tuple-arity
+/// Stats vector layout (21 u128 fields, packed for pyo3 tuple-arity
 /// limits — pyo3 0.23 caps `IntoPyObject` tuples at 12 elements):
 ///
 /// ```text
@@ -594,13 +607,17 @@ impl State {
 ///  16   verifier_hits                  (feature equivalence_verifier)
 ///  17   verifier_compares              (feature equivalence_verifier)
 ///  18   verifier_ns                    (feature equivalence_verifier)
+///  19   candidates_q_calls             (always-on)
+///  20   candidates_q_ns                (always-on)
 /// ```
 ///
 /// Fields 4–10 came from the Engine B BFS-cost profile (see
 /// `markdown/notes/engine-b-bfs-profile.md`); 11–14 from Phase 1 of the
 /// cheap-equivalence-verifier plan; 15–18 from the verifier-dispatch
 /// integration (see
-/// `/home/dev/.claude/plans/let-s-implement-the-previous-memoized-simon.md`).
+/// `/home/dev/.claude/plans/let-s-implement-the-previous-memoized-simon.md`);
+/// 19–20 from Stage 0 of the Witt-dispatch plan
+/// (`the-last-several-sessions-scalable-bear.md`).
 pub fn enumerate_doubly_even(
     n: u32,
     max_k: u32,
@@ -633,6 +650,8 @@ pub fn enumerate_doubly_even(
         state.stats_verifier_hits as u128,
         state.stats_verifier_compares as u128,
         state.stats_verifier_ns,
+        state.stats_candidates_q_calls as u128,
+        state.stats_candidates_q_ns,
     ];
     (state.output, stats)
 }

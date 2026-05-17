@@ -280,7 +280,7 @@ fn py_subspace_in_orbit(
 ///
 ///   `(rref, canonical_column_order, aut_generators, aut_order_decimal, column_orbits)`
 ///
-/// Plus a `stats: Vec[int]` (length 19) — see
+/// Plus a `stats: Vec[int]` (length 21) — see
 /// `enumerate::enumerate_doubly_even` doc for the field layout. Packed
 /// as a list because pyo3 0.23 caps `IntoPyObject` tuples at 12
 /// elements.
@@ -305,7 +305,7 @@ fn py_enumerate_doubly_even(
         )));
     }
     let (out, stats) = enumerate::enumerate_doubly_even(n, max_k, quota, factorial_n);
-    debug_assert_eq!(stats.len(), 19, "stats vector length mismatch");
+    debug_assert_eq!(stats.len(), 21, "stats vector length mismatch");
     let result: Vec<_> = out
         .into_iter()
         .map(|e| {
