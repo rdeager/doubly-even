@@ -68,6 +68,33 @@ struct State {
     pub stats_secondary_hits: u64,
     /// Whether to populate the secondary cache (env-gated).
     instrument_secondary: bool,
+    /// Times `is_canonical_augmentation` was entered.
+    pub stats_is_canon_aug_calls: u64,
+    /// Times the candidate already equalled `p(D)` (zero-cost branch).
+    pub stats_parent_eq_hits: u64,
+    /// Times the weight-enum prefilter rejected before BFS.
+    pub stats_weight_enum_filtered: u64,
+    /// Times the BFS was actually entered.
+    pub stats_bfs_calls: u64,
+    /// Times the BFS returned `true`.
+    pub stats_bfs_hits: u64,
+    /// Cumulative ns spent in `is_canonical_augmentation`.
+    pub stats_is_canon_aug_ns: u128,
+    /// Cumulative ns spent inside `subspace_in_orbit`.
+    pub stats_bfs_ns: u128,
+    /// Cumulative ns spent inside the nauty / Q_D-graph canon dispatch
+    /// (and `aut_order_exact`). Bounds the budget any "cheap equivalence
+    /// verifier" must beat to be a net win — see plan file
+    /// `let-s-implement-the-plan-nifty-kahn.md` Phase 1.
+    pub stats_nauty_ns: u128,
+    /// Sum of bucket sizes at secondary-cache attempt time. Env-gated.
+    pub stats_bucket_size_sum_at_attempt: u64,
+    /// Sum of match positions at secondary-cache *hits* (0-based index
+    /// into the bucket). Env-gated. Combined with `stats_secondary_hits`
+    /// gives the mean comparisons a verifier would do per hit.
+    pub stats_match_position_sum: u64,
+    /// Max bucket size seen at attempt time. Env-gated.
+    pub stats_max_bucket_size: u64,
     output: Vec<EnumeratedRaw>,
 }
 
@@ -123,6 +150,17 @@ impl State {
             instrument_secondary: std::env::var("DOUBLY_EVEN_SECONDARY_CACHE_INSTRUMENTATION")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false),
+            stats_is_canon_aug_calls: 0,
+            stats_parent_eq_hits: 0,
+            stats_weight_enum_filtered: 0,
+            stats_bfs_calls: 0,
+            stats_bfs_hits: 0,
+            stats_is_canon_aug_ns: 0,
+            stats_bfs_ns: 0,
+            stats_nauty_ns: 0,
+            stats_bucket_size_sum_at_attempt: 0,
+            stats_match_position_sum: 0,
+            stats_max_bucket_size: 0,
             output: Vec::new(),
         }
     }
@@ -165,20 +203,31 @@ impl State {
         } else {
             None
         };
-        let bucket_was_nonempty = if let Some(key) = we_key.as_ref() {
-            let nonempty = self
+        let bucket_size_at_attempt: usize = if let Some(key) = we_key.as_ref() {
+            let size = self
                 .secondary_cache
                 .get(key)
-                .map(|v| !v.is_empty())
-                .unwrap_or(false);
-            if nonempty {
+                .map(|v| v.len())
+                .unwrap_or(0);
+            if size > 0 {
                 self.stats_secondary_attempts += 1;
+                self.stats_bucket_size_sum_at_attempt += size as u64;
+                if (size as u64) > self.stats_max_bucket_size {
+                    self.stats_max_bucket_size = size as u64;
+                }
             }
-            nonempty
+            size
         } else {
-            false
+            0
         };
+        let bucket_was_nonempty = bucket_size_at_attempt > 0;
 
+        // Time nauty (including `aut_order_exact`, which can fall back to
+        // Schreier–Sims for groups past float64 precision). This bounds
+        // the cost any cheap equivalence verifier must beat. Always-on:
+        // one `Instant::now()` pair per call ≈ 40 ns, negligible vs
+        // nauty's tens-of-µs work.
+        let nauty_t0 = std::time::Instant::now();
         // Dispatch: when 2^k is large the low-weight-incidence graph (Q_D)
         // beats the full bipartite by a factor that grows with 2^k / |C_low|.
         // For small k the full graph is already cheap, so we skip the span
@@ -196,14 +245,16 @@ impl State {
             &native.aut_generators,
             self.n,
         );
+        self.stats_nauty_ns += nauty_t0.elapsed().as_nanos();
 
         if let Some(key) = we_key {
             // Compute canonical form to check secondary-cache membership.
             let canonical = self.canonical_form(rref, &native.canonical_column_order);
             if bucket_was_nonempty {
                 if let Some(bucket) = self.secondary_cache.get(&key) {
-                    if bucket.iter().any(|cf| cf == &canonical) {
+                    if let Some(pos) = bucket.iter().position(|cf| cf == &canonical) {
                         self.stats_secondary_hits += 1;
+                        self.stats_match_position_sum += pos as u64;
                     }
                 }
             }
@@ -250,27 +301,48 @@ impl State {
     }
 
     /// True iff `(c, d)` is a McKay-canonical augmentation, given d's canon info.
+    ///
+    /// Timer instrumentation (Step 0 of Engine B plan): the `&mut self`
+    /// signature lets us bump cumulative ns + call counters on each path
+    /// through the function. Cost of one `Instant::now()` is ~20 ns on
+    /// Linux — negligible against the BFS / canon-form work it bounds.
     fn is_canonical_augmentation(
-        &self,
+        &mut self,
         c_rref: &[BinVec],
         d_rref: &[BinVec],
         info_d: &CachedInfo,
     ) -> bool {
+        let t0 = std::time::Instant::now();
+        self.stats_is_canon_aug_calls += 1;
+
         let p_d = self.canonical_parent(d_rref, &info_d.canonical_column_order);
         if c_rref == p_d.as_slice() {
+            self.stats_parent_eq_hits += 1;
+            self.stats_is_canon_aug_ns += t0.elapsed().as_nanos();
             return true;
         }
         // Weight-enum prefilter.
         let we_c = weight_enum(c_rref);
         let we_p = weight_enum(&p_d);
         if we_c != we_p {
+            self.stats_weight_enum_filtered += 1;
+            self.stats_is_canon_aug_ns += t0.elapsed().as_nanos();
             return false;
         }
         // BFS in the orbit of p_d under Aut(D).
         if info_d.aut_generators.is_empty() {
+            self.stats_is_canon_aug_ns += t0.elapsed().as_nanos();
             return false;
         }
-        subspace_in_orbit(self.n, c_rref, &p_d, &info_d.aut_generators)
+        let bfs_t0 = std::time::Instant::now();
+        self.stats_bfs_calls += 1;
+        let hit = subspace_in_orbit(self.n, c_rref, &p_d, &info_d.aut_generators);
+        self.stats_bfs_ns += bfs_t0.elapsed().as_nanos();
+        if hit {
+            self.stats_bfs_hits += 1;
+        }
+        self.stats_is_canon_aug_ns += t0.elapsed().as_nanos();
+        hit
     }
 
     fn traverse(&mut self, rref: Vec<BinVec>, pivots: Vec<u32>, info: Rc<CachedInfo>) {
@@ -334,23 +406,61 @@ impl State {
 /// passed in (Python computes them via `gaborit_sigma` / `math.factorial`).
 ///
 /// The result is a `Vec<EnumeratedRaw>` in DFS order.
+///
+/// Stats vector layout (15 u128 fields, packed for pyo3 tuple-arity
+/// limits — pyo3 0.23 caps `IntoPyObject` tuples at 12 elements):
+///
+/// ```text
+///  idx  field
+///   0   canon_calls
+///   1   primary_hits
+///   2   secondary_attempts
+///   3   secondary_hits
+///   4   is_canon_aug_calls
+///   5   parent_eq_hits
+///   6   weight_enum_filtered
+///   7   bfs_calls
+///   8   bfs_hits
+///   9   is_canon_aug_ns
+///  10   bfs_ns
+///  11   nauty_ns                       (always-on)
+///  12   bucket_size_sum_at_attempt     (env-gated)
+///  13   match_position_sum             (env-gated)
+///  14   max_bucket_size                (env-gated)
+/// ```
+///
+/// Fields 4–10 came from the Engine B BFS-cost profile (see
+/// `markdown/notes/engine-b-bfs-profile.md`); fields 11–14 came from
+/// Phase 1 of the cheap-equivalence-verifier plan
+/// (`/home/dev/.claude/plans/let-s-implement-the-plan-nifty-kahn.md`).
 pub fn enumerate_doubly_even(
     n: u32,
     max_k: u32,
     quota: Vec<u128>,
     factorial_n: u128,
-) -> (Vec<EnumeratedRaw>, (u64, u64, u64, u64)) {
+) -> (Vec<EnumeratedRaw>, Vec<u128>) {
     let mut state = State::new(n, max_k, quota, factorial_n);
     // Zero code: rref empty, pivots empty.
     let zero_rref: Vec<BinVec> = Vec::new();
     let zero_pivots: Vec<u32> = Vec::new();
     let info = state.canon_info(&zero_rref);
     state.traverse(zero_rref, zero_pivots, info);
-    let stats = (
-        state.stats_canon_calls,
-        state.stats_primary_hits,
-        state.stats_secondary_attempts,
-        state.stats_secondary_hits,
-    );
+    let stats: Vec<u128> = vec![
+        state.stats_canon_calls as u128,
+        state.stats_primary_hits as u128,
+        state.stats_secondary_attempts as u128,
+        state.stats_secondary_hits as u128,
+        state.stats_is_canon_aug_calls as u128,
+        state.stats_parent_eq_hits as u128,
+        state.stats_weight_enum_filtered as u128,
+        state.stats_bfs_calls as u128,
+        state.stats_bfs_hits as u128,
+        state.stats_is_canon_aug_ns,
+        state.stats_bfs_ns,
+        state.stats_nauty_ns,
+        state.stats_bucket_size_sum_at_attempt as u128,
+        state.stats_match_position_sum as u128,
+        state.stats_max_bucket_size as u128,
+    ];
     (state.output, stats)
 }

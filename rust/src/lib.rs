@@ -279,7 +279,10 @@ fn py_subspace_in_orbit(
 ///
 ///   `(rref, canonical_column_order, aut_generators, aut_order_decimal, column_orbits)`
 ///
-/// Plus stats: `(true_canon_calls, primary_hits, secondary_hits, secondary_attempts)`.
+/// Plus a `stats: Vec[int]` (length 15) — see
+/// `enumerate::enumerate_doubly_even` doc for the field layout. Packed
+/// as a list because pyo3 0.23 caps `IntoPyObject` tuples at 12
+/// elements.
 ///
 /// `quota[k]` must be `σ(N, k)`; `factorial_n` must be `N!`. Python computes
 /// these via `gaborit_sigma` / `math.factorial` before the call.
@@ -292,7 +295,7 @@ fn py_enumerate_doubly_even(
     factorial_n: u128,
 ) -> PyResult<(
     Vec<(Vec<BinVec>, Vec<u32>, Vec<Vec<u32>>, String, Vec<u32>)>,
-    (u64, u64, u64, u64),
+    Vec<u128>,
 )> {
     if n > types::MAX_N {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
