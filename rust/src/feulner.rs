@@ -32,19 +32,19 @@ pub struct FeulnerCanonInfo {
 
 // ----------------------------------------------------- permutation utilities
 
-type Perm = Vec<u32>;
+pub(crate) type Perm = Vec<u32>;
 
-fn perm_identity(n: u32) -> Perm {
+pub(crate) fn perm_identity(n: u32) -> Perm {
     (0..n).collect()
 }
 
 /// `(p ∘ q)[i] = p[q[i]]` — apply `q` first, then `p`. Same convention as
 /// `doubly_even.canon.permutations.compose`.
-fn perm_compose(p: &[u32], q: &[u32]) -> Perm {
+pub(crate) fn perm_compose(p: &[u32], q: &[u32]) -> Perm {
     q.iter().map(|&qi| p[qi as usize]).collect()
 }
 
-fn perm_inverse(p: &[u32]) -> Perm {
+pub(crate) fn perm_inverse(p: &[u32]) -> Perm {
     let mut inv = vec![0u32; p.len()];
     for (i, &j) in p.iter().enumerate() {
         inv[j as usize] = i as u32;
@@ -126,7 +126,7 @@ pub fn group_order(gens: &[Perm], n: u32) -> u128 {
 
 // ----------------------------------------------------- column-orbit helpers
 
-fn compute_column_orbits(aut_gens: &[Perm], n: u32) -> Vec<u32> {
+pub(crate) fn compute_column_orbits(aut_gens: &[Perm], n: u32) -> Vec<u32> {
     let mut parent: Vec<u32> = (0..n).collect();
 
     fn find(parent: &mut [u32], i: u32) -> u32 {
@@ -216,7 +216,7 @@ fn orbits_on_subset(gens: &[&Perm], subset: &[u32]) -> HashMap<u32, u32> {
 /// the support). `Aut(C)` permutes covered and uncovered columns
 /// separately, so this split is free and strictly finer than `{0..n-1}`
 /// whenever `C` has any uncovered column.
-fn initial_partition(rref: &[BinVec], n: u32) -> Vec<Vec<u32>> {
+pub(crate) fn initial_partition(rref: &[BinVec], n: u32) -> Vec<Vec<u32>> {
     let mut support: BinVec = 0;
     for &row in rref {
         support |= row;
@@ -248,7 +248,7 @@ fn initial_partition(rref: &[BinVec], n: u32) -> Vec<Vec<u32>> {
 /// weight-8 (or the next stratum up) also distinguished orbits. The
 /// extra refiner-incidence work in `refine` is paid back many-fold by
 /// the smaller search tree at large `N`.
-fn invariant_refiners(rref: &[BinVec]) -> Vec<BinVec> {
+pub(crate) fn invariant_refiners(rref: &[BinVec]) -> Vec<BinVec> {
     let k = rref.len();
     let mut by_weight: BTreeMap<u32, Vec<BinVec>> = BTreeMap::new();
     if k == 0 {
@@ -297,7 +297,7 @@ fn mask_of_cell(cell: &[u32]) -> u64 {
 /// each input cell's split products form a contiguous block — this
 /// preserves the McKay convention the search expects (individualised
 /// singleton inherits the parent's slot index in the output).
-fn refine(p: Vec<Vec<u32>>, refiners: &[BinVec]) -> Vec<Vec<u32>> {
+pub(crate) fn refine(p: Vec<Vec<u32>>, refiners: &[BinVec]) -> Vec<Vec<u32>> {
     if p.is_empty() {
         return p;
     }
@@ -549,7 +549,7 @@ fn emit_sorted(
     keyed.into_iter().map(|(_, _, _, c)| c).collect()
 }
 
-fn individualise(p: &[Vec<u32>], cell_idx: usize, col: u32) -> Vec<Vec<u32>> {
+pub(crate) fn individualise(p: &[Vec<u32>], cell_idx: usize, col: u32) -> Vec<Vec<u32>> {
     let mut new_p: Vec<Vec<u32>> = Vec::with_capacity(p.len() + 1);
     new_p.extend_from_slice(&p[..cell_idx]);
     new_p.push(vec![col]);
@@ -581,23 +581,23 @@ fn individualise(p: &[Vec<u32>], cell_idx: usize, col: u32) -> Vec<Vec<u32>> {
 /// call captures a `Snapshot` before descending and `restore`s with
 /// the accumulated row-mutation `log` on the way back up. This avoids
 /// the per-descent `Vec` clones that dominated the cost otherwise.
-struct PartialKey {
+pub(crate) struct PartialKey {
     k: u32,
     work: Vec<BinVec>,
-    depth: u32,
-    key: Vec<u64>,
-    absorbed_cols: u64,
+    pub(crate) depth: u32,
+    pub(crate) key: Vec<u64>,
+    pub(crate) absorbed_cols: u64,
 }
 
 #[derive(Clone, Copy)]
-struct Snapshot {
+pub(crate) struct Snapshot {
     depth: u32,
     absorbed_cols: u64,
     key_len: usize,
 }
 
 impl PartialKey {
-    fn new(rref: &[BinVec]) -> Self {
+    pub(crate) fn new(rref: &[BinVec]) -> Self {
         Self {
             k: rref.len() as u32,
             work: rref.to_vec(),
@@ -607,7 +607,7 @@ impl PartialKey {
         }
     }
 
-    fn snapshot(&self) -> Snapshot {
+    pub(crate) fn snapshot(&self) -> Snapshot {
         Snapshot {
             depth: self.depth,
             absorbed_cols: self.absorbed_cols,
@@ -619,7 +619,7 @@ impl PartialKey {
     /// `(row_index, prior_value)` entries pushed by absorb in order;
     /// we restore them in reverse so a swap-then-XOR sequence unwinds
     /// to the original layout.
-    fn restore(&mut self, snap: Snapshot, log: &[(u32, BinVec)]) {
+    pub(crate) fn restore(&mut self, snap: Snapshot, log: &[(u32, BinVec)]) {
         for &(r, val) in log.iter().rev() {
             self.work[r as usize] = val;
         }
@@ -631,7 +631,7 @@ impl PartialKey {
     /// Absorb column `c`. Each row of `work` that gets mutated is first
     /// pushed to `log` (as `(row_index, prior_value)`); pivot-swap is
     /// expressed as two such mutations.
-    fn absorb(&mut self, c: u32, log: &mut Vec<(u32, BinVec)>) {
+    pub(crate) fn absorb(&mut self, c: u32, log: &mut Vec<(u32, BinVec)>) {
         let mut pivot: i32 = -1;
         for r in self.depth..self.k {
             if (self.work[r as usize] >> c) & 1 == 1 {

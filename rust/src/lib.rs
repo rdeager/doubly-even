@@ -11,6 +11,7 @@ pub mod enumerate;
 pub mod feulner;
 pub mod linalg;
 pub mod orbit;
+pub mod paired_iso;
 pub mod permutations;
 pub mod quotient;
 pub mod subspace_orbit;
@@ -279,7 +280,7 @@ fn py_subspace_in_orbit(
 ///
 ///   `(rref, canonical_column_order, aut_generators, aut_order_decimal, column_orbits)`
 ///
-/// Plus a `stats: Vec[int]` (length 15) — see
+/// Plus a `stats: Vec[int]` (length 19) — see
 /// `enumerate::enumerate_doubly_even` doc for the field layout. Packed
 /// as a list because pyo3 0.23 caps `IntoPyObject` tuples at 12
 /// elements.
@@ -304,6 +305,7 @@ fn py_enumerate_doubly_even(
         )));
     }
     let (out, stats) = enumerate::enumerate_doubly_even(n, max_k, quota, factorial_n);
+    debug_assert_eq!(stats.len(), 19, "stats vector length mismatch");
     let result: Vec<_> = out
         .into_iter()
         .map(|e| {
@@ -319,6 +321,15 @@ fn py_enumerate_doubly_even(
     Ok((result, stats))
 }
 
+/// Build identifier — `"verifier"` when compiled with the
+/// `equivalence_verifier` feature, otherwise `"baseline"`. Used by the
+/// Python A/B harness to confirm which kernel is loaded.
+#[pyfunction]
+#[pyo3(name = "kernel_build_info")]
+fn py_kernel_build_info() -> &'static str {
+    enumerate::build_info()
+}
+
 // ------------------------------------------------------ module assembly
 
 #[pymodule]
@@ -330,6 +341,7 @@ fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_canon_info_feulner_native, m)?)?;
     m.add_function(wrap_pyfunction!(py_subspace_in_orbit, m)?)?;
     m.add_function(wrap_pyfunction!(py_enumerate_doubly_even, m)?)?;
+    m.add_function(wrap_pyfunction!(py_kernel_build_info, m)?)?;
 
     // Stage-level helpers under `doubly_even_kernel.debug`.
     let debug = PyModule::new(m.py(), "debug")?;

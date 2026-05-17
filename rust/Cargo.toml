@@ -10,6 +10,13 @@ publish = false
 name = "doubly_even_kernel"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+# Enable the Leon §10(i) paired-refinement equivalence verifier as the
+# canon_info secondary-cache fast path. With this off (default), the
+# kernel is byte-for-byte identical to the pre-verifier baseline.
+equivalence_verifier = []
+
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }
 fixedbitset = "0.5"
