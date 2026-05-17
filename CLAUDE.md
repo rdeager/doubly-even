@@ -129,6 +129,21 @@ Three independent checks the test suite relies on:
   Does not speed up `N ≤ 22`.
 - **GPU canonicaliser (PEACE-style)** is the only published
   direction with > 5× headroom at `N ≤ 22`. Multi-week.
+- **Audit 2026-05-17** (kernel instrumentation in `rust/src/enumerate.rs`
+  per_k_stats matrix, scripts `bfs_rejects_measurement.py`,
+  `cubic_tensor_experiment.py`, `mass_check_ablation.py`):
+  - σ_Q + weight-enum prefilter is near-perfect — final BFS rejects
+    only 0.4 % of survivors at `N = 22` (308 / 82 413). The canon test
+    is mostly confirmatory; "direct canonical generation" lever is
+    closed.
+  - Cubic-tensor (column-triple-degree) is the strongest cheap
+    invariant found — cuts T1 residual collisions by 37 % at `N = 22`
+    (1918 vs 3069). But 95 µs Python / ~25 µs projected Rust falls
+    into the D12 per-probe-cost trap; not ported.
+  - Mass-stop is a 4–11 % win (ablation-measured: `N = 18` 10.9 %,
+    `N = 22` 4.4 %). Each of 210 pre-loop firings at `N = 22` skips a
+    whole subtree (~1.5 ms each). Code kept; could ~2× if we add
+    low-|Aut|-first tree ordering.
 
 ## Performance state (post-D10/D11/D12 sprint)
 
