@@ -267,7 +267,7 @@ def enumerate_doubly_even(N: int, max_k: int | None = None) -> Iterator[Enumerat
     if _kernel is not None:
         quota_vec = [gaborit_sigma(N, k) for k in range(cap + 1)]
         factorial_N = math.factorial(N)
-        raw, _stats = _kernel.enumerate_doubly_even(N, cap, quota_vec, factorial_N)
+        raw, _stats, _per_k = _kernel.enumerate_doubly_even(N, cap, quota_vec, factorial_N)
         for rref, ccol, gens, aord_str, orbits in raw:
             c = Code(N, tuple(rref))
             info = CanonInfo(

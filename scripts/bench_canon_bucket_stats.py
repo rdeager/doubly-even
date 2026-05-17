@@ -50,7 +50,7 @@ def measure(N: int) -> dict:
     quota_vec = [gaborit_sigma(N, k) for k in range(cap + 1)]
     factorial_N = math.factorial(N)
     t0 = time.perf_counter()
-    raw, stats = _kernel.enumerate_doubly_even(N, cap, quota_vec, factorial_N)
+    raw, stats, _per_k = _kernel.enumerate_doubly_even(N, cap, quota_vec, factorial_N)
     wall_s = time.perf_counter() - t0
     # Field layout: see rust/src/enumerate.rs::enumerate_doubly_even doc.
     (
@@ -69,6 +69,7 @@ def measure(N: int) -> dict:
         bucket_size_sum,
         match_position_sum,
         max_bucket_size,
+        *_trailing,
     ) = stats
     return {
         "N": N,

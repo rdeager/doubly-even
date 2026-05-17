@@ -280,9 +280,9 @@ fn py_subspace_in_orbit(
 ///
 ///   `(rref, canonical_column_order, aut_generators, aut_order_decimal, column_orbits)`
 ///
-/// Plus a `stats: Vec[int]` (length 21) — see
-/// `enumerate::enumerate_doubly_even` doc for the field layout. Packed
-/// as a list because pyo3 0.23 caps `IntoPyObject` tuples at 12
+/// Plus a `stats: Vec[int]` (length 22) and a `per_k_stats: list[list[int]]`
+/// — see `enumerate::enumerate_doubly_even` doc for the field layout.
+/// Packed as flat lists because pyo3 0.23 caps `IntoPyObject` tuples at 12
 /// elements.
 ///
 /// `quota[k]` must be `σ(N, k)`; `factorial_n` must be `N!`. Python computes
@@ -297,6 +297,7 @@ fn py_enumerate_doubly_even(
 ) -> PyResult<(
     Vec<(Vec<BinVec>, Vec<u32>, Vec<Vec<u32>>, String, Vec<u32>)>,
     Vec<u128>,
+    Vec<Vec<u64>>,
 )> {
     if n > types::MAX_N {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -304,8 +305,9 @@ fn py_enumerate_doubly_even(
             types::MAX_N,
         )));
     }
-    let (out, stats) = enumerate::enumerate_doubly_even(n, max_k, quota, factorial_n);
-    debug_assert_eq!(stats.len(), 21, "stats vector length mismatch");
+    let (out, stats, per_k) =
+        enumerate::enumerate_doubly_even(n, max_k, quota, factorial_n);
+    debug_assert_eq!(stats.len(), 22, "stats vector length mismatch");
     let result: Vec<_> = out
         .into_iter()
         .map(|e| {
@@ -318,7 +320,7 @@ fn py_enumerate_doubly_even(
             )
         })
         .collect();
-    Ok((result, stats))
+    Ok((result, stats, per_k))
 }
 
 /// Build identifier — `"verifier"` when compiled with the

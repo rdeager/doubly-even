@@ -48,11 +48,12 @@ def profile_one(N: int) -> None:
     factorial_N = math.factorial(N)
 
     t0 = time.perf_counter()
-    raw, stats = _kernel.enumerate_doubly_even(N, cap, quota_vec, factorial_N)
+    raw, stats, _per_k = _kernel.enumerate_doubly_even(N, cap, quota_vec, factorial_N)
     wall_s = time.perf_counter() - t0
 
-    # Stats is now a 15-element list (pyo3 12-tuple limit); see
-    # ``enumerate::enumerate_doubly_even`` doc for the layout.
+    # Stats is now a 22-element list (pyo3 12-tuple limit); see
+    # ``enumerate::enumerate_doubly_even`` doc for the layout. Only the
+    # first 15 fields are needed here; trailing fields are ignored.
     (
         canon_calls,
         primary_hits,
@@ -69,6 +70,7 @@ def profile_one(N: int) -> None:
         _bucket_size_sum,
         _match_position_sum,
         _max_bucket_size,
+        *_trailing,
     ) = stats
 
     wall_ns = int(wall_s * 1e9)

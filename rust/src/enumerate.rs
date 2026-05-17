@@ -69,6 +69,40 @@ struct State {
     mass_at_k: Vec<u128>,
     factorial_n: u128,
     canon_cache: HashMap<Vec<BinVec>, Rc<CachedInfo>>,
+    /// Per-k breakdown of `is_canonical_augmentation` outcomes. Indexed by
+    /// the parent rank (i.e., rank of C; the child D has rank k+1). Used
+    /// by the σ_Q-orbit-min rejection-rate audit
+    /// (plan `for-complete-enumeration-of-proud-meerkat.md` Phase 1).
+    /// `parent_eq_hits + bfs_hits` is "the canon test accepted"; the
+    /// remainder (`is_canon_aug_calls - parent_eq - bfs_hits - weight_enum_filtered`)
+    /// is the BFS-exhausted-rejection count surfaced as
+    /// `stats_bfs_rejects_by_k`.
+    pub stats_is_canon_aug_calls_by_k: Vec<u64>,
+    pub stats_parent_eq_hits_by_k: Vec<u64>,
+    pub stats_weight_enum_filtered_by_k: Vec<u64>,
+    pub stats_bfs_calls_by_k: Vec<u64>,
+    pub stats_bfs_hits_by_k: Vec<u64>,
+    pub stats_bfs_rejects_by_k: Vec<u64>,
+    /// Mass-stop counters bucketed by parent rank k. Together they tell
+    /// us how effective the Gaborit closed-form quota is at pruning the
+    /// recursion. Audit added for the "Conway–Pless gluing would fill
+    /// mass early" question — see
+    /// `for-complete-enumeration-of-proud-meerkat.md`.
+    ///
+    /// `pre_loop`: fired at the top of `traverse` for the child level
+    ///   k+1 (quota already met when we entered this parent — entire
+    ///   subtree skipped).
+    /// `in_loop`: fired mid-candidate-loop in `traverse` (some children
+    ///   processed, then the remaining candidates skipped).
+    /// `candidates_total_seen`: total candidates we *generated* via
+    ///   `doubly_even_candidates_q` (denominator for skip rates).
+    /// `candidates_skipped`: of those, how many were left when mass-stop
+    ///   fired mid-loop. `candidates_skipped / candidates_total_seen`
+    ///   is the fraction of generated candidate-work the quota avoided.
+    pub stats_mass_stop_pre_loop_by_k: Vec<u64>,
+    pub stats_mass_stop_in_loop_by_k: Vec<u64>,
+    pub stats_candidates_total_seen_by_k: Vec<u64>,
+    pub stats_candidates_skipped_by_k: Vec<u64>,
     /// Counter of true cache misses (one nauty call apiece).
     pub stats_canon_calls: u64,
     pub stats_primary_hits: u64,
@@ -102,6 +136,12 @@ struct State {
     pub stats_bfs_calls: u64,
     /// Times the BFS returned `true`.
     pub stats_bfs_hits: u64,
+    /// Times the BFS was entered but exhausted without finding C in the
+    /// orbit of `canonical_parent(D)` — i.e., σ_Q orbit-min survivors that
+    /// the final canon test rejects. Equals
+    /// `stats_bfs_calls - stats_bfs_hits` but materialised so the Python
+    /// harness doesn't have to recompute it.
+    pub stats_bfs_rejects: u64,
     /// Cumulative ns spent in `is_canonical_augmentation`.
     pub stats_is_canon_aug_ns: u128,
     /// Cumulative ns spent inside `subspace_in_orbit`.
@@ -188,6 +228,16 @@ impl State {
             mass_at_k: vec![0u128; len],
             factorial_n,
             canon_cache: HashMap::new(),
+            stats_is_canon_aug_calls_by_k: vec![0u64; len],
+            stats_parent_eq_hits_by_k: vec![0u64; len],
+            stats_weight_enum_filtered_by_k: vec![0u64; len],
+            stats_bfs_calls_by_k: vec![0u64; len],
+            stats_bfs_hits_by_k: vec![0u64; len],
+            stats_bfs_rejects_by_k: vec![0u64; len],
+            stats_mass_stop_pre_loop_by_k: vec![0u64; len],
+            stats_mass_stop_in_loop_by_k: vec![0u64; len],
+            stats_candidates_total_seen_by_k: vec![0u64; len],
+            stats_candidates_skipped_by_k: vec![0u64; len],
             stats_canon_calls: 0,
             stats_primary_hits: 0,
             secondary_cache: HashMap::new(),
@@ -199,6 +249,7 @@ impl State {
             stats_weight_enum_filtered: 0,
             stats_bfs_calls: 0,
             stats_bfs_hits: 0,
+            stats_bfs_rejects: 0,
             stats_is_canon_aug_ns: 0,
             stats_bfs_ns: 0,
             stats_nauty_ns: 0,
@@ -480,16 +531,19 @@ impl State {
     /// Linux — negligible against the BFS / canon-form work it bounds.
     fn is_canonical_augmentation(
         &mut self,
+        parent_k: usize,
         c_rref: &[BinVec],
         d_rref: &[BinVec],
         info_d: &CachedInfo,
     ) -> bool {
         let t0 = std::time::Instant::now();
         self.stats_is_canon_aug_calls += 1;
+        self.stats_is_canon_aug_calls_by_k[parent_k] += 1;
 
         let p_d = self.canonical_parent(d_rref, &info_d.canonical_column_order);
         if c_rref == p_d.as_slice() {
             self.stats_parent_eq_hits += 1;
+            self.stats_parent_eq_hits_by_k[parent_k] += 1;
             self.stats_is_canon_aug_ns += t0.elapsed().as_nanos();
             return true;
         }
@@ -498,20 +552,32 @@ impl State {
         let we_p = weight_enum(&p_d);
         if we_c != we_p {
             self.stats_weight_enum_filtered += 1;
+            self.stats_weight_enum_filtered_by_k[parent_k] += 1;
             self.stats_is_canon_aug_ns += t0.elapsed().as_nanos();
             return false;
         }
         // BFS in the orbit of p_d under Aut(D).
         if info_d.aut_generators.is_empty() {
+            // Trivial Aut(D): BFS would be a single-step rejection. Count
+            // this as a BFS-style reject for the rejection-rate audit so
+            // every non-trivial-orbit candidate that doesn't accept lands
+            // somewhere in the per-k breakdown.
+            self.stats_bfs_rejects += 1;
+            self.stats_bfs_rejects_by_k[parent_k] += 1;
             self.stats_is_canon_aug_ns += t0.elapsed().as_nanos();
             return false;
         }
         let bfs_t0 = std::time::Instant::now();
         self.stats_bfs_calls += 1;
+        self.stats_bfs_calls_by_k[parent_k] += 1;
         let hit = subspace_in_orbit(self.n, c_rref, &p_d, &info_d.aut_generators);
         self.stats_bfs_ns += bfs_t0.elapsed().as_nanos();
         if hit {
             self.stats_bfs_hits += 1;
+            self.stats_bfs_hits_by_k[parent_k] += 1;
+        } else {
+            self.stats_bfs_rejects += 1;
+            self.stats_bfs_rejects_by_k[parent_k] += 1;
         }
         self.stats_is_canon_aug_ns += t0.elapsed().as_nanos();
         hit
@@ -543,6 +609,7 @@ impl State {
             return;
         }
         if self.mass_at_k[k as usize + 1] >= self.quota[k as usize + 1] {
+            self.stats_mass_stop_pre_loop_by_k[k as usize] += 1;
             return;
         }
         // Generate candidates. Time the call: Stage 0 of the Witt-dispatch
@@ -558,16 +625,21 @@ impl State {
         );
         self.stats_candidates_q_ns += cq_t0.elapsed().as_nanos();
         self.stats_candidates_q_calls += 1;
-        for v in candidates {
+        let total = candidates.len() as u64;
+        self.stats_candidates_total_seen_by_k[k as usize] += total;
+        for (idx, v) in candidates.iter().enumerate() {
             if self.mass_at_k[k as usize + 1] >= self.quota[k as usize + 1] {
+                let remaining = total - idx as u64;
+                self.stats_mass_stop_in_loop_by_k[k as usize] += 1;
+                self.stats_candidates_skipped_by_k[k as usize] += remaining;
                 return;
             }
             // D = C.extend(v): append v, re-RREF.
             let mut new_basis = rref.clone();
-            new_basis.push(v);
+            new_basis.push(*v);
             let (d_rref, d_pivots) = row_reduce(&new_basis, self.n);
             let info_d = self.canon_info(&d_rref);
-            if !self.is_canonical_augmentation(&rref, &d_rref, &info_d) {
+            if !self.is_canonical_augmentation(k as usize, &rref, &d_rref, &info_d) {
                 continue;
             }
             self.traverse(d_rref, d_pivots, info_d);
@@ -581,9 +653,21 @@ impl State {
 /// `quota[k]` must be `σ(N, k)`; `factorial_n` must be `N!`. Both are
 /// passed in (Python computes them via `gaborit_sigma` / `math.factorial`).
 ///
-/// The result is a `Vec<EnumeratedRaw>` in DFS order.
+/// Returns `(output, stats, per_k_stats)`:
 ///
-/// Stats vector layout (21 u128 fields, packed for pyo3 tuple-arity
+/// - `output` — `Vec<EnumeratedRaw>` in DFS order.
+/// - `stats` — flat vector (22 u128 fields). See layout below.
+/// - `per_k_stats` — rectangular `[10][max_k+1]` matrix of u64 counters
+///   bucketed by the *parent* rank k (i.e., the rank of C; D has rank
+///   k+1). Rows in fixed order:
+///   `[is_canon_aug_calls, parent_eq_hits, weight_enum_filtered,
+///   bfs_calls, bfs_hits, bfs_rejects, mass_stop_pre_loop,
+///   mass_stop_in_loop, candidates_total_seen, candidates_skipped]`.
+///   Rows 0–5 from Phase 1 of `for-complete-enumeration-of-proud-meerkat.md`
+///   (σ_Q-orbit-min rejection-rate audit). Rows 6–9 from the mass-stop
+///   audit (same plan, Conway–Pless gluing follow-up).
+///
+/// Stats vector layout (22 u128 fields, packed for pyo3 tuple-arity
 /// limits — pyo3 0.23 caps `IntoPyObject` tuples at 12 elements):
 ///
 /// ```text
@@ -609,6 +693,7 @@ impl State {
 ///  18   verifier_ns                    (feature equivalence_verifier)
 ///  19   candidates_q_calls             (always-on)
 ///  20   candidates_q_ns                (always-on)
+///  21   bfs_rejects                    (always-on; Phase 1 audit)
 /// ```
 ///
 /// Fields 4–10 came from the Engine B BFS-cost profile (see
@@ -617,13 +702,14 @@ impl State {
 /// integration (see
 /// `/home/dev/.claude/plans/let-s-implement-the-previous-memoized-simon.md`);
 /// 19–20 from Stage 0 of the Witt-dispatch plan
-/// (`the-last-several-sessions-scalable-bear.md`).
+/// (`the-last-several-sessions-scalable-bear.md`); 21 + per_k_stats from
+/// Phase 1 of `for-complete-enumeration-of-proud-meerkat.md`.
 pub fn enumerate_doubly_even(
     n: u32,
     max_k: u32,
     quota: Vec<u128>,
     factorial_n: u128,
-) -> (Vec<EnumeratedRaw>, Vec<u128>) {
+) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
     let mut state = State::new(n, max_k, quota, factorial_n);
     // Zero code: rref empty, pivots empty.
     let zero_rref: Vec<BinVec> = Vec::new();
@@ -652,8 +738,21 @@ pub fn enumerate_doubly_even(
         state.stats_verifier_ns,
         state.stats_candidates_q_calls as u128,
         state.stats_candidates_q_ns,
+        state.stats_bfs_rejects as u128,
     ];
-    (state.output, stats)
+    let per_k_stats: Vec<Vec<u64>> = vec![
+        state.stats_is_canon_aug_calls_by_k,
+        state.stats_parent_eq_hits_by_k,
+        state.stats_weight_enum_filtered_by_k,
+        state.stats_bfs_calls_by_k,
+        state.stats_bfs_hits_by_k,
+        state.stats_bfs_rejects_by_k,
+        state.stats_mass_stop_pre_loop_by_k,
+        state.stats_mass_stop_in_loop_by_k,
+        state.stats_candidates_total_seen_by_k,
+        state.stats_candidates_skipped_by_k,
+    ];
+    (state.output, stats, per_k_stats)
 }
 
 /// Build identifier — returns `"verifier"` when compiled with the
@@ -688,7 +787,7 @@ mod verifier_tests {
     #[test]
     fn enumerate_n10_max_k3_count() {
         let quota = gaborit_sigma_n10();
-        let (out, _stats) = enumerate_doubly_even(10, 3, quota, factorial(10));
+        let (out, _stats, _per_k) = enumerate_doubly_even(10, 3, quota, factorial(10));
         let mut per_k = vec![0usize; 4];
         for e in &out {
             per_k[e.rref.len()] += 1;

@@ -56,13 +56,13 @@ def profile_one(N: int) -> dict:
     factorial_N = math.factorial(N)
 
     t0 = time.perf_counter()
-    raw, stats = _kernel.enumerate_doubly_even(N, cap, quota_vec, factorial_N)
+    raw, stats, _per_k = _kernel.enumerate_doubly_even(N, cap, quota_vec, factorial_N)
     wall_s = time.perf_counter() - t0
     wall_ns = int(wall_s * 1e9)
 
-    if len(stats) != 21:
+    if len(stats) != 22:
         raise RuntimeError(
-            f"expected stats length 21 (Stage 0 instrumented kernel), got {len(stats)}. "
+            f"expected stats length 22 (Phase 1 rejection-rate kernel), got {len(stats)}. "
             f"Did you rebuild with `maturin develop --release` after the instrumentation?"
         )
 
