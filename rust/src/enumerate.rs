@@ -15,7 +15,25 @@
 //!   the cached info through the witnessing permutation.
 
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::rc::Rc;
+
+use lru::LruCache;
+
+/// Per-worker primary canon cache capacity. Read once at `WorkerState::new`
+/// from `DOUBLY_EVEN_CANON_CACHE_CAP` (parsed as a positive integer); else
+/// defaults to 500,000 entries, which is ~500 MB at N=26 and keeps a
+/// 20-worker run well under a 50 GB cgroup ceiling. Hit rate measured at
+/// 3–5 % across N=18–24, so eviction barely affects wall time.
+fn canon_cache_capacity() -> NonZeroUsize {
+    const DEFAULT_CAP: usize = 500_000;
+    let cap = std::env::var("DOUBLY_EVEN_CANON_CACHE_CAP")
+        .ok()
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_CAP);
+    NonZeroUsize::new(cap).expect("canon cache capacity must be non-zero")
+}
 
 #[cfg(all(feature = "parallel", feature = "traces_qd"))]
 compile_error!(
@@ -90,7 +108,7 @@ struct WorkerState {
     quota: Vec<u128>,
     mass_at_k: Vec<u128>,
     factorial_n: u128,
-    canon_cache: HashMap<Vec<BinVec>, Rc<CachedInfo>>,
+    canon_cache: LruCache<Vec<BinVec>, Rc<CachedInfo>>,
     /// Per-k breakdown of `is_canonical_augmentation` outcomes. Indexed by
     /// the parent rank (i.e., rank of C; the child D has rank k+1). Used
     /// by the σ_Q-orbit-min rejection-rate audit
@@ -262,7 +280,7 @@ impl WorkerState {
             quota,
             mass_at_k: vec![0u128; len],
             factorial_n,
-            canon_cache: HashMap::new(),
+            canon_cache: LruCache::new(canon_cache_capacity()),
             stats_is_canon_aug_calls_by_k: vec![0u64; len],
             stats_parent_eq_hits_by_k: vec![0u64; len],
             stats_weight_enum_filtered_by_k: vec![0u64; len],
@@ -430,7 +448,7 @@ impl WorkerState {
                         aut_order: cf_info.aut_order,
                         column_orbits: orbits_d,
                     });
-                    self.canon_cache.insert(rref.to_vec(), Rc::clone(&new_info));
+                    self.canon_cache.put(rref.to_vec(), Rc::clone(&new_info));
                     self.stats_verifier_hits += 1;
                     self.stats_verifier_ns += v_t0.elapsed().as_nanos();
                     return new_info;
@@ -491,7 +509,7 @@ impl WorkerState {
             aut_order,
             column_orbits: native.column_orbits,
         });
-        self.canon_cache.insert(rref.to_vec(), Rc::clone(&info));
+        self.canon_cache.put(rref.to_vec(), Rc::clone(&info));
 
         if let Some(key) = we_key {
             // Compute canonical form for secondary-cache membership.
