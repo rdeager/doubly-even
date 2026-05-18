@@ -227,6 +227,7 @@ dependencies = [
  "lru",
  "nauty-Traces-sys",
  "pyo3",
+ "rustc-hash",
 ]
 
 [[package]]

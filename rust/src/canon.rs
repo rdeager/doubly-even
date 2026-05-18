@@ -832,6 +832,84 @@ pub fn canon_info_qd_traces(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> 
     })
 }
 
+/// T11 column-stratified weight-profile hash.
+///
+/// For each of the `n` columns j, count how many codewords c ∈ C with
+/// c[j]=1 fall into each Hamming-weight bucket (w = 4, 8, 12, 16, 20).
+/// The per-column 5-tuple of counts is then sorted across columns to a
+/// permutation-invariant multiset, and that multiset is hashed with a
+/// fixed-seed `FxHasher` to a `u64` digest.
+///
+/// Cost is O(2^k · avg_weight): the outer loop is a Gray-code walk over
+/// codewords (one XOR per step), and the inner loop visits each set bit
+/// of the current codeword once. At N = 22, k ≤ 11: 2048 codewords × avg
+/// weight ~9 → ~18 K basic ops, ≲ 5 µs on x86_64.
+///
+/// **Trust model.** T11 has known collisions (15 hashes at N=22, ~1365 at
+/// N=24 — see `t11_blocklist`). The consumer in
+/// `enumerate::canon_info` treats any hash NOT in the per-N blocklist as
+/// a proof of canonical equivalence; hashes IN the blocklist force a full
+/// nauty call. Debug builds verify every cache-hit against nauty via
+/// `debug_assert_eq!`.
+#[cfg(feature = "t11_cache")]
+pub fn compute_t11_hash(rref: &[BinVec], n: u32) -> u64 {
+    use std::hash::Hasher;
+
+    const NUM_BUCKETS: usize = 5; // weights 4, 8, 12, 16, 20
+
+    let n_us = n as usize;
+    let k = rref.len();
+
+    // Flattened per-column profile: profile[col * NUM_BUCKETS + bucket].
+    let mut profile: Vec<u32> = vec![0; n_us * NUM_BUCKETS];
+
+    if k > 0 {
+        let size = 1usize << k;
+        let mut cw: BinVec = 0;
+        // mask = 0 (cw = 0) contributes nothing; weight 0 ∉ any bucket.
+        for mask in 1..size {
+            let flip = (mask & mask.wrapping_neg()).trailing_zeros() as usize;
+            cw ^= rref[flip];
+            let bucket = match cw.count_ones() {
+                4 => 0,
+                8 => 1,
+                12 => 2,
+                16 => 3,
+                20 => 4,
+                _ => continue,
+            };
+            // Walk set bits of cw via low-bit extract.
+            let mut bits = cw;
+            while bits != 0 {
+                let j = bits.trailing_zeros() as usize;
+                profile[j * NUM_BUCKETS + bucket] += 1;
+                bits &= bits - 1;
+            }
+        }
+    }
+
+    // Materialise per-column tuples and sort → permutation-invariant multiset.
+    let mut per_col: Vec<[u32; NUM_BUCKETS]> = (0..n_us)
+        .map(|j| {
+            let mut t = [0u32; NUM_BUCKETS];
+            t.copy_from_slice(&profile[j * NUM_BUCKETS..(j + 1) * NUM_BUCKETS]);
+            t
+        })
+        .collect();
+    per_col.sort_unstable();
+
+    let mut hasher = rustc_hash::FxHasher::default();
+    // Prefix with (k, n) so codes of different shape can't collide trivially.
+    hasher.write_u32(k as u32);
+    hasher.write_u32(n);
+    for tup in &per_col {
+        for &v in tup {
+            hasher.write_u32(v);
+        }
+    }
+    hasher.finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -940,5 +1018,47 @@ mod tests {
         // Rank-0 code: no nonzero codewords. Builder returns None so the
         // caller falls back to canon_info_native.
         assert!(canon_info_qd_native(&[], 5).is_none());
+    }
+
+    #[cfg(feature = "t11_cache")]
+    #[test]
+    fn t11_hash_is_permutation_invariant() {
+        // Two RREFs that span the same code under a column permutation
+        // must hash identically — T11 is a sorted multiset across columns.
+        let basis = vec![0xE1u64, 0xD2u64, 0xB4u64, 0x78u64]; // [8,4,4]
+        let h1 = compute_t11_hash(&basis, 8);
+        // Permute columns 0 <-> 7 by swapping bit 0 and bit 7 in each basis row.
+        let swap_b0_b7 = |x: u64| -> u64 {
+            let b0 = (x >> 0) & 1;
+            let b7 = (x >> 7) & 1;
+            (x & !0x81u64) | (b0 << 7) | (b7 << 0)
+        };
+        let permuted: Vec<u64> = basis.iter().map(|&x| swap_b0_b7(x)).collect();
+        let h2 = compute_t11_hash(&permuted, 8);
+        assert_eq!(h1, h2, "T11 hash must be invariant under column permutation");
+    }
+
+    #[cfg(feature = "t11_cache")]
+    #[test]
+    fn t11_hash_distinguishes_different_codes() {
+        // The extended Hamming [8,4,4] and the direct-sum [8,2,4]⊕[0]² have
+        // different weight enumerators (14 weight-4 cws vs 2), so T11 must
+        // distinguish them.
+        let hamming = vec![0xE1u64, 0xD2u64, 0xB4u64, 0x78u64];
+        let direct_sum = vec![0x0Fu64, 0xF0u64];
+        let h1 = compute_t11_hash(&hamming, 8);
+        let h2 = compute_t11_hash(&direct_sum, 8);
+        assert_ne!(h1, h2);
+    }
+
+    #[cfg(feature = "t11_cache")]
+    #[test]
+    fn t11_hash_deterministic_and_zero_safe() {
+        // Empty RREF must not panic; same inputs always produce same hash.
+        let h_empty = compute_t11_hash(&[], 6);
+        let h_empty2 = compute_t11_hash(&[], 6);
+        assert_eq!(h_empty, h_empty2);
+        // n=0 with empty rref is also legal.
+        let _ = compute_t11_hash(&[], 0);
     }
 }

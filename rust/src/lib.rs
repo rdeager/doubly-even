@@ -15,6 +15,8 @@ pub mod paired_iso;
 pub mod permutations;
 pub mod quotient;
 pub mod subspace_orbit;
+#[cfg(feature = "t11_cache")]
+pub mod t11_blocklist;
 pub mod types;
 
 use pyo3::prelude::*;
@@ -341,7 +343,7 @@ fn py_enumerate_doubly_even(
         let _ = py;
         enumerate::enumerate_doubly_even(n, max_k, quota, factorial_n)
     };
-    debug_assert_eq!(stats.len(), 26, "stats vector length mismatch");
+    debug_assert_eq!(stats.len(), 30, "stats vector length mismatch");
     let result: Vec<_> = out
         .into_iter()
         .map(|e| {
@@ -366,6 +368,18 @@ fn py_kernel_build_info() -> &'static str {
     enumerate::build_info()
 }
 
+/// T11 column-stratified weight-profile hash (canon.rs::compute_t11_hash).
+///
+/// Returned as Python `int` (u64-safe). Exposed for the
+/// `scripts/dump_t11_blocklist.py` helper that generates the per-N
+/// blocklist const arrays for `t11_blocklist.rs`.
+#[cfg(feature = "t11_cache")]
+#[pyfunction]
+#[pyo3(name = "compute_t11_hash")]
+fn py_compute_t11_hash(rref: Vec<BinVec>, n: u32) -> u64 {
+    canon::compute_t11_hash(&rref, n)
+}
+
 // ------------------------------------------------------ module assembly
 
 #[pymodule]
@@ -378,6 +392,8 @@ fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_subspace_in_orbit, m)?)?;
     m.add_function(wrap_pyfunction!(py_enumerate_doubly_even, m)?)?;
     m.add_function(wrap_pyfunction!(py_kernel_build_info, m)?)?;
+    #[cfg(feature = "t11_cache")]
+    m.add_function(wrap_pyfunction!(py_compute_t11_hash, m)?)?;
 
     // Stage-level helpers under `doubly_even_kernel.debug`.
     let debug = PyModule::new(m.py(), "debug")?;

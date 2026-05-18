@@ -37,12 +37,23 @@ traces_qd = []
 # globals are `_Thread_local`. Incompatible with `traces_qd` because
 # Traces uses non-TLS static work queues.
 parallel = ["dep:crossbeam-channel"]
+# T11 column-stratified weight-profile cache tier. A new fast path
+# between the RREF primary LRU and the nauty canon call: hash
+# (#w4,#w8,#w12,#w16,#w20) per column → look up cached canonical info.
+# Safe for hashes outside the per-N blocklist (known collisions extracted
+# offline by `dump_t11_blocklist`). Default OFF during initial integration;
+# debug builds assert every hit against nauty. See plan file
+# `last-time-we-profiled-floofy-lollipop.md`.
+t11_cache = ["dep:rustc-hash"]
 
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }
 fixedbitset = "0.5"
 nauty-Traces-sys = { version = "0.11", default-features = false, features = ["bundled", "tls", "popcnt"] }
 crossbeam-channel = { version = "0.5", optional = true }
+# Fixed-seed deterministic hasher for the T11 cache key (under
+# `t11_cache` feature). Same hasher as rustc itself; byte-stable.
+rustc-hash = { version = "2", optional = true }
 # Bounded LRU for the per-worker canon cache. At N ≥ 26 the canon
 # cache grows unbounded without this — N=26 with 20 workers hit the
 # 48 GB cgroup OOM. Hit rate is only 3–5 %, but each hit saves ~80 µs,

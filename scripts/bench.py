@@ -57,7 +57,7 @@ except ImportError:  # pragma: no cover
 
 # Layout of the kernel's `stats` vector — kept in sync by hand with
 # `rust/src/enumerate.rs::enumerate_doubly_even` doc. Indices into the
-# returned 26-element list.
+# returned 30-element list.
 KERNEL_STATS_LAYOUT: tuple[str, ...] = (
     "canon_calls",                # 0
     "primary_hits",               # 1
@@ -85,6 +85,10 @@ KERNEL_STATS_LAYOUT: tuple[str, ...] = (
     "nauty_tctotal_sum",          # 23 — Q6: target-cell work
     "nauty_maxlevel_sum",         # 24 — Q6: deepest level reached
     "nauty_generators_sum",       # 25 — Q6: Aut generators found
+    "t11_hits",                   # 26 — T11 cache: skipped nauty
+    "t11_misses",                 # 27 — T11 cache: new hash, called nauty
+    "t11_blocklist_hits",         # 28 — T11 cache: collision hash, forced nauty
+    "t11_ns",                     # 29 — T11 cache: hash + lookup + insert time
 )
 
 
@@ -275,6 +279,32 @@ def format_table(results: list[PerNResult]) -> str:
                 f"{nodes:>11.2f} {tc:>9.2f} "
                 f"{lvl:>9.2f} {gen:>9.2f}"
             )
+        # T11 cache decomposition (only when feature was active, signalled
+        # by any of the t11_* fields being non-zero in any run).
+        any_t11 = any(
+            r.kernel_stats.get("t11_hits", 0)
+            or r.kernel_stats.get("t11_misses", 0)
+            or r.kernel_stats.get("t11_blocklist_hits", 0)
+            for r in results
+        )
+        if any_t11:
+            lines.append("")
+            lines.append(
+                f"{'N':>4} {'t11_hits':>10} {'t11_miss':>10} "
+                f"{'blocklist':>10} {'hit_rate':>10} {'t11_ms':>9}"
+            )
+            for r in results:
+                ks = r.kernel_stats
+                hits = ks.get("t11_hits", 0)
+                miss = ks.get("t11_misses", 0)
+                bl = ks.get("t11_blocklist_hits", 0)
+                t11_ms = ks.get("t11_ns", 0) / 1_000_000.0
+                total = hits + miss + bl
+                rate = 100.0 * hits / max(total, 1)
+                lines.append(
+                    f"{r.N:>4} {hits:>10} {miss:>10} {bl:>10} "
+                    f"{rate:>9.1f}% {t11_ms:>9.2f}"
+                )
     return "\n".join(lines)
 
 
