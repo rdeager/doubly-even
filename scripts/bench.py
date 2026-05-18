@@ -85,10 +85,11 @@ KERNEL_STATS_LAYOUT: tuple[str, ...] = (
     "nauty_tctotal_sum",          # 23 — Q6: target-cell work
     "nauty_maxlevel_sum",         # 24 — Q6: deepest level reached
     "nauty_generators_sum",       # 25 — Q6: Aut generators found
-    "t11_hits",                   # 26 — T11 cache: skipped nauty
-    "t11_misses",                 # 27 — T11 cache: new hash, called nauty
-    "t11_blocklist_hits",         # 28 — T11 cache: collision hash, forced nauty
-    "t11_ns",                     # 29 — T11 cache: hash + lookup + insert time
+    "t11_cheap_rejects",          # 26 — class-cache: parent T11 mismatch → skipped canon_info
+    "t11_cache_populates",        # 27 — class-cache: first canon_info populated entry
+    "t11_blocklist_hits",         # 28 — class-cache: blocklisted hash, fell through to canon_info
+    "t11_ns",                     # 29 — class-cache: hash + lookup + populate time
+    "t11_class_match",            # 30 — class-cache: parent matched, fell through to canon_info
 )
 
 
@@ -279,30 +280,33 @@ def format_table(results: list[PerNResult]) -> str:
                 f"{nodes:>11.2f} {tc:>9.2f} "
                 f"{lvl:>9.2f} {gen:>9.2f}"
             )
-        # T11 cache decomposition (only when feature was active, signalled
-        # by any of the t11_* fields being non-zero in any run).
+        # Class-fingerprint cache decomposition (only when feature was
+        # active, signalled by any of the t11_* fields being non-zero).
         any_t11 = any(
-            r.kernel_stats.get("t11_hits", 0)
-            or r.kernel_stats.get("t11_misses", 0)
+            r.kernel_stats.get("t11_cheap_rejects", 0)
+            or r.kernel_stats.get("t11_cache_populates", 0)
             or r.kernel_stats.get("t11_blocklist_hits", 0)
+            or r.kernel_stats.get("t11_class_match", 0)
             for r in results
         )
         if any_t11:
             lines.append("")
             lines.append(
-                f"{'N':>4} {'t11_hits':>10} {'t11_miss':>10} "
-                f"{'blocklist':>10} {'hit_rate':>10} {'t11_ms':>9}"
+                f"{'N':>4} {'cheap_rej':>10} {'populate':>10} "
+                f"{'cls_match':>10} {'blocklist':>10} "
+                f"{'reject%':>10} {'t11_ms':>9}"
             )
             for r in results:
                 ks = r.kernel_stats
-                hits = ks.get("t11_hits", 0)
-                miss = ks.get("t11_misses", 0)
+                rej = ks.get("t11_cheap_rejects", 0)
+                pop = ks.get("t11_cache_populates", 0)
+                mat = ks.get("t11_class_match", 0)
                 bl = ks.get("t11_blocklist_hits", 0)
                 t11_ms = ks.get("t11_ns", 0) / 1_000_000.0
-                total = hits + miss + bl
-                rate = 100.0 * hits / max(total, 1)
+                total = rej + pop + mat + bl
+                rate = 100.0 * rej / max(total, 1)
                 lines.append(
-                    f"{r.N:>4} {hits:>10} {miss:>10} {bl:>10} "
+                    f"{r.N:>4} {rej:>10} {pop:>10} {mat:>10} {bl:>10} "
                     f"{rate:>9.1f}% {t11_ms:>9.2f}"
                 )
     return "\n".join(lines)
