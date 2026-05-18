@@ -280,20 +280,28 @@ fn py_subspace_in_orbit(
 ///
 ///   `(rref, canonical_column_order, aut_generators, aut_order_decimal, column_orbits)`
 ///
-/// Plus a `stats: Vec[int]` (length 22) and a `per_k_stats: list[list[int]]`
+/// Plus a `stats: Vec[int]` (length 26) and a `per_k_stats: list[list[int]]`
 /// — see `enumerate::enumerate_doubly_even` doc for the field layout.
 /// Packed as flat lists because pyo3 0.23 caps `IntoPyObject` tuples at 12
 /// elements.
 ///
 /// `quota[k]` must be `σ(N, k)`; `factorial_n` must be `N!`. Python computes
 /// these via `gaborit_sigma` / `math.factorial` before the call.
+///
+/// `num_threads`: when `None` or `Some(0)` or `Some(1)` runs the sequential
+/// driver (default — byte-identical to pre-D13 baseline). When the
+/// `parallel` Cargo feature is on and `num_threads >= 2`, dispatches to
+/// the outer-DFS worker-pool driver. When the feature is off, any value
+/// > 1 raises `ValueError`.
 #[pyfunction]
-#[pyo3(name = "enumerate_doubly_even")]
+#[pyo3(name = "enumerate_doubly_even", signature = (n, max_k, quota, factorial_n, num_threads=None))]
 fn py_enumerate_doubly_even(
+    py: Python<'_>,
     n: u32,
     max_k: u32,
     quota: Vec<u128>,
     factorial_n: u128,
+    num_threads: Option<u32>,
 ) -> PyResult<(
     Vec<(Vec<BinVec>, Vec<u32>, Vec<Vec<u32>>, String, Vec<u32>)>,
     Vec<u128>,
@@ -305,9 +313,35 @@ fn py_enumerate_doubly_even(
             types::MAX_N,
         )));
     }
-    let (out, stats, per_k) =
-        enumerate::enumerate_doubly_even(n, max_k, quota, factorial_n);
-    debug_assert_eq!(stats.len(), 22, "stats vector length mismatch");
+    let nt = num_threads.unwrap_or(0);
+    let (out, stats, per_k) = if nt >= 2 {
+        #[cfg(feature = "parallel")]
+        {
+            // Release the GIL so the worker threads (which never touch
+            // Python state) can run in parallel with the main thread.
+            py.allow_threads(|| {
+                enumerate::enumerate_doubly_even_parallel(
+                    n,
+                    max_k,
+                    quota,
+                    factorial_n,
+                    nt as usize,
+                )
+            })
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            let _ = py;
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "num_threads >= 2 requires the kernel to be built with \
+                 --features parallel (D13 outer-DFS parallelism)",
+            ));
+        }
+    } else {
+        let _ = py;
+        enumerate::enumerate_doubly_even(n, max_k, quota, factorial_n)
+    };
+    debug_assert_eq!(stats.len(), 26, "stats vector length mismatch");
     let result: Vec<_> = out
         .into_iter()
         .map(|e| {

@@ -39,6 +39,7 @@ is stable across runs and useful for debugging.
 from __future__ import annotations
 
 import math
+import os
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from functools import lru_cache
@@ -240,6 +241,18 @@ class EnumeratedCode:
         return self.info.aut_order
 
 
+def _parse_thread_env(raw: str | None) -> int | None:
+    """Parse ``DOUBLY_EVEN_THREADS``. Returns ``None`` for unset/empty/invalid;
+    a non-negative int otherwise. Values ``<= 1`` keep the sequential path."""
+    if raw is None or not raw.strip():
+        return None
+    try:
+        v = int(raw)
+    except ValueError:
+        return None
+    return v if v >= 0 else None
+
+
 def enumerate_doubly_even(N: int, max_k: int | None = None) -> Iterator[EnumeratedCode]:
     """Yield one canonical representative per equivalence class of doubly even
     binary codes ``[N, k]``, for ``k = 0, 1, …, max_k`` (default: until the
@@ -267,7 +280,22 @@ def enumerate_doubly_even(N: int, max_k: int | None = None) -> Iterator[Enumerat
     if _kernel is not None:
         quota_vec = [gaborit_sigma(N, k) for k in range(cap + 1)]
         factorial_N = math.factorial(N)
-        raw, _stats, _per_k = _kernel.enumerate_doubly_even(N, cap, quota_vec, factorial_N)
+        # D13: outer-DFS parallelism. When ``DOUBLY_EVEN_THREADS`` is set
+        # to an integer ≥ 2 AND the kernel was built with
+        # ``--features parallel``, the recursion runs sequentially down
+        # to depth 3 and then fans out across that many worker threads.
+        # Workers disable the Gaborit mass-stop (V1 limitation; ~4–11 %
+        # of sequential wall lost) — see ``rust/src/enumerate.rs::
+        # enumerate_doubly_even_parallel``.
+        num_threads = _parse_thread_env(os.environ.get("DOUBLY_EVEN_THREADS"))
+        if num_threads is not None and num_threads >= 2:
+            raw, _stats, _per_k = _kernel.enumerate_doubly_even(
+                N, cap, quota_vec, factorial_N, num_threads
+            )
+        else:
+            raw, _stats, _per_k = _kernel.enumerate_doubly_even(
+                N, cap, quota_vec, factorial_N
+            )
         for rref, ccol, gens, aord_str, orbits in raw:
             c = Code(N, tuple(rref))
             info = CanonInfo(

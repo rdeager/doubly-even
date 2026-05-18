@@ -41,10 +41,51 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from doubly_even.canon.nauty import canon_info_cache_clear  # noqa: E402
 from doubly_even.enumerate.augment import (  # noqa: E402
+    _parse_thread_env,
     enumerate_doubly_even,
     weight_enum_cache_clear,
 )
 from doubly_even.spec.codes import dual_cache_clear, rref_cache_clear  # noqa: E402
+from doubly_even.spec.mass import gaborit_sigma  # noqa: E402
+
+import os as _os  # noqa: E402 — bench env-var read for D13 parallel path
+
+try:  # pragma: no cover -- import-side switch
+    import doubly_even_kernel as _kernel
+except ImportError:  # pragma: no cover
+    _kernel = None
+
+# Layout of the kernel's `stats` vector — kept in sync by hand with
+# `rust/src/enumerate.rs::enumerate_doubly_even` doc. Indices into the
+# returned 26-element list.
+KERNEL_STATS_LAYOUT: tuple[str, ...] = (
+    "canon_calls",                # 0
+    "primary_hits",               # 1
+    "secondary_attempts",         # 2
+    "secondary_hits",             # 3
+    "is_canon_aug_calls",         # 4
+    "parent_eq_hits",             # 5
+    "weight_enum_filtered",       # 6
+    "bfs_calls",                  # 7
+    "bfs_hits",                   # 8
+    "is_canon_aug_ns",            # 9
+    "bfs_ns",                     # 10
+    "nauty_ns",                   # 11
+    "bucket_size_sum_at_attempt", # 12
+    "match_position_sum",         # 13
+    "max_bucket_size",            # 14
+    "verifier_attempts",          # 15
+    "verifier_hits",              # 16
+    "verifier_compares",          # 17
+    "verifier_ns",                # 18
+    "candidates_q_calls",         # 19
+    "candidates_q_ns",            # 20
+    "bfs_rejects",                # 21
+    "nauty_numnodes_sum",         # 22 — Q6: backtrack tree size
+    "nauty_tctotal_sum",          # 23 — Q6: target-cell work
+    "nauty_maxlevel_sum",         # 24 — Q6: deepest level reached
+    "nauty_generators_sum",       # 25 — Q6: Aut generators found
+)
 
 
 # DFGHILM Appendix B Table 3 — number of permutation-equivalence classes
@@ -88,6 +129,9 @@ class PerNResult:
     seconds: float = 0.0
     classes: int = 0
     per_k: dict[int, PerKResult] = field(default_factory=dict)
+    # Kernel stats vector keyed by KERNEL_STATS_LAYOUT name. Empty when
+    # the kernel isn't loaded.
+    kernel_stats: dict[str, int] = field(default_factory=dict)
 
 
 def run_one(N: int) -> PerNResult:
@@ -100,6 +144,34 @@ def run_one(N: int) -> PerNResult:
     rref_cache_clear()
     dual_cache_clear()
     weight_enum_cache_clear()
+    if _kernel is not None:
+        # Call the kernel directly so we can capture the stats vector. The
+        # public iterator drops it; for benchmarking we need it.
+        cap = N // 2
+        quota_vec = [gaborit_sigma(N, k) for k in range(cap + 1)]
+        num_threads = _parse_thread_env(_os.environ.get("DOUBLY_EVEN_THREADS"))
+        t0 = time.perf_counter()
+        if num_threads is not None and num_threads >= 2:
+            raw, stats, _per_k = _kernel.enumerate_doubly_even(
+                N, cap, quota_vec, factorial_N, num_threads,
+            )
+        else:
+            raw, stats, _per_k = _kernel.enumerate_doubly_even(
+                N, cap, quota_vec, factorial_N,
+            )
+        result.seconds = time.perf_counter() - t0
+        # Aggregate per-k from the raw output.
+        for rref, _ccol, _gens, aord_str, _orbits in raw:
+            k = len(rref)
+            slot = result.per_k.setdefault(k, PerKResult(k=k))
+            slot.classes += 1
+            slot.mass += factorial_N // int(aord_str)
+            result.classes += 1
+        result.kernel_stats = {
+            name: int(stats[i]) for i, name in enumerate(KERNEL_STATS_LAYOUT)
+        }
+        return result
+    # Pure-Python fallback (no kernel; no stats vector available).
     t0 = time.perf_counter()
     for ec in enumerate_doubly_even(N):
         k = ec.code.rank
@@ -157,6 +229,7 @@ def write_json(label: str, results: list[PerNResult]) -> Path:
                     pk.k: {"classes": pk.classes, "mass": pk.mass}
                     for pk in sorted(r.per_k.values(), key=lambda x: x.k)
                 },
+                "kernel_stats": r.kernel_stats,
             }
             for r in results
         },
@@ -173,6 +246,30 @@ def format_table(results: list[PerNResult]) -> str:
             f"{pk.k}:{pk.classes}" for pk in sorted(r.per_k.values(), key=lambda x: x.k)
         )
         lines.append(f"{r.N:>4} {r.seconds:>10.3f} {r.classes:>8}   {per_k}")
+    # Nauty Q6 decomposition table (only when kernel stats present).
+    have_stats = any(r.kernel_stats for r in results)
+    if have_stats:
+        lines.append("")
+        lines.append(
+            f"{'N':>4} {'calls':>8} {'us/call':>8} "
+            f"{'nodes/call':>11} {'tc/call':>9} "
+            f"{'lvl/call':>9} {'gen/call':>9}"
+        )
+        for r in results:
+            ks = r.kernel_stats
+            if not ks:
+                continue
+            calls = max(ks.get("canon_calls", 0), 1)
+            us = ks.get("nauty_ns", 0) / 1_000.0 / calls
+            nodes = ks.get("nauty_numnodes_sum", 0) / calls
+            tc = ks.get("nauty_tctotal_sum", 0) / calls
+            lvl = ks.get("nauty_maxlevel_sum", 0) / calls
+            gen = ks.get("nauty_generators_sum", 0) / calls
+            lines.append(
+                f"{r.N:>4} {calls:>8} {us:>8.2f} "
+                f"{nodes:>11.2f} {tc:>9.2f} "
+                f"{lvl:>9.2f} {gen:>9.2f}"
+            )
     return "\n".join(lines)
 
 

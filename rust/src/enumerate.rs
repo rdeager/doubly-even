@@ -17,7 +17,17 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
+#[cfg(all(feature = "parallel", feature = "traces_qd"))]
+compile_error!(
+    "feature `parallel` is incompatible with `traces_qd`: Traces uses \
+     non-TLS static work queues and is not thread-safe even with HAVE_TLS=1"
+);
+
 use crate::canon::{canon_info_native, canon_info_qd_native, NativeCanonInfo, QD_GRAPH_THRESHOLD};
+#[cfg(feature = "dense_qd")]
+use crate::canon::canon_info_qd_dense;
+#[cfg(feature = "traces_qd")]
+use crate::canon::canon_info_qd_traces;
 use crate::candidates::doubly_even_candidates_q;
 use crate::feulner::{perm_compose, perm_inverse};
 use crate::linalg::{apply_permutation, row_reduce};
@@ -55,6 +65,7 @@ struct BucketEntry {
     cached_cf: Rc<PairedIsoCachedCf>,
 }
 
+#[derive(Clone)]
 pub(crate) struct CachedInfo {
     pub(crate) canonical_column_order: Vec<u32>,
     pub(crate) aut_generators: Vec<Vec<u32>>,
@@ -62,7 +73,18 @@ pub(crate) struct CachedInfo {
     pub(crate) column_orbits: Vec<u32>,
 }
 
-struct State {
+/// A canonical node captured at the depth-cut frontier of the parallel
+/// seeder. By-value `CachedInfo` (rather than `Rc<…>`) so the entire
+/// struct is `Send` and can travel through a crossbeam channel into a
+/// worker thread. Workers reconstruct an `Rc` on receipt.
+#[cfg(feature = "parallel")]
+pub(crate) struct SeedFrontier {
+    pub rref: Vec<BinVec>,
+    pub pivots: Vec<u32>,
+    pub info: CachedInfo,
+}
+
+struct WorkerState {
     n: u32,
     max_k: u32,
     quota: Vec<u128>,
@@ -177,6 +199,19 @@ struct State {
     /// witt-path dispatch). See plan file
     /// `the-last-several-sessions-scalable-bear.md` Stage 0.
     pub stats_candidates_q_ns: u128,
+    /// Sums of nauty `statsblk` tree-shape counters across all
+    /// `canon_info_*_native` calls. Each summand is one call; divide by
+    /// `stats_canon_calls` for per-call averages. Recorded to decompose
+    /// the 78 µs/call cost (Q6 in `expert-review/05-nauty-traces-audit.md`)
+    /// without an external profiler: high `numnodes` ⇒ backtrack-heavy
+    /// (schreier should help), high `tctotal` with low `numnodes` ⇒
+    /// refinement-heavy (tc_level=0 candidate), trivial Aut (numgenerators
+    /// ≈ 1, maxlevel ≈ 1 per call) ⇒ FFI/setup-dominated (densenauty
+    /// cache win likely).
+    pub stats_nauty_numnodes: u64,
+    pub stats_nauty_tctotal: u64,
+    pub stats_nauty_maxlevel_sum: u64,
+    pub stats_nauty_generators_sum: u64,
     output: Vec<EnumeratedRaw>,
 }
 
@@ -214,7 +249,7 @@ fn inverse_perm(p: &[u32]) -> Vec<u32> {
     inv
 }
 
-impl State {
+impl WorkerState {
     fn new(n: u32, max_k: u32, quota: Vec<u128>, factorial_n: u128) -> Self {
         let len = (max_k + 1) as usize;
         let env_instrument = std::env::var("DOUBLY_EVEN_SECONDARY_CACHE_INSTRUMENTATION")
@@ -262,6 +297,10 @@ impl State {
             stats_verifier_ns: 0,
             stats_candidates_q_calls: 0,
             stats_candidates_q_ns: 0,
+            stats_nauty_numnodes: 0,
+            stats_nauty_tctotal: 0,
+            stats_nauty_maxlevel_sum: 0,
+            stats_nauty_generators_sum: 0,
             output: Vec::new(),
         }
     }
@@ -412,8 +451,25 @@ impl State {
         // check. See plan file's "Dispatch" section and canon.rs's
         // `QD_GRAPH_THRESHOLD`.
         let native: NativeCanonInfo = if (1u32 << rref.len()) > QD_GRAPH_THRESHOLD {
-            canon_info_qd_native(rref, self.n)
-                .unwrap_or_else(|| canon_info_native(rref, self.n))
+            // Q6 audit Phase 2/3: feature-gated alternative engines for
+            // the Q_D-graph canon. `traces_qd` wins over `dense_qd` if both
+            // are enabled (Traces is a different algorithm; dense vs sparse
+            // is just a representation tweak).
+            #[cfg(feature = "traces_qd")]
+            {
+                canon_info_qd_traces(rref, self.n)
+                    .unwrap_or_else(|| canon_info_native(rref, self.n))
+            }
+            #[cfg(all(feature = "dense_qd", not(feature = "traces_qd")))]
+            {
+                canon_info_qd_dense(rref, self.n)
+                    .unwrap_or_else(|| canon_info_native(rref, self.n))
+            }
+            #[cfg(not(any(feature = "dense_qd", feature = "traces_qd")))]
+            {
+                canon_info_qd_native(rref, self.n)
+                    .unwrap_or_else(|| canon_info_native(rref, self.n))
+            }
         } else {
             canon_info_native(rref, self.n)
         };
@@ -424,6 +480,10 @@ impl State {
             self.n,
         );
         self.stats_nauty_ns += nauty_t0.elapsed().as_nanos();
+        self.stats_nauty_numnodes += native.numnodes;
+        self.stats_nauty_tctotal += native.tctotal;
+        self.stats_nauty_maxlevel_sum += native.maxlevel.max(0) as u64;
+        self.stats_nauty_generators_sum += native.numgenerators.max(0) as u64;
 
         let info = Rc::new(CachedInfo {
             canonical_column_order: native.canonical_column_order,
@@ -645,6 +705,121 @@ impl State {
             self.traverse(d_rref, d_pivots, info_d);
         }
     }
+
+    /// Variant of [`Self::traverse`] used by the parallel seeder.
+    ///
+    /// Behaves identically to `traverse` for `k < frontier_depth`. At
+    /// `k == frontier_depth` the node is captured into `frontier` (as a
+    /// by-value, `Send`-friendly [`SeedFrontier`]) — it is NOT pushed
+    /// into `self.output` and recursion stops. The worker that receives
+    /// this seed will call `traverse` on it, which will emit the node
+    /// and recurse through the rest of the subtree.
+    ///
+    /// Mass-stop is intentionally disabled during seeding: stopping based
+    /// on partial seed mass would preempt valid worker seeds.
+    #[cfg(feature = "parallel")]
+    fn traverse_seed(
+        &mut self,
+        rref: Vec<BinVec>,
+        pivots: Vec<u32>,
+        info: Rc<CachedInfo>,
+        frontier_depth: u32,
+        frontier: &mut Vec<SeedFrontier>,
+    ) {
+        let k = rref.len() as u32;
+        if k == frontier_depth {
+            let info_owned: CachedInfo = match Rc::try_unwrap(info) {
+                Ok(info) => info,
+                Err(rc) => (*rc).clone(),
+            };
+            frontier.push(SeedFrontier { rref, pivots, info: info_owned });
+            return;
+        }
+        self.output.push(EnumeratedRaw {
+            rref: rref.clone(),
+            canonical_column_order: info.canonical_column_order.clone(),
+            aut_generators: info.aut_generators.clone(),
+            aut_order: info.aut_order,
+            column_orbits: info.column_orbits.clone(),
+        });
+        let mass_contribution = self.factorial_n / info.aut_order;
+        self.mass_at_k[k as usize] = self.mass_at_k[k as usize]
+            .checked_add(mass_contribution)
+            .expect("mass overflow");
+        if k >= self.max_k {
+            return;
+        }
+        let dual = dual_basis(&rref, &pivots, self.n);
+        let cq_t0 = std::time::Instant::now();
+        let candidates = doubly_even_candidates_q(
+            self.n,
+            &rref,
+            &pivots,
+            &dual,
+            &info.aut_generators,
+        );
+        self.stats_candidates_q_ns += cq_t0.elapsed().as_nanos();
+        self.stats_candidates_q_calls += 1;
+        let total = candidates.len() as u64;
+        self.stats_candidates_total_seen_by_k[k as usize] += total;
+        for v in candidates.iter() {
+            let mut new_basis = rref.clone();
+            new_basis.push(*v);
+            let (d_rref, d_pivots) = row_reduce(&new_basis, self.n);
+            let info_d = self.canon_info(&d_rref);
+            if !self.is_canonical_augmentation(k as usize, &rref, &d_rref, &info_d) {
+                continue;
+            }
+            self.traverse_seed(d_rref, d_pivots, info_d, frontier_depth, frontier);
+        }
+    }
+
+    /// Consume this WorkerState and produce the `(output, stats, per_k_stats)`
+    /// tuple used by both the sequential and parallel drivers. Stats layout
+    /// is documented on [`enumerate_doubly_even`].
+    fn finalize(self) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
+        let stats: Vec<u128> = vec![
+            self.stats_canon_calls as u128,
+            self.stats_primary_hits as u128,
+            self.stats_secondary_attempts as u128,
+            self.stats_secondary_hits as u128,
+            self.stats_is_canon_aug_calls as u128,
+            self.stats_parent_eq_hits as u128,
+            self.stats_weight_enum_filtered as u128,
+            self.stats_bfs_calls as u128,
+            self.stats_bfs_hits as u128,
+            self.stats_is_canon_aug_ns,
+            self.stats_bfs_ns,
+            self.stats_nauty_ns,
+            self.stats_bucket_size_sum_at_attempt as u128,
+            self.stats_match_position_sum as u128,
+            self.stats_max_bucket_size as u128,
+            self.stats_verifier_attempts as u128,
+            self.stats_verifier_hits as u128,
+            self.stats_verifier_compares as u128,
+            self.stats_verifier_ns,
+            self.stats_candidates_q_calls as u128,
+            self.stats_candidates_q_ns,
+            self.stats_bfs_rejects as u128,
+            self.stats_nauty_numnodes as u128,
+            self.stats_nauty_tctotal as u128,
+            self.stats_nauty_maxlevel_sum as u128,
+            self.stats_nauty_generators_sum as u128,
+        ];
+        let per_k_stats: Vec<Vec<u64>> = vec![
+            self.stats_is_canon_aug_calls_by_k,
+            self.stats_parent_eq_hits_by_k,
+            self.stats_weight_enum_filtered_by_k,
+            self.stats_bfs_calls_by_k,
+            self.stats_bfs_hits_by_k,
+            self.stats_bfs_rejects_by_k,
+            self.stats_mass_stop_pre_loop_by_k,
+            self.stats_mass_stop_in_loop_by_k,
+            self.stats_candidates_total_seen_by_k,
+            self.stats_candidates_skipped_by_k,
+        ];
+        (self.output, stats, per_k_stats)
+    }
 }
 
 /// Driver: enumerate canonical-augmentation representatives of doubly-even
@@ -694,6 +869,10 @@ impl State {
 ///  19   candidates_q_calls             (always-on)
 ///  20   candidates_q_ns                (always-on)
 ///  21   bfs_rejects                    (always-on; Phase 1 audit)
+///  22   nauty_numnodes_sum             (Q6 audit: backtrack tree size)
+///  23   nauty_tctotal_sum              (Q6 audit: total target-cell work)
+///  24   nauty_maxlevel_sum             (Q6 audit: deepest level reached)
+///  25   nauty_generators_sum           (Q6 audit: Aut generators found)
 /// ```
 ///
 /// Fields 4–10 came from the Engine B BFS-cost profile (see
@@ -710,49 +889,164 @@ pub fn enumerate_doubly_even(
     quota: Vec<u128>,
     factorial_n: u128,
 ) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
-    let mut state = State::new(n, max_k, quota, factorial_n);
+    let mut state = WorkerState::new(n, max_k, quota, factorial_n);
     // Zero code: rref empty, pivots empty.
     let zero_rref: Vec<BinVec> = Vec::new();
     let zero_pivots: Vec<u32> = Vec::new();
     let info = state.canon_info(&zero_rref);
     state.traverse(zero_rref, zero_pivots, info);
-    let stats: Vec<u128> = vec![
-        state.stats_canon_calls as u128,
-        state.stats_primary_hits as u128,
-        state.stats_secondary_attempts as u128,
-        state.stats_secondary_hits as u128,
-        state.stats_is_canon_aug_calls as u128,
-        state.stats_parent_eq_hits as u128,
-        state.stats_weight_enum_filtered as u128,
-        state.stats_bfs_calls as u128,
-        state.stats_bfs_hits as u128,
-        state.stats_is_canon_aug_ns,
-        state.stats_bfs_ns,
-        state.stats_nauty_ns,
-        state.stats_bucket_size_sum_at_attempt as u128,
-        state.stats_match_position_sum as u128,
-        state.stats_max_bucket_size as u128,
-        state.stats_verifier_attempts as u128,
-        state.stats_verifier_hits as u128,
-        state.stats_verifier_compares as u128,
-        state.stats_verifier_ns,
-        state.stats_candidates_q_calls as u128,
-        state.stats_candidates_q_ns,
-        state.stats_bfs_rejects as u128,
-    ];
-    let per_k_stats: Vec<Vec<u64>> = vec![
-        state.stats_is_canon_aug_calls_by_k,
-        state.stats_parent_eq_hits_by_k,
-        state.stats_weight_enum_filtered_by_k,
-        state.stats_bfs_calls_by_k,
-        state.stats_bfs_hits_by_k,
-        state.stats_bfs_rejects_by_k,
-        state.stats_mass_stop_pre_loop_by_k,
-        state.stats_mass_stop_in_loop_by_k,
-        state.stats_candidates_total_seen_by_k,
-        state.stats_candidates_skipped_by_k,
-    ];
-    (state.output, stats, per_k_stats)
+    state.finalize()
+}
+
+/// Parallel driver: outer-DFS subtree fan-out across a worker pool.
+///
+/// Traverses sequentially down to `frontier_depth = 3`, then dispatches each
+/// accepted depth-3 canonical code as an independent subtree task to one of
+/// `num_threads` long-lived workers (crossbeam `bounded` channel). Each worker
+/// runs the existing recursion on its assigned seed with its own canon
+/// cache and stat counters; mass-stop is disabled inside workers (per-worker
+/// quota = `u128::MAX`) so the V1 path loses the global Gaborit quota
+/// pruning (4–11 % regression measured per `architecture/04-optimisations.md`
+/// §D5). The trade is a coarse-grained parallelism win typically dominant
+/// at N ≥ 18.
+///
+/// V1 conditions for falling back to [`enumerate_doubly_even`]:
+///
+/// - `num_threads <= 1`, OR
+/// - `max_k <= frontier_depth` (no work for workers — the seeder covered it),
+/// - any of the above; the function quietly forwards to the sequential
+///   driver to avoid the worker-pool overhead.
+///
+/// Output ordering: not DFS order. Codes of depth `< frontier_depth` appear
+/// in DFS order (seeder), followed by per-task concatenated output (worker
+/// receive order). Callers that need deterministic order must sort
+/// downstream — Python's `augment.enumerate_doubly_even` already turns the
+/// raw row stream into a generator and downstream consumers (bench,
+/// tests) treat the set as unordered.
+///
+/// **Safety**: workers call into `sparsenauty` via the bundled
+/// `nauty-Traces-sys` build. The `tls` Cargo feature on
+/// `nauty-Traces-sys` (`/workspace/src/rust/Cargo.toml:36`) enables
+/// `HAVE_TLS=1`, which qualifies sparsenauty's mutable globals
+/// (`workspace`, `dnwork`, etc.) with `_Thread_local`. Traces is NOT
+/// thread-safe even under `HAVE_TLS=1` — the `traces_qd` feature is
+/// barred by `compile_error!` at the top of this file when `parallel`
+/// is on.
+#[cfg(feature = "parallel")]
+pub fn enumerate_doubly_even_parallel(
+    n: u32,
+    max_k: u32,
+    quota: Vec<u128>,
+    factorial_n: u128,
+    num_threads: usize,
+) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
+    use crossbeam_channel::{bounded, unbounded};
+
+    const FRONTIER_DEPTH: u32 = 3;
+
+    if num_threads <= 1 || max_k <= FRONTIER_DEPTH {
+        return enumerate_doubly_even(n, max_k, quota, factorial_n);
+    }
+
+    // Phase 1: sequential seeder, walks depths 0..FRONTIER_DEPTH-1, emits
+    // them, and collects the FRONTIER_DEPTH-depth nodes as worker seeds.
+    let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n);
+    let mut frontier: Vec<SeedFrontier> = Vec::new();
+    {
+        let zero_rref: Vec<BinVec> = Vec::new();
+        let zero_pivots: Vec<u32> = Vec::new();
+        let zero_info = seed_state.canon_info(&zero_rref);
+        seed_state.traverse_seed(
+            zero_rref,
+            zero_pivots,
+            zero_info,
+            FRONTIER_DEPTH,
+            &mut frontier,
+        );
+    }
+    if frontier.is_empty() {
+        // No work past frontier_depth (e.g. N tiny). Already finished.
+        return seed_state.finalize();
+    }
+
+    // Phase 2: worker pool.
+    let cap = (num_threads * 4).max(8);
+    let (task_tx, task_rx) = bounded::<SeedFrontier>(cap);
+    let (result_tx, result_rx) =
+        unbounded::<(Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>)>();
+
+    let mut handles = Vec::with_capacity(num_threads);
+    for _ in 0..num_threads {
+        let task_rx = task_rx.clone();
+        let result_tx = result_tx.clone();
+        let mk = max_k;
+        let nn = n;
+        let fact = factorial_n;
+        handles.push(std::thread::spawn(move || {
+            // Per-worker mass-stop disabled: u128::MAX quota means the
+            // check never fires. Lose 4–11 % vs sequential mass-stop;
+            // gain ≫1× from parallelism. Tracked under V2 of D13.
+            let inf_quota = vec![u128::MAX; (mk + 1) as usize];
+            let mut worker = WorkerState::new(nn, mk, inf_quota, fact);
+            while let Ok(seed) = task_rx.recv() {
+                worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
+            }
+            let _ = result_tx.send(worker.finalize());
+        }));
+    }
+    drop(task_rx);
+    drop(result_tx);
+
+    for seed in frontier {
+        task_tx.send(seed).expect("worker pool closed unexpectedly");
+    }
+    drop(task_tx);
+
+    // Drain results.
+    let mut combined = seed_state.finalize();
+    for _ in 0..num_threads {
+        let r = result_rx
+            .recv()
+            .expect("worker thread hung up before sending result");
+        merge_finalized(&mut combined, r);
+    }
+    for h in handles {
+        h.join().expect("worker thread panicked");
+    }
+
+    combined
+}
+
+/// Index of `stats_max_bucket_size` inside the flat stats vector — `.max()`
+/// not `+=` on merge. See doc on [`enumerate_doubly_even`] for full layout.
+#[cfg(feature = "parallel")]
+const STATS_MAX_BUCKET_SIZE_IDX: usize = 14;
+
+#[cfg(feature = "parallel")]
+fn merge_finalized(
+    a: &mut (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>),
+    b: (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>),
+) {
+    a.0.extend(b.0);
+    debug_assert_eq!(a.1.len(), b.1.len(), "stats vector length mismatch");
+    for (i, (x, y)) in a.1.iter_mut().zip(b.1.iter()).enumerate() {
+        if i == STATS_MAX_BUCKET_SIZE_IDX {
+            *x = (*x).max(*y);
+        } else {
+            *x = x
+                .checked_add(*y)
+                .expect("stats vector merge overflow");
+        }
+    }
+    debug_assert_eq!(a.2.len(), b.2.len(), "per_k rows count mismatch");
+    for (row_a, row_b) in a.2.iter_mut().zip(b.2.iter()) {
+        debug_assert_eq!(row_a.len(), row_b.len(), "per_k row length mismatch");
+        for (xa, yb) in row_a.iter_mut().zip(row_b.iter()) {
+            *xa = xa
+                .checked_add(*yb)
+                .expect("per_k merge overflow");
+        }
+    }
 }
 
 /// Build identifier — returns `"verifier"` when compiled with the

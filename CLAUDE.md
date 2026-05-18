@@ -174,15 +174,64 @@ Cumulative levers, oldest first:
 10. **D11** Native Rust `enumerate_doubly_even` + incremental Feulner
     (**1.32× at `N = 22`**; eliminates Python ↔ Rust crossings).
 11. **D12** Paired-iso (Leon §10(i)) prefilter — shipped **dormant**.
+12. **Q6 sparsenauty audit** (2026-05-17) — full `expert-review/
+    05-nauty-traces-audit.md` §5 priority list executed:
+    `schreier = TRUE` (-5 %), densenauty (+ 39 / + 42 / + 260 %),
+    Traces (+ 2 %) all regress. `78 µs/call` is the sparsenauty
+    algorithmic floor at this graph shape. Phase 0 `statsblk`
+    counters (`numnodes`, `tctotal`, `maxlevel`, `numgenerators`)
+    added to the kernel for future audits; four dormant Cargo
+    features (`dense_qd`, `dense_qd_tc0`, `dense_qd_refinvar`,
+    `traces_qd`) kept as reproducibility substrate.
+13. **D13 Outer-DFS parallelism** (2026-05-18) — sequential traversal
+    to depth 3, then a crossbeam-channel worker pool runs each
+    accepted depth-3 subtree on its own thread. Sparsenauty is
+    parallel-safe under the `tls` feature on `nauty-Traces-sys`
+    (already on; `USE_TLS` → `_Thread_local` on mutable globals).
+    Per-worker canon caches; per-worker mass-stop disabled in V1
+    (loses 4–11 % vs sequential; gained outright by parallelism).
+    **3.1× at `N = 22`** (6.87 s → 2.20 s, 16 threads on 13700K);
+    4.1× at `N = 20`. Behind off-by-default Cargo feature
+    `parallel`; enabled at runtime via `DOUBLY_EVEN_THREADS` env
+    var or `num_threads=` kwarg on the kernel entry. Conflicts with
+    `traces_qd` (Traces uses non-TLS static work queues) — guarded
+    by `compile_error!`. Determinism harness in
+    `rust/tests/parallel_determinism.rs`.
 
 `bench.py` lives in `scripts/`; per-step JSON records are in
-`scripts/bench-results/` (gitignored).
+`scripts/bench-results/` (gitignored). Rust microbench for
+sparsenauty internals: `scripts/microbench/src/nauty_decomp.rs`.
 
 **The `N ≤ 22` frontier is saturated at the pure-algorithmic level**
 with this canonicaliser — see `architecture/05-retrospective.md` for
 the failure-mode analysis of recent 2× attempts and the recommended
 next-direction decision (push the `N ≥ 28` frontier via Engine A; or
-multi-week GPU port; or ship-what-we-have).
+multi-week GPU port; or ship-what-we-have). D13 (outer-DFS
+parallelism, 2026-05-18) sits *orthogonally* to that statement: it
+buys ~3× wall-time via infrastructure (worker pool) without changing
+the algorithmic ceiling.
+
+## D13 quickstart
+
+Enable in the wheel build:
+
+```sh
+maturin build --release --features parallel -m rust/Cargo.toml \
+  && uv pip install rust/target/wheels/doubly_even_kernel-*.whl
+```
+
+At runtime, set `DOUBLY_EVEN_THREADS` (P-core count is a good
+default; experimentally 16 on a 13700K is the sweet spot):
+
+```sh
+DOUBLY_EVEN_THREADS=16 uv run python scripts/bench.py \
+  --label parallel-t16 --N 18,20,22
+```
+
+V2 improvements deferred: (a) per-worker mass-stop using Gaborit
+residual instead of u128::MAX; (b) adaptive frontier split (depth-2
+for light subtrees, depth-3 for heavy) — the 13700K plateau at 16
+threads suggests one or two heavy seeds dominate the tail.
 
 ## Useful commands
 
@@ -191,9 +240,14 @@ uv sync --all-extras --dev               # bootstrap a fresh checkout
 maturin build --release -m rust/Cargo.toml \
   && uv pip install rust/target/wheels/doubly_even_kernel-*.whl
 # verifier build (D12, dormant): add --features equivalence_verifier
-uv run pytest                            # 508 fast tests + 31 slow-skipped (~7 s)
+# parallel build (D13, opt-in): add --features parallel
+#   then set DOUBLY_EVEN_THREADS=16 at runtime (or pass num_threads= to
+#   the kernel entry directly). Sequential path is byte-identical when
+#   the env var is unset.
+uv run pytest                            # 517 fast tests + 41 slow-skipped (~7 s)
 uv run pytest --run-slow                 # adds N=17, 18 Table 3 cells (~10 s total)
 uv run python scripts/bench.py --label baseline  # benchmark; writes JSON
+DOUBLY_EVEN_THREADS=16 uv run python scripts/bench.py --label parallel-t16 --N 20,22
 
 # Enumerate doubly even codes of length N (yields EnumeratedCode objects)
 uv run python -c '
