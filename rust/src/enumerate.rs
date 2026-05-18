@@ -166,31 +166,32 @@ struct WorkerState {
     /// `equivalence_verifier` feature is enabled or the env-var
     /// instrumentation is set.
     maintain_secondary_cache: bool,
-    /// T11 column-stratified weight-profile cache. Per-worker; no sharing.
-    /// Key is `canon::compute_t11_hash(rref, n)`; value is the same
-    /// `Rc<CachedInfo>` the primary cache stores. Trusted for hashes NOT
-    /// in `t11_blocklist`; blocklisted hashes fall through to nauty.
-    #[cfg(feature = "t11_cache")]
-    t11_cache: rustc_hash::FxHashMap<u64, Rc<CachedInfo>>,
     /// Per-N set of known T11 collision hashes (see `t11_blocklist::*`).
-    /// On a hash hit here we must call nauty rather than trust the cache.
+    /// Consumed by the class-fingerprint cache wired into `traverse` /
+    /// `traverse_seed`; blocklisted hashes are never populated and
+    /// always fall through to `canon_info`.
     #[cfg(feature = "t11_cache")]
     t11_blocklist: rustc_hash::FxHashSet<u64>,
     /// `false` when `t11_blocklist::t11_blocklist_for_n(n)` returns `None`
     /// (e.g., N=26+ — no audited blocklist available). All T11 work is
-    /// skipped in `canon_info` when this is false.
+    /// skipped by the class-fingerprint dispatch when this is false.
     #[cfg(feature = "t11_cache")]
     t11_enabled: bool,
-    /// Times the T11 cache returned a hit (skipping nauty entirely).
+    /// Times the class-fingerprint cache cheap-rejected a candidate
+    /// (parent_class_t11 mismatch → skipped canon_info entirely).
     #[cfg(feature = "t11_cache")]
     pub stats_t11_hits: u64,
-    /// Times the T11 cache missed and we computed canonical info anew.
+    /// Times the class-fingerprint cache was populated for the first
+    /// time at a given hash (one canon_info pays for this; subsequent
+    /// visits ride the cache).
     #[cfg(feature = "t11_cache")]
     pub stats_t11_misses: u64,
-    /// Times the T11 hash matched a known collision and we forced nauty.
+    /// Times the T11 hash matched a known collision and we forced nauty
+    /// (never populated; the entry would be ambiguous).
     #[cfg(feature = "t11_cache")]
     pub stats_t11_blocklist_hits: u64,
-    /// Cumulative ns spent inside the T11 fast path (hash + lookup + insert).
+    /// Cumulative ns spent inside the class-fingerprint fast path (hash
+    /// + lookup + populate).
     #[cfg(feature = "t11_cache")]
     pub stats_t11_ns: u128,
     /// Times `is_canonical_augmentation` was entered.
@@ -347,34 +348,9 @@ impl WorkerState {
             stats_nauty_maxlevel_sum: 0,
             stats_nauty_generators_sum: 0,
             #[cfg(feature = "t11_cache")]
-            t11_cache: rustc_hash::FxHashMap::default(),
-            #[cfg(feature = "t11_cache")]
             t11_blocklist: crate::t11_blocklist::t11_blocklist_for_n(n).unwrap_or_default(),
-            // *** Known unsound: off by default. ***
-            //
-            // The T11 cache hit path returns the `Rc<CachedInfo>` that was
-            // populated by the *first* RREF observed with this hash. That
-            // info's `canonical_column_order` (σ) is correct for that
-            // specific RREF only — equivalent codes share T11 hashes (T11
-            // is permutation-invariant by design) but their RREFs differ,
-            // and each RREF has its own σ that takes IT to the canonical
-            // form. Returning σ for RREF_A when the caller asked about
-            // RREF_B silently breaks `canonical_parent` and the
-            // canonical-augmentation predicate, undercounting classes
-            // (e.g. N=22 returned 661 instead of 5118 in a release run).
-            //
-            // Opt in with `DOUBLY_EVEN_ENABLE_T11=1` for offline
-            // experimentation only (debug builds will trip
-            // `debug_assert_eq!` on the first wrong hit). A sound revival
-            // would need to either (a) avoid using σ on hits, or (b)
-            // recover σ via a cheap witness that doesn't share nauty's
-            // per-probe cost. See plan file
-            // `last-time-we-profiled-floofy-lollipop.md` Phase 1b notes.
             #[cfg(feature = "t11_cache")]
-            t11_enabled: crate::t11_blocklist::t11_blocklist_for_n(n).is_some()
-                && std::env::var("DOUBLY_EVEN_ENABLE_T11")
-                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                    .unwrap_or(false),
+            t11_enabled: crate::t11_blocklist::t11_blocklist_for_n(n).is_some(),
             #[cfg(feature = "t11_cache")]
             stats_t11_hits: 0,
             #[cfg(feature = "t11_cache")]
@@ -411,52 +387,6 @@ impl WorkerState {
         // True miss. Decide whether to maintain the secondary cache for
         // either the verifier dispatch or the env-gated instrumentation.
         self.stats_canon_calls += 1;
-
-        // --- T11 fast path ----------------------------------------------
-        // Hash the column-stratified weight profile. On hit (and the hash
-        // is NOT in this N's known-collision blocklist), trust the cache
-        // and skip nauty. See `canon::compute_t11_hash` and
-        // `t11_blocklist`. Plan: `last-time-we-profiled-floofy-lollipop.md`.
-        //
-        // The `t11_hash` variable also feeds the post-nauty cache insert
-        // below (so we don't recompute), gated on the feature.
-        #[cfg(feature = "t11_cache")]
-        let t11_hash: Option<u64> = if self.t11_enabled {
-            let t11_t0 = std::time::Instant::now();
-            let h = crate::canon::compute_t11_hash(rref, self.n);
-            if self.t11_blocklist.contains(&h) {
-                self.stats_t11_blocklist_hits += 1;
-                self.stats_t11_ns += t11_t0.elapsed().as_nanos();
-                // Fall through to the existing nauty path; carry hash
-                // forward so we don't recompute when caching the result.
-                Some(h)
-            } else if let Some(cached) = self.t11_cache.get(&h) {
-                self.stats_t11_hits += 1;
-                #[cfg(debug_assertions)]
-                {
-                    // Sanity-check the trusted hit: hash + cache must
-                    // reproduce nauty's canonical form. Catches any gap
-                    // in the per-N blocklist before it can corrupt the
-                    // enumeration.
-                    let native_check = crate::canon::canon_info_native(rref, self.n);
-                    debug_assert_eq!(
-                        cached.canonical_column_order, native_check.canonical_column_order,
-                        "T11 hit returned wrong canonical_column_order for hash {:#x}",
-                        h,
-                    );
-                }
-                let info_clone = Rc::clone(cached);
-                self.canon_cache.put(rref.to_vec(), Rc::clone(&info_clone));
-                self.stats_t11_ns += t11_t0.elapsed().as_nanos();
-                return info_clone;
-            } else {
-                self.stats_t11_misses += 1;
-                self.stats_t11_ns += t11_t0.elapsed().as_nanos();
-                Some(h)
-            }
-        } else {
-            None
-        };
 
         let we_key = if self.maintain_secondary_cache {
             Some(weight_enum(rref))
@@ -620,17 +550,6 @@ impl WorkerState {
             column_orbits: native.column_orbits,
         });
         self.canon_cache.put(rref.to_vec(), Rc::clone(&info));
-
-        // Populate the T11 cache when the feature is on and the hash is
-        // safe (not blocklisted). Blocklisted hashes are never cached
-        // because by definition they map to ≥ 2 distinct canonical forms;
-        // we'd risk handing back the wrong one on a future hit.
-        #[cfg(feature = "t11_cache")]
-        if let Some(h) = t11_hash {
-            if !self.t11_blocklist.contains(&h) {
-                self.t11_cache.insert(h, Rc::clone(&info));
-            }
-        }
 
         if let Some(key) = we_key {
             // Compute canonical form for secondary-cache membership.
