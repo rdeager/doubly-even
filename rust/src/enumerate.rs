@@ -942,14 +942,23 @@ pub fn enumerate_doubly_even_parallel(
 ) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
     use crossbeam_channel::{bounded, unbounded};
 
-    const FRONTIER_DEPTH: u32 = 3;
+    // D13-V2: deeper frontier breaks the tail. With depth 3 (V1) at N=22
+    // the heaviest subtree was ~30 % of total work; bumping the cut to
+    // depth 4 splits it into ~3–5 pieces, pushing the ceiling from
+    // ~3.3× toward ~6–8×. Configurable via env so heavy users (large N)
+    // can tune. Default = 4 at runtime, clamped to ≥ 2.
+    let frontier_depth: u32 = std::env::var("DOUBLY_EVEN_FRONTIER_DEPTH")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|&d| d >= 2)
+        .unwrap_or(4);
 
-    if num_threads <= 1 || max_k <= FRONTIER_DEPTH {
+    if num_threads <= 1 || max_k <= frontier_depth {
         return enumerate_doubly_even(n, max_k, quota, factorial_n);
     }
 
-    // Phase 1: sequential seeder, walks depths 0..FRONTIER_DEPTH-1, emits
-    // them, and collects the FRONTIER_DEPTH-depth nodes as worker seeds.
+    // Phase 1: sequential seeder, walks depths 0..frontier_depth-1, emits
+    // them, and collects the frontier_depth-depth nodes as worker seeds.
     let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n);
     let mut frontier: Vec<SeedFrontier> = Vec::new();
     {
@@ -960,7 +969,7 @@ pub fn enumerate_doubly_even_parallel(
             zero_rref,
             zero_pivots,
             zero_info,
-            FRONTIER_DEPTH,
+            frontier_depth,
             &mut frontier,
         );
     }

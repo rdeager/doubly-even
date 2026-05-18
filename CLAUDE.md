@@ -184,19 +184,24 @@ Cumulative levers, oldest first:
     features (`dense_qd`, `dense_qd_tc0`, `dense_qd_refinvar`,
     `traces_qd`) kept as reproducibility substrate.
 13. **D13 Outer-DFS parallelism** (2026-05-18) — sequential traversal
-    to depth 3, then a crossbeam-channel worker pool runs each
-    accepted depth-3 subtree on its own thread. Sparsenauty is
-    parallel-safe under the `tls` feature on `nauty-Traces-sys`
+    to a configurable cut depth, then a crossbeam-channel worker
+    pool runs each accepted subtree on its own thread. Sparsenauty
+    is parallel-safe under the `tls` feature on `nauty-Traces-sys`
     (already on; `USE_TLS` → `_Thread_local` on mutable globals).
-    Per-worker canon caches; per-worker mass-stop disabled in V1
+    Per-worker canon caches; per-worker mass-stop disabled
     (loses 4–11 % vs sequential; gained outright by parallelism).
-    **3.1× at `N = 22`** (6.87 s → 2.20 s, 16 threads on 13700K);
-    4.1× at `N = 20`. Behind off-by-default Cargo feature
-    `parallel`; enabled at runtime via `DOUBLY_EVEN_THREADS` env
-    var or `num_threads=` kwarg on the kernel entry. Conflicts with
-    `traces_qd` (Traces uses non-TLS static work queues) — guarded
-    by `compile_error!`. Determinism harness in
-    `rust/tests/parallel_determinism.rs`.
+    V1 (depth=3): 3.1× at N=22. **V2 (depth=4, the new default):
+    5.8× at N=22** (6.87 s → 1.18 s, 16 threads on 13700K); 4.4×
+    at N=20. **8.7× at N=24** (107 s → 12.3 s, 20 threads,
+    depth=5). The deeper frontier breaks the tail-task ceiling:
+    at depth=3 the heaviest of 83 subtrees held ~30 % of total
+    work; at depth=4 the ~300 tasks divide that into 3–5 pieces.
+    Behind off-by-default Cargo feature `parallel`; enabled at
+    runtime via `DOUBLY_EVEN_THREADS` env var (and tunable via
+    `DOUBLY_EVEN_FRONTIER_DEPTH`, default 4) or `num_threads=`
+    kwarg on the kernel entry. Conflicts with `traces_qd` (Traces
+    uses non-TLS static work queues) — guarded by `compile_error!`.
+    Determinism harness in `rust/tests/parallel_determinism.rs`.
 
 `bench.py` lives in `scripts/`; per-step JSON records are in
 `scripts/bench-results/` (gitignored). Rust microbench for
@@ -220,18 +225,24 @@ maturin build --release --features parallel -m rust/Cargo.toml \
   && uv pip install rust/target/wheels/doubly_even_kernel-*.whl
 ```
 
-At runtime, set `DOUBLY_EVEN_THREADS` (P-core count is a good
-default; experimentally 16 on a 13700K is the sweet spot):
+At runtime, set `DOUBLY_EVEN_THREADS` (16 on a 13700K is the sweet
+spot for N ≤ 22; 20 at N = 24). `DOUBLY_EVEN_FRONTIER_DEPTH`
+defaults to 4 and rarely needs tweaking — at N = 24 a value of 5
+is marginally better because the tree is bigger and the deeper
+split gives finer load balance.
 
 ```sh
 DOUBLY_EVEN_THREADS=16 uv run python scripts/bench.py \
   --label parallel-t16 --N 18,20,22
+# Larger N — try the deeper cut for finer balance:
+DOUBLY_EVEN_THREADS=20 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
+  uv run python scripts/bench.py --label parallel-t20-d5 --N 24
 ```
 
-V2 improvements deferred: (a) per-worker mass-stop using Gaborit
-residual instead of u128::MAX; (b) adaptive frontier split (depth-2
-for light subtrees, depth-3 for heavy) — the 13700K plateau at 16
-threads suggests one or two heavy seeds dominate the tail.
+V3+ improvements still deferred: per-worker mass-stop using
+Gaborit residual (recovers the 4–11 % sequential mass-stop win);
+heuristic per-seed depth selection (light seeds at depth 3, heavy
+seeds at depth 5+) once depth-4 hits a ceiling at larger N.
 
 ## Useful commands
 
