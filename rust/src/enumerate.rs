@@ -91,22 +91,6 @@ pub(crate) struct CachedInfo {
     pub(crate) column_orbits: Vec<u32>,
 }
 
-/// Class-fingerprint cache entry, keyed externally by `T11(D)`.
-///
-/// `parent_class_t11 := T11(canonical_parent(D))` is determined by
-/// `class(D)` alone — independent of which RREF of D populated the
-/// entry. On a future visit with the same `T11(D)`, the caller compares
-/// the cached value against its own `hash_C = T11(C)`. A mismatch
-/// proves `class(canonical_parent(D)) ≠ class(C)`, so D cannot be a
-/// canonical augmentation of C — cheap-reject without invoking nauty.
-///
-/// Plan: `/home/dev/.claude/plans/implement-and-bench-the-logical-lovelace.md`.
-#[cfg(feature = "t11_cache")]
-#[derive(Clone, Copy)]
-struct ClassEntry {
-    parent_class_t11: u64,
-}
-
 /// A canonical node captured at the depth-cut frontier of the parallel
 /// seeder. By-value `CachedInfo` (rather than `Rc<…>`) so the entire
 /// struct is `Send` and can travel through a crossbeam channel into a
@@ -116,11 +100,6 @@ pub(crate) struct SeedFrontier {
     pub rref: Vec<BinVec>,
     pub pivots: Vec<u32>,
     pub info: CachedInfo,
-    /// `T11(rref)` of the seed; the worker receives this and threads it
-    /// into its `traverse` call as the starting `hash_c`. Always present
-    /// (0 when `t11_cache` is off) to avoid cfg-proliferation across the
-    /// crossbeam channel boundary.
-    pub hash: u64,
 }
 
 struct WorkerState {
@@ -187,65 +166,6 @@ struct WorkerState {
     /// `equivalence_verifier` feature is enabled or the env-var
     /// instrumentation is set.
     maintain_secondary_cache: bool,
-    /// Class-fingerprint cache. **Shared (D14-V2)** via `Arc<DashMap>`
-    /// so the seeder + every parallel worker feed one cache, avoiding
-    /// the ~7× per-worker populate duplication observed in V1
-    /// (35,988 vs 5,118 distinct classes at N=22 16t). Keyed by
-    /// `T11(D)`; the entry stores the class-invariant
-    /// `parent_class_t11 = T11(canonical_parent(D))`. Populated on the
-    /// FIRST `canon_info(D)` call (regardless of McKay outcome) so
-    /// subsequent siblings can cheap-reject when their parent's T11
-    /// disagrees. The populate path uses `entry().match Vacant/Occupied`
-    /// so concurrent populates of the same hash collapse to one closure
-    /// execution. See `ClassEntry` doc.
-    #[cfg(feature = "t11_cache")]
-    class_cache: std::sync::Arc<
-        dashmap::DashMap<u64, ClassEntry, rustc_hash::FxBuildHasher>,
-    >,
-    /// Per-N set of known T11 collision hashes (see `t11_blocklist::*`).
-    /// Blocklisted hashes are never populated and always fall through
-    /// to `canon_info` (two classes could share the key — the cached
-    /// `parent_class_t11` would be ambiguous).
-    #[cfg(feature = "t11_cache")]
-    t11_blocklist: rustc_hash::FxHashSet<u64>,
-    /// `false` when `t11_blocklist::t11_blocklist_for_n(n)` returns `None`
-    /// (e.g., N=26+ — no audited blocklist available). All T11 work is
-    /// skipped by the class-fingerprint dispatch when this is false.
-    #[cfg(feature = "t11_cache")]
-    t11_enabled: bool,
-    /// Times the class-fingerprint cache cheap-rejected a candidate
-    /// (parent_class_t11 mismatch → skipped canon_info entirely).
-    #[cfg(feature = "t11_cache")]
-    pub stats_t11_hits: u64,
-    /// Times this worker *reached* the populate path (its local view
-    /// said the hash was absent). Under V2's shared cache a concurrent
-    /// worker may have inserted first; the closure may not actually
-    /// run. Equivalent to V1's `stats_t11_misses`; kept in stats-slot
-    /// 27 with the label `t11_cache_populates` for bench-JSON
-    /// continuity. Sum across workers ≥ `class_cache.len()`.
-    #[cfg(feature = "t11_cache")]
-    pub stats_t11_lookup_misses: u64,
-    /// Times this worker actually inserted into the shared cache (i.e.,
-    /// its `Entry::Vacant` arm fired). Sum across workers equals
-    /// `class_cache.len()`; the diff vs `stats_t11_lookup_misses`
-    /// shows per-worker duplication. Reported in new stats-slot 31
-    /// with label `t11_cache_unique_inserts`.
-    #[cfg(feature = "t11_cache")]
-    pub stats_t11_populates_inserted: u64,
-    /// Times the T11 hash matched a known collision and we forced nauty
-    /// (never populated; the entry would be ambiguous).
-    #[cfg(feature = "t11_cache")]
-    pub stats_t11_blocklist_hits: u64,
-    /// Cumulative ns spent inside the class-fingerprint fast path (hash
-    /// + lookup + populate).
-    #[cfg(feature = "t11_cache")]
-    pub stats_t11_ns: u128,
-    /// Times the class-fingerprint cache hit with `parent_class_t11`
-    /// matching the caller's `hash_c` — fell through to `canon_info`
-    /// for the Aut(D)-orbit refinement that the class cache cannot
-    /// answer cheaply.
-    #[cfg(feature = "t11_cache")]
-    pub stats_t11_class_match: u64,
     /// Times `is_canonical_augmentation` was entered.
     pub stats_is_canon_aug_calls: u64,
     /// Times the candidate already equalled `p(D)` (zero-cost branch).
@@ -348,16 +268,7 @@ fn inverse_perm(p: &[u32]) -> Vec<u32> {
 }
 
 impl WorkerState {
-    fn new(
-        n: u32,
-        max_k: u32,
-        quota: Vec<u128>,
-        factorial_n: u128,
-        #[cfg(feature = "t11_cache")]
-        class_cache: std::sync::Arc<
-            dashmap::DashMap<u64, ClassEntry, rustc_hash::FxBuildHasher>,
-        >,
-    ) -> Self {
+    fn new(n: u32, max_k: u32, quota: Vec<u128>, factorial_n: u128) -> Self {
         let len = (max_k + 1) as usize;
         let env_instrument = std::env::var("DOUBLY_EVEN_SECONDARY_CACHE_INSTRUMENTATION")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -408,24 +319,6 @@ impl WorkerState {
             stats_nauty_tctotal: 0,
             stats_nauty_maxlevel_sum: 0,
             stats_nauty_generators_sum: 0,
-            #[cfg(feature = "t11_cache")]
-            class_cache,
-            #[cfg(feature = "t11_cache")]
-            t11_blocklist: crate::t11_blocklist::t11_blocklist_for_n(n).unwrap_or_default(),
-            #[cfg(feature = "t11_cache")]
-            t11_enabled: crate::t11_blocklist::t11_blocklist_for_n(n).is_some(),
-            #[cfg(feature = "t11_cache")]
-            stats_t11_hits: 0,
-            #[cfg(feature = "t11_cache")]
-            stats_t11_lookup_misses: 0,
-            #[cfg(feature = "t11_cache")]
-            stats_t11_populates_inserted: 0,
-            #[cfg(feature = "t11_cache")]
-            stats_t11_blocklist_hits: 0,
-            #[cfg(feature = "t11_cache")]
-            stats_t11_ns: 0,
-            #[cfg(feature = "t11_cache")]
-            stats_t11_class_match: 0,
             output: Vec::new(),
         }
     }
@@ -768,13 +661,7 @@ impl WorkerState {
         hit
     }
 
-    fn traverse(
-        &mut self,
-        rref: Vec<BinVec>,
-        pivots: Vec<u32>,
-        info: Rc<CachedInfo>,
-        #[cfg(feature = "t11_cache")] hash_c: u64,
-    ) {
+    fn traverse(&mut self, rref: Vec<BinVec>, pivots: Vec<u32>, info: Rc<CachedInfo>) {
         let k = rref.len() as u32;
         // Emit. Cloning Vec fields directly into the output row (instead of
         // through Rc) avoids retaining the Rc beyond emission.
@@ -829,117 +716,10 @@ impl WorkerState {
             let mut new_basis = rref.clone();
             new_basis.push(*v);
             let (d_rref, d_pivots) = row_reduce(&new_basis, self.n);
-
-            // --- CLASS-FINGERPRINT CACHE FAST PATH ---
-            // Hash D; on a cache hit where the cached
-            // parent_class_t11 disagrees with hash_c, cheap-reject
-            // without calling canon_info(D). See `ClassEntry` doc.
-            #[cfg(feature = "t11_cache")]
-            let hash_d: Option<u64> = if self.t11_enabled {
-                let t0 = std::time::Instant::now();
-                let h = crate::canon::compute_t11_hash(&d_rref, self.n);
-                if self.t11_blocklist.contains(&h) {
-                    self.stats_t11_blocklist_hits += 1;
-                    self.stats_t11_ns += t0.elapsed().as_nanos();
-                    Some(h)
-                } else if let Some(entry) = self.class_cache.get(&h).map(|r| *r.value()) {
-                    if entry.parent_class_t11 != hash_c {
-                        self.stats_t11_hits += 1;
-                        self.stats_t11_ns += t0.elapsed().as_nanos();
-                        #[cfg(debug_assertions)]
-                        {
-                            // A cheap-reject must agree with a full
-                            // recomputation. If this trips: either a
-                            // T11 cross-class collision is missing from
-                            // the blocklist, or the populate hook is
-                            // broken (sibling RREFs of D would also
-                            // disagree). Diagnostic prints the hash so
-                            // `dump_t11_blocklist.py` can reproduce.
-                            let info_check = self.canon_info(&d_rref);
-                            let parent_check = self.canonical_parent(
-                                &d_rref,
-                                &info_check.canonical_column_order,
-                            );
-                            let t11_check = crate::canon::compute_t11_hash(
-                                &parent_check, self.n,
-                            );
-                            debug_assert_eq!(
-                                entry.parent_class_t11, t11_check,
-                                "class-cache reject divergence at hash {:#x}: \
-                                 cached {:#x} vs recomputed {:#x}; \
-                                 likely missing blocklist entry at N={}",
-                                h, entry.parent_class_t11, t11_check, self.n,
-                            );
-                        }
-                        continue;
-                    }
-                    // Class matches: nauty still needed for the
-                    // Aut(D)-orbit refinement in `is_canonical_augmentation`.
-                    self.stats_t11_class_match += 1;
-                    self.stats_t11_ns += t0.elapsed().as_nanos();
-                    Some(h)
-                } else {
-                    self.stats_t11_ns += t0.elapsed().as_nanos();
-                    Some(h)
-                }
-            } else {
-                None
-            };
-
             let info_d = self.canon_info(&d_rref);
-
-            // --- POPULATE ON FIRST canon_info ---
-            // Compute parent_class_t11(D) = T11(canonical_parent(D)) and
-            // insert. The "populate on first call" timing (vs "on
-            // accept") is empirically critical: see prototype memory
-            // `project_class_cache_prototype.md` — accept-only delivered
-            // only 2.6× at N=22 because non-canonical-parent visits
-            // come first.
-            #[cfg(feature = "t11_cache")]
-            if let Some(h) = hash_d {
-                if !self.t11_blocklist.contains(&h) {
-                    let t0 = std::time::Instant::now();
-                    self.stats_t11_lookup_misses += 1;
-                    // D14-V2: `match Entry::{Vacant,Occupied}` collapses
-                    // concurrent populates of the same hash to one
-                    // closure execution. The Vacant arm holds the shard
-                    // write lock for ~95 µs (canonical_parent +
-                    // compute_t11_hash); under 4×ncpus = 64 default
-                    // shards, same-shard contention is rare.
-                    let mut inserted = false;
-                    {
-                        use dashmap::mapref::entry::Entry as DashEntry;
-                        match self.class_cache.entry(h) {
-                            DashEntry::Vacant(slot) => {
-                                let parent_d = self.canonical_parent(
-                                    &d_rref, &info_d.canonical_column_order,
-                                );
-                                let parent_class_t11 =
-                                    crate::canon::compute_t11_hash(
-                                        &parent_d, self.n,
-                                    );
-                                slot.insert(ClassEntry { parent_class_t11 });
-                                inserted = true;
-                            }
-                            DashEntry::Occupied(_) => {
-                                // Race lost (or this worker populated
-                                // earlier). Nothing to do.
-                            }
-                        }
-                    }
-                    if inserted {
-                        self.stats_t11_populates_inserted += 1;
-                    }
-                    self.stats_t11_ns += t0.elapsed().as_nanos();
-                }
-            }
-
             if !self.is_canonical_augmentation(k as usize, &rref, &d_rref, &info_d) {
                 continue;
             }
-            #[cfg(feature = "t11_cache")]
-            self.traverse(d_rref, d_pivots, info_d, hash_d.unwrap_or(0));
-            #[cfg(not(feature = "t11_cache"))]
             self.traverse(d_rref, d_pivots, info_d);
         }
     }
@@ -963,7 +743,6 @@ impl WorkerState {
         info: Rc<CachedInfo>,
         frontier_depth: u32,
         frontier: &mut Vec<SeedFrontier>,
-        #[cfg(feature = "t11_cache")] hash_c: u64,
     ) {
         let k = rref.len() as u32;
         if k == frontier_depth {
@@ -971,11 +750,7 @@ impl WorkerState {
                 Ok(info) => info,
                 Err(rc) => (*rc).clone(),
             };
-            #[cfg(feature = "t11_cache")]
-            let seed_hash = hash_c;
-            #[cfg(not(feature = "t11_cache"))]
-            let seed_hash = 0u64;
-            frontier.push(SeedFrontier { rref, pivots, info: info_owned, hash: seed_hash });
+            frontier.push(SeedFrontier { rref, pivots, info: info_owned });
             return;
         }
         self.output.push(EnumeratedRaw {
@@ -1009,101 +784,10 @@ impl WorkerState {
             let mut new_basis = rref.clone();
             new_basis.push(*v);
             let (d_rref, d_pivots) = row_reduce(&new_basis, self.n);
-
-            // Class-fingerprint fast path — mirrors `traverse`.
-            #[cfg(feature = "t11_cache")]
-            let hash_d: Option<u64> = if self.t11_enabled {
-                let t0 = std::time::Instant::now();
-                let h = crate::canon::compute_t11_hash(&d_rref, self.n);
-                if self.t11_blocklist.contains(&h) {
-                    self.stats_t11_blocklist_hits += 1;
-                    self.stats_t11_ns += t0.elapsed().as_nanos();
-                    Some(h)
-                } else if let Some(entry) = self.class_cache.get(&h).map(|r| *r.value()) {
-                    if entry.parent_class_t11 != hash_c {
-                        self.stats_t11_hits += 1;
-                        self.stats_t11_ns += t0.elapsed().as_nanos();
-                        #[cfg(debug_assertions)]
-                        {
-                            let info_check = self.canon_info(&d_rref);
-                            let parent_check = self.canonical_parent(
-                                &d_rref,
-                                &info_check.canonical_column_order,
-                            );
-                            let t11_check = crate::canon::compute_t11_hash(
-                                &parent_check, self.n,
-                            );
-                            debug_assert_eq!(
-                                entry.parent_class_t11, t11_check,
-                                "class-cache reject divergence at hash {:#x}: \
-                                 cached {:#x} vs recomputed {:#x}; \
-                                 likely missing blocklist entry at N={}",
-                                h, entry.parent_class_t11, t11_check, self.n,
-                            );
-                        }
-                        continue;
-                    }
-                    self.stats_t11_class_match += 1;
-                    self.stats_t11_ns += t0.elapsed().as_nanos();
-                    Some(h)
-                } else {
-                    self.stats_t11_ns += t0.elapsed().as_nanos();
-                    Some(h)
-                }
-            } else {
-                None
-            };
-
             let info_d = self.canon_info(&d_rref);
-
-            #[cfg(feature = "t11_cache")]
-            if let Some(h) = hash_d {
-                if !self.t11_blocklist.contains(&h) {
-                    let t0 = std::time::Instant::now();
-                    self.stats_t11_lookup_misses += 1;
-                    // D14-V2: `match Entry::{Vacant,Occupied}` collapses
-                    // concurrent populates of the same hash to one
-                    // closure execution. The Vacant arm holds the shard
-                    // write lock for ~95 µs (canonical_parent +
-                    // compute_t11_hash); under 4×ncpus = 64 default
-                    // shards, same-shard contention is rare.
-                    let mut inserted = false;
-                    {
-                        use dashmap::mapref::entry::Entry as DashEntry;
-                        match self.class_cache.entry(h) {
-                            DashEntry::Vacant(slot) => {
-                                let parent_d = self.canonical_parent(
-                                    &d_rref, &info_d.canonical_column_order,
-                                );
-                                let parent_class_t11 =
-                                    crate::canon::compute_t11_hash(
-                                        &parent_d, self.n,
-                                    );
-                                slot.insert(ClassEntry { parent_class_t11 });
-                                inserted = true;
-                            }
-                            DashEntry::Occupied(_) => {
-                                // Race lost (or this worker populated
-                                // earlier). Nothing to do.
-                            }
-                        }
-                    }
-                    if inserted {
-                        self.stats_t11_populates_inserted += 1;
-                    }
-                    self.stats_t11_ns += t0.elapsed().as_nanos();
-                }
-            }
-
             if !self.is_canonical_augmentation(k as usize, &rref, &d_rref, &info_d) {
                 continue;
             }
-            #[cfg(feature = "t11_cache")]
-            self.traverse_seed(
-                d_rref, d_pivots, info_d, frontier_depth, frontier,
-                hash_d.unwrap_or(0),
-            );
-            #[cfg(not(feature = "t11_cache"))]
             self.traverse_seed(d_rref, d_pivots, info_d, frontier_depth, frontier);
         }
     }
@@ -1112,32 +796,6 @@ impl WorkerState {
     /// tuple used by both the sequential and parallel drivers. Stats layout
     /// is documented on [`enumerate_doubly_even`].
     fn finalize(self) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
-        #[cfg(feature = "t11_cache")]
-        let (
-            t11_hits,
-            t11_lookup_misses,
-            t11_blocklist_hits,
-            t11_ns,
-            t11_class_match,
-            t11_inserts,
-        ) = (
-            self.stats_t11_hits as u128,
-            self.stats_t11_lookup_misses as u128,
-            self.stats_t11_blocklist_hits as u128,
-            self.stats_t11_ns,
-            self.stats_t11_class_match as u128,
-            self.stats_t11_populates_inserted as u128,
-        );
-        #[cfg(not(feature = "t11_cache"))]
-        let (
-            t11_hits,
-            t11_lookup_misses,
-            t11_blocklist_hits,
-            t11_ns,
-            t11_class_match,
-            t11_inserts,
-        ) = (0u128, 0u128, 0u128, 0u128, 0u128, 0u128);
-
         let stats: Vec<u128> = vec![
             self.stats_canon_calls as u128,
             self.stats_primary_hits as u128,
@@ -1165,12 +823,6 @@ impl WorkerState {
             self.stats_nauty_tctotal as u128,
             self.stats_nauty_maxlevel_sum as u128,
             self.stats_nauty_generators_sum as u128,
-            t11_hits,
-            t11_lookup_misses,
-            t11_blocklist_hits,
-            t11_ns,
-            t11_class_match,
-            t11_inserts,
         ];
         let per_k_stats: Vec<Vec<u64>> = vec![
             self.stats_is_canon_aug_calls_by_k,
@@ -1197,7 +849,7 @@ impl WorkerState {
 /// Returns `(output, stats, per_k_stats)`:
 ///
 /// - `output` — `Vec<EnumeratedRaw>` in DFS order.
-/// - `stats` — flat vector (32 u128 fields). See layout below.
+/// - `stats` — flat vector (22 u128 fields). See layout below.
 /// - `per_k_stats` — rectangular `[10][max_k+1]` matrix of u64 counters
 ///   bucketed by the *parent* rank k (i.e., the rank of C; D has rank
 ///   k+1). Rows in fixed order:
@@ -1208,7 +860,7 @@ impl WorkerState {
 ///   (σ_Q-orbit-min rejection-rate audit). Rows 6–9 from the mass-stop
 ///   audit (same plan, Conway–Pless gluing follow-up).
 ///
-/// Stats vector layout (32 u128 fields, packed for pyo3 tuple-arity
+/// Stats vector layout (22 u128 fields, packed for pyo3 tuple-arity
 /// limits — pyo3 0.23 caps `IntoPyObject` tuples at 12 elements):
 ///
 /// ```text
@@ -1239,22 +891,6 @@ impl WorkerState {
 ///  23   nauty_tctotal_sum              (Q6 audit: total target-cell work)
 ///  24   nauty_maxlevel_sum             (Q6 audit: deepest level reached)
 ///  25   nauty_generators_sum           (Q6 audit: Aut generators found)
-///  26   t11_cheap_rejects              (feature t11_cache; was `t11_hits`)
-///  27   t11_cache_populates            (feature t11_cache; per-worker
-///                                       lookup misses — the worker
-///                                       reached the populate path.
-///                                       Concurrent workers may have
-///                                       inserted first.)
-///  28   t11_blocklist_hits             (feature t11_cache)
-///  29   t11_ns                         (feature t11_cache)
-///  30   t11_class_match                (feature t11_cache)
-///  31   t11_cache_unique_inserts       (feature t11_cache; D14-V2 —
-///                                       per-worker successful inserts
-///                                       into the shared cache; sum
-///                                       across workers equals
-///                                       `class_cache.len()`. Compare
-///                                       to slot 27 for duplication
-///                                       ratio: V1 ≈ 7×, V2 target 1×.)
 /// ```
 ///
 /// Fields 4–10 came from the Engine B BFS-cost profile (see
@@ -1271,30 +907,12 @@ pub fn enumerate_doubly_even(
     quota: Vec<u128>,
     factorial_n: u128,
 ) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
-    #[cfg(feature = "t11_cache")]
-    let class_cache = std::sync::Arc::new(
-        dashmap::DashMap::<u64, ClassEntry, rustc_hash::FxBuildHasher>::default(),
-    );
-    let mut state = WorkerState::new(
-        n,
-        max_k,
-        quota,
-        factorial_n,
-        #[cfg(feature = "t11_cache")]
-        class_cache,
-    );
+    let mut state = WorkerState::new(n, max_k, quota, factorial_n);
     // Zero code: rref empty, pivots empty.
     let zero_rref: Vec<BinVec> = Vec::new();
     let zero_pivots: Vec<u32> = Vec::new();
     let info = state.canon_info(&zero_rref);
-    #[cfg(feature = "t11_cache")]
-    let hash_zero = crate::canon::compute_t11_hash(&zero_rref, n);
-    state.traverse(
-        zero_rref,
-        zero_pivots,
-        info,
-        #[cfg(feature = "t11_cache")] hash_zero,
-    );
+    state.traverse(zero_rref, zero_pivots, info);
     state.finalize()
 }
 
@@ -1357,38 +975,20 @@ pub fn enumerate_doubly_even_parallel(
         return enumerate_doubly_even(n, max_k, quota, factorial_n);
     }
 
-    // D14-V2: one shared Arc<DashMap> for the seeder + every worker.
-    // Seeder populates depths 0..frontier_depth which are then reused
-    // by workers when their subtrees revisit those hashes.
-    #[cfg(feature = "t11_cache")]
-    let class_cache = std::sync::Arc::new(
-        dashmap::DashMap::<u64, ClassEntry, rustc_hash::FxBuildHasher>::default(),
-    );
-
     // Phase 1: sequential seeder, walks depths 0..frontier_depth-1, emits
     // them, and collects the frontier_depth-depth nodes as worker seeds.
-    let mut seed_state = WorkerState::new(
-        n,
-        max_k,
-        quota.clone(),
-        factorial_n,
-        #[cfg(feature = "t11_cache")]
-        std::sync::Arc::clone(&class_cache),
-    );
+    let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n);
     let mut frontier: Vec<SeedFrontier> = Vec::new();
     {
         let zero_rref: Vec<BinVec> = Vec::new();
         let zero_pivots: Vec<u32> = Vec::new();
         let zero_info = seed_state.canon_info(&zero_rref);
-        #[cfg(feature = "t11_cache")]
-        let hash_zero = crate::canon::compute_t11_hash(&zero_rref, n);
         seed_state.traverse_seed(
             zero_rref,
             zero_pivots,
             zero_info,
             frontier_depth,
             &mut frontier,
-            #[cfg(feature = "t11_cache")] hash_zero,
         );
     }
     if frontier.is_empty() {
@@ -1409,25 +1009,13 @@ pub fn enumerate_doubly_even_parallel(
         let mk = max_k;
         let nn = n;
         let fact = factorial_n;
-        #[cfg(feature = "t11_cache")]
-        let cache_clone = std::sync::Arc::clone(&class_cache);
         handles.push(std::thread::spawn(move || {
             // Per-worker mass-stop disabled: u128::MAX quota means the
             // check never fires. Lose 4–11 % vs sequential mass-stop;
             // gain ≫1× from parallelism. Tracked under V2 of D13.
             let inf_quota = vec![u128::MAX; (mk + 1) as usize];
-            let mut worker = WorkerState::new(
-                nn,
-                mk,
-                inf_quota,
-                fact,
-                #[cfg(feature = "t11_cache")]
-                cache_clone,
-            );
+            let mut worker = WorkerState::new(nn, mk, inf_quota, fact);
             while let Ok(seed) = task_rx.recv() {
-                #[cfg(feature = "t11_cache")]
-                worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info), seed.hash);
-                #[cfg(not(feature = "t11_cache"))]
                 worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
             }
             let _ = result_tx.send(worker.finalize());
@@ -1451,22 +1039,6 @@ pub fn enumerate_doubly_even_parallel(
     }
     for h in handles {
         h.join().expect("worker thread panicked");
-    }
-
-    // D14-V2 invariant: `sum(stats_t11_populates_inserted)` across
-    // seed_state + workers must equal `class_cache.len()`. Each worker
-    // increments slot 31 once per Vacant arm; that arm fires once per
-    // hash globally. Catches refactor bugs that double-count inserts.
-    #[cfg(all(feature = "t11_cache", debug_assertions))]
-    {
-        let total_inserts: u128 = combined.1[31];
-        let actual = class_cache.len() as u128;
-        debug_assert_eq!(
-            total_inserts, actual,
-            "sum(stats_t11_populates_inserted) ({}) must equal \
-             class_cache.len() ({})",
-            total_inserts, actual,
-        );
     }
 
     combined

@@ -11,7 +11,7 @@ name = "doubly_even_kernel"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = ["t11_cache"]
+default = []
 # Enable the Leon §10(i) paired-refinement equivalence verifier as the
 # canon_info secondary-cache fast path. With this off (default), the
 # kernel is byte-for-byte identical to the pre-verifier baseline.
@@ -37,32 +37,12 @@ traces_qd = []
 # globals are `_Thread_local`. Incompatible with `traces_qd` because
 # Traces uses non-TLS static work queues.
 parallel = ["dep:crossbeam-channel"]
-# Class-fingerprint cache: per-worker FxHashMap keyed by `compute_t11_hash(D)`,
-# storing only the class-invariant `parent_class_t11 = T11(canonical_parent(D))`.
-# Dispatch lives in `traverse`/`traverse_seed` BEFORE `canon_info(D)`; on a
-# cache hit where the cached value disagrees with the caller's hash_c =
-# T11(class(C)), the candidate is cheap-rejected without invoking nauty.
-# Blocklisted hashes (`t11_blocklist::*`, extracted offline by
-# `dump_t11_blocklist.py`) are never populated and always fall through to
-# nauty. Default OFF during initial integration; debug builds assert every
-# cheap-reject against a full recomputation. Supersedes the earlier
-# σ-storing T11 cache tier (deleted; was unsound — see plan file
-# `implement-and-bench-the-logical-lovelace.md`).
-t11_cache = ["dep:rustc-hash", "dep:dashmap"]
 
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }
 fixedbitset = "0.5"
 nauty-Traces-sys = { version = "0.11", default-features = false, features = ["bundled", "tls", "popcnt"] }
 crossbeam-channel = { version = "0.5", optional = true }
-# Fixed-seed deterministic hasher for the T11 cache key (under
-# `t11_cache` feature). Same hasher as rustc itself; byte-stable.
-rustc-hash = { version = "2", optional = true }
-# Sharded concurrent map for the D14-V2 shared class-fingerprint cache:
-# one Arc<DashMap> is shared by the seeder + every worker so populates
-# are not duplicated 16×. See plan file
-# `last-session-we-found-vectorized-sifakis.md`.
-dashmap = { version = "5", optional = true }
 # Bounded LRU for the per-worker canon cache. At N ≥ 26 the canon
 # cache grows unbounded without this — N=26 with 20 workers hit the
 # 48 GB cgroup OOM. Hit rate is only 3–5 %, but each hit saves ~80 µs,
