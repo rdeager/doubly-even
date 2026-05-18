@@ -343,7 +343,7 @@ fn py_enumerate_doubly_even(
         let _ = py;
         enumerate::enumerate_doubly_even(n, max_k, quota, factorial_n)
     };
-    debug_assert_eq!(stats.len(), 30, "stats vector length mismatch");
+    debug_assert_eq!(stats.len(), 31, "stats vector length mismatch");
     let result: Vec<_> = out
         .into_iter()
         .map(|e| {

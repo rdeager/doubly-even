@@ -91,6 +91,22 @@ pub(crate) struct CachedInfo {
     pub(crate) column_orbits: Vec<u32>,
 }
 
+/// Class-fingerprint cache entry, keyed externally by `T11(D)`.
+///
+/// `parent_class_t11 := T11(canonical_parent(D))` is determined by
+/// `class(D)` alone — independent of which RREF of D populated the
+/// entry. On a future visit with the same `T11(D)`, the caller compares
+/// the cached value against its own `hash_C = T11(C)`. A mismatch
+/// proves `class(canonical_parent(D)) ≠ class(C)`, so D cannot be a
+/// canonical augmentation of C — cheap-reject without invoking nauty.
+///
+/// Plan: `/home/dev/.claude/plans/implement-and-bench-the-logical-lovelace.md`.
+#[cfg(feature = "t11_cache")]
+#[derive(Clone, Copy)]
+struct ClassEntry {
+    parent_class_t11: u64,
+}
+
 /// A canonical node captured at the depth-cut frontier of the parallel
 /// seeder. By-value `CachedInfo` (rather than `Rc<…>`) so the entire
 /// struct is `Send` and can travel through a crossbeam channel into a
@@ -100,6 +116,11 @@ pub(crate) struct SeedFrontier {
     pub rref: Vec<BinVec>,
     pub pivots: Vec<u32>,
     pub info: CachedInfo,
+    /// `T11(rref)` of the seed; the worker receives this and threads it
+    /// into its `traverse` call as the starting `hash_c`. Always present
+    /// (0 when `t11_cache` is off) to avoid cfg-proliferation across the
+    /// crossbeam channel boundary.
+    pub hash: u64,
 }
 
 struct WorkerState {
@@ -166,10 +187,18 @@ struct WorkerState {
     /// `equivalence_verifier` feature is enabled or the env-var
     /// instrumentation is set.
     maintain_secondary_cache: bool,
+    /// Class-fingerprint cache. Per-worker; no sharing. Keyed by
+    /// `T11(D)`; the entry stores the class-invariant
+    /// `parent_class_t11 = T11(canonical_parent(D))`. Populated on the
+    /// FIRST `canon_info(D)` call (regardless of McKay outcome) so
+    /// subsequent siblings can cheap-reject when their parent's T11
+    /// disagrees. See `ClassEntry` doc.
+    #[cfg(feature = "t11_cache")]
+    class_cache: rustc_hash::FxHashMap<u64, ClassEntry>,
     /// Per-N set of known T11 collision hashes (see `t11_blocklist::*`).
-    /// Consumed by the class-fingerprint cache wired into `traverse` /
-    /// `traverse_seed`; blocklisted hashes are never populated and
-    /// always fall through to `canon_info`.
+    /// Blocklisted hashes are never populated and always fall through
+    /// to `canon_info` (two classes could share the key — the cached
+    /// `parent_class_t11` would be ambiguous).
     #[cfg(feature = "t11_cache")]
     t11_blocklist: rustc_hash::FxHashSet<u64>,
     /// `false` when `t11_blocklist::t11_blocklist_for_n(n)` returns `None`
@@ -194,6 +223,12 @@ struct WorkerState {
     /// + lookup + populate).
     #[cfg(feature = "t11_cache")]
     pub stats_t11_ns: u128,
+    /// Times the class-fingerprint cache hit with `parent_class_t11`
+    /// matching the caller's `hash_c` — fell through to `canon_info`
+    /// for the Aut(D)-orbit refinement that the class cache cannot
+    /// answer cheaply.
+    #[cfg(feature = "t11_cache")]
+    pub stats_t11_class_match: u64,
     /// Times `is_canonical_augmentation` was entered.
     pub stats_is_canon_aug_calls: u64,
     /// Times the candidate already equalled `p(D)` (zero-cost branch).
@@ -348,6 +383,8 @@ impl WorkerState {
             stats_nauty_maxlevel_sum: 0,
             stats_nauty_generators_sum: 0,
             #[cfg(feature = "t11_cache")]
+            class_cache: rustc_hash::FxHashMap::default(),
+            #[cfg(feature = "t11_cache")]
             t11_blocklist: crate::t11_blocklist::t11_blocklist_for_n(n).unwrap_or_default(),
             #[cfg(feature = "t11_cache")]
             t11_enabled: crate::t11_blocklist::t11_blocklist_for_n(n).is_some(),
@@ -359,6 +396,8 @@ impl WorkerState {
             stats_t11_blocklist_hits: 0,
             #[cfg(feature = "t11_cache")]
             stats_t11_ns: 0,
+            #[cfg(feature = "t11_cache")]
+            stats_t11_class_match: 0,
             output: Vec::new(),
         }
     }
@@ -701,7 +740,13 @@ impl WorkerState {
         hit
     }
 
-    fn traverse(&mut self, rref: Vec<BinVec>, pivots: Vec<u32>, info: Rc<CachedInfo>) {
+    fn traverse(
+        &mut self,
+        rref: Vec<BinVec>,
+        pivots: Vec<u32>,
+        info: Rc<CachedInfo>,
+        #[cfg(feature = "t11_cache")] hash_c: u64,
+    ) {
         let k = rref.len() as u32;
         // Emit. Cloning Vec fields directly into the output row (instead of
         // through Rc) avoids retaining the Rc beyond emission.
@@ -756,10 +801,96 @@ impl WorkerState {
             let mut new_basis = rref.clone();
             new_basis.push(*v);
             let (d_rref, d_pivots) = row_reduce(&new_basis, self.n);
+
+            // --- CLASS-FINGERPRINT CACHE FAST PATH ---
+            // Hash D; on a cache hit where the cached
+            // parent_class_t11 disagrees with hash_c, cheap-reject
+            // without calling canon_info(D). See `ClassEntry` doc.
+            #[cfg(feature = "t11_cache")]
+            let hash_d: Option<u64> = if self.t11_enabled {
+                let t0 = std::time::Instant::now();
+                let h = crate::canon::compute_t11_hash(&d_rref, self.n);
+                if self.t11_blocklist.contains(&h) {
+                    self.stats_t11_blocklist_hits += 1;
+                    self.stats_t11_ns += t0.elapsed().as_nanos();
+                    Some(h)
+                } else if let Some(entry) = self.class_cache.get(&h).copied() {
+                    if entry.parent_class_t11 != hash_c {
+                        self.stats_t11_hits += 1;
+                        self.stats_t11_ns += t0.elapsed().as_nanos();
+                        #[cfg(debug_assertions)]
+                        {
+                            // A cheap-reject must agree with a full
+                            // recomputation. If this trips: either a
+                            // T11 cross-class collision is missing from
+                            // the blocklist, or the populate hook is
+                            // broken (sibling RREFs of D would also
+                            // disagree). Diagnostic prints the hash so
+                            // `dump_t11_blocklist.py` can reproduce.
+                            let info_check = self.canon_info(&d_rref);
+                            let parent_check = self.canonical_parent(
+                                &d_rref,
+                                &info_check.canonical_column_order,
+                            );
+                            let t11_check = crate::canon::compute_t11_hash(
+                                &parent_check, self.n,
+                            );
+                            debug_assert_eq!(
+                                entry.parent_class_t11, t11_check,
+                                "class-cache reject divergence at hash {:#x}: \
+                                 cached {:#x} vs recomputed {:#x}; \
+                                 likely missing blocklist entry at N={}",
+                                h, entry.parent_class_t11, t11_check, self.n,
+                            );
+                        }
+                        continue;
+                    }
+                    // Class matches: nauty still needed for the
+                    // Aut(D)-orbit refinement in `is_canonical_augmentation`.
+                    self.stats_t11_class_match += 1;
+                    self.stats_t11_ns += t0.elapsed().as_nanos();
+                    Some(h)
+                } else {
+                    self.stats_t11_ns += t0.elapsed().as_nanos();
+                    Some(h)
+                }
+            } else {
+                None
+            };
+
             let info_d = self.canon_info(&d_rref);
+
+            // --- POPULATE ON FIRST canon_info ---
+            // Compute parent_class_t11(D) = T11(canonical_parent(D)) and
+            // insert. The "populate on first call" timing (vs "on
+            // accept") is empirically critical: see prototype memory
+            // `project_class_cache_prototype.md` — accept-only delivered
+            // only 2.6× at N=22 because non-canonical-parent visits
+            // come first.
+            #[cfg(feature = "t11_cache")]
+            if let Some(h) = hash_d {
+                if !self.t11_blocklist.contains(&h)
+                    && !self.class_cache.contains_key(&h)
+                {
+                    let t0 = std::time::Instant::now();
+                    let parent_d = self.canonical_parent(
+                        &d_rref, &info_d.canonical_column_order,
+                    );
+                    let parent_class_t11 = crate::canon::compute_t11_hash(
+                        &parent_d, self.n,
+                    );
+                    self.class_cache.insert(h, ClassEntry { parent_class_t11 });
+                    self.stats_t11_misses += 1;
+                    self.stats_t11_ns += t0.elapsed().as_nanos();
+                }
+            }
+
             if !self.is_canonical_augmentation(k as usize, &rref, &d_rref, &info_d) {
                 continue;
             }
+            #[cfg(feature = "t11_cache")]
+            self.traverse(d_rref, d_pivots, info_d, hash_d.unwrap_or(0));
+            #[cfg(not(feature = "t11_cache"))]
             self.traverse(d_rref, d_pivots, info_d);
         }
     }
@@ -783,6 +914,7 @@ impl WorkerState {
         info: Rc<CachedInfo>,
         frontier_depth: u32,
         frontier: &mut Vec<SeedFrontier>,
+        #[cfg(feature = "t11_cache")] hash_c: u64,
     ) {
         let k = rref.len() as u32;
         if k == frontier_depth {
@@ -790,7 +922,11 @@ impl WorkerState {
                 Ok(info) => info,
                 Err(rc) => (*rc).clone(),
             };
-            frontier.push(SeedFrontier { rref, pivots, info: info_owned });
+            #[cfg(feature = "t11_cache")]
+            let seed_hash = hash_c;
+            #[cfg(not(feature = "t11_cache"))]
+            let seed_hash = 0u64;
+            frontier.push(SeedFrontier { rref, pivots, info: info_owned, hash: seed_hash });
             return;
         }
         self.output.push(EnumeratedRaw {
@@ -824,10 +960,80 @@ impl WorkerState {
             let mut new_basis = rref.clone();
             new_basis.push(*v);
             let (d_rref, d_pivots) = row_reduce(&new_basis, self.n);
+
+            // Class-fingerprint fast path — mirrors `traverse`.
+            #[cfg(feature = "t11_cache")]
+            let hash_d: Option<u64> = if self.t11_enabled {
+                let t0 = std::time::Instant::now();
+                let h = crate::canon::compute_t11_hash(&d_rref, self.n);
+                if self.t11_blocklist.contains(&h) {
+                    self.stats_t11_blocklist_hits += 1;
+                    self.stats_t11_ns += t0.elapsed().as_nanos();
+                    Some(h)
+                } else if let Some(entry) = self.class_cache.get(&h).copied() {
+                    if entry.parent_class_t11 != hash_c {
+                        self.stats_t11_hits += 1;
+                        self.stats_t11_ns += t0.elapsed().as_nanos();
+                        #[cfg(debug_assertions)]
+                        {
+                            let info_check = self.canon_info(&d_rref);
+                            let parent_check = self.canonical_parent(
+                                &d_rref,
+                                &info_check.canonical_column_order,
+                            );
+                            let t11_check = crate::canon::compute_t11_hash(
+                                &parent_check, self.n,
+                            );
+                            debug_assert_eq!(
+                                entry.parent_class_t11, t11_check,
+                                "class-cache reject divergence at hash {:#x}: \
+                                 cached {:#x} vs recomputed {:#x}; \
+                                 likely missing blocklist entry at N={}",
+                                h, entry.parent_class_t11, t11_check, self.n,
+                            );
+                        }
+                        continue;
+                    }
+                    self.stats_t11_class_match += 1;
+                    self.stats_t11_ns += t0.elapsed().as_nanos();
+                    Some(h)
+                } else {
+                    self.stats_t11_ns += t0.elapsed().as_nanos();
+                    Some(h)
+                }
+            } else {
+                None
+            };
+
             let info_d = self.canon_info(&d_rref);
+
+            #[cfg(feature = "t11_cache")]
+            if let Some(h) = hash_d {
+                if !self.t11_blocklist.contains(&h)
+                    && !self.class_cache.contains_key(&h)
+                {
+                    let t0 = std::time::Instant::now();
+                    let parent_d = self.canonical_parent(
+                        &d_rref, &info_d.canonical_column_order,
+                    );
+                    let parent_class_t11 = crate::canon::compute_t11_hash(
+                        &parent_d, self.n,
+                    );
+                    self.class_cache.insert(h, ClassEntry { parent_class_t11 });
+                    self.stats_t11_misses += 1;
+                    self.stats_t11_ns += t0.elapsed().as_nanos();
+                }
+            }
+
             if !self.is_canonical_augmentation(k as usize, &rref, &d_rref, &info_d) {
                 continue;
             }
+            #[cfg(feature = "t11_cache")]
+            self.traverse_seed(
+                d_rref, d_pivots, info_d, frontier_depth, frontier,
+                hash_d.unwrap_or(0),
+            );
+            #[cfg(not(feature = "t11_cache"))]
             self.traverse_seed(d_rref, d_pivots, info_d, frontier_depth, frontier);
         }
     }
@@ -837,14 +1043,16 @@ impl WorkerState {
     /// is documented on [`enumerate_doubly_even`].
     fn finalize(self) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
         #[cfg(feature = "t11_cache")]
-        let (t11_hits, t11_misses, t11_blocklist_hits, t11_ns) = (
+        let (t11_hits, t11_misses, t11_blocklist_hits, t11_ns, t11_class_match) = (
             self.stats_t11_hits as u128,
             self.stats_t11_misses as u128,
             self.stats_t11_blocklist_hits as u128,
             self.stats_t11_ns,
+            self.stats_t11_class_match as u128,
         );
         #[cfg(not(feature = "t11_cache"))]
-        let (t11_hits, t11_misses, t11_blocklist_hits, t11_ns) = (0u128, 0u128, 0u128, 0u128);
+        let (t11_hits, t11_misses, t11_blocklist_hits, t11_ns, t11_class_match) =
+            (0u128, 0u128, 0u128, 0u128, 0u128);
 
         let stats: Vec<u128> = vec![
             self.stats_canon_calls as u128,
@@ -877,6 +1085,7 @@ impl WorkerState {
             t11_misses,
             t11_blocklist_hits,
             t11_ns,
+            t11_class_match,
         ];
         let per_k_stats: Vec<Vec<u64>> = vec![
             self.stats_is_canon_aug_calls_by_k,
@@ -903,7 +1112,7 @@ impl WorkerState {
 /// Returns `(output, stats, per_k_stats)`:
 ///
 /// - `output` — `Vec<EnumeratedRaw>` in DFS order.
-/// - `stats` — flat vector (30 u128 fields). See layout below.
+/// - `stats` — flat vector (31 u128 fields). See layout below.
 /// - `per_k_stats` — rectangular `[10][max_k+1]` matrix of u64 counters
 ///   bucketed by the *parent* rank k (i.e., the rank of C; D has rank
 ///   k+1). Rows in fixed order:
@@ -914,7 +1123,7 @@ impl WorkerState {
 ///   (σ_Q-orbit-min rejection-rate audit). Rows 6–9 from the mass-stop
 ///   audit (same plan, Conway–Pless gluing follow-up).
 ///
-/// Stats vector layout (30 u128 fields, packed for pyo3 tuple-arity
+/// Stats vector layout (31 u128 fields, packed for pyo3 tuple-arity
 /// limits — pyo3 0.23 caps `IntoPyObject` tuples at 12 elements):
 ///
 /// ```text
@@ -945,10 +1154,11 @@ impl WorkerState {
 ///  23   nauty_tctotal_sum              (Q6 audit: total target-cell work)
 ///  24   nauty_maxlevel_sum             (Q6 audit: deepest level reached)
 ///  25   nauty_generators_sum           (Q6 audit: Aut generators found)
-///  26   t11_hits                       (feature t11_cache)
-///  27   t11_misses                     (feature t11_cache)
+///  26   t11_cheap_rejects              (feature t11_cache; was `t11_hits`)
+///  27   t11_cache_populates            (feature t11_cache; was `t11_misses`)
 ///  28   t11_blocklist_hits             (feature t11_cache)
 ///  29   t11_ns                         (feature t11_cache)
+///  30   t11_class_match                (feature t11_cache)
 /// ```
 ///
 /// Fields 4–10 came from the Engine B BFS-cost profile (see
@@ -970,7 +1180,14 @@ pub fn enumerate_doubly_even(
     let zero_rref: Vec<BinVec> = Vec::new();
     let zero_pivots: Vec<u32> = Vec::new();
     let info = state.canon_info(&zero_rref);
-    state.traverse(zero_rref, zero_pivots, info);
+    #[cfg(feature = "t11_cache")]
+    let hash_zero = crate::canon::compute_t11_hash(&zero_rref, n);
+    state.traverse(
+        zero_rref,
+        zero_pivots,
+        info,
+        #[cfg(feature = "t11_cache")] hash_zero,
+    );
     state.finalize()
 }
 
@@ -1041,12 +1258,15 @@ pub fn enumerate_doubly_even_parallel(
         let zero_rref: Vec<BinVec> = Vec::new();
         let zero_pivots: Vec<u32> = Vec::new();
         let zero_info = seed_state.canon_info(&zero_rref);
+        #[cfg(feature = "t11_cache")]
+        let hash_zero = crate::canon::compute_t11_hash(&zero_rref, n);
         seed_state.traverse_seed(
             zero_rref,
             zero_pivots,
             zero_info,
             frontier_depth,
             &mut frontier,
+            #[cfg(feature = "t11_cache")] hash_zero,
         );
     }
     if frontier.is_empty() {
@@ -1074,6 +1294,9 @@ pub fn enumerate_doubly_even_parallel(
             let inf_quota = vec![u128::MAX; (mk + 1) as usize];
             let mut worker = WorkerState::new(nn, mk, inf_quota, fact);
             while let Ok(seed) = task_rx.recv() {
+                #[cfg(feature = "t11_cache")]
+                worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info), seed.hash);
+                #[cfg(not(feature = "t11_cache"))]
                 worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
             }
             let _ = result_tx.send(worker.finalize());

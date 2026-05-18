@@ -37,13 +37,17 @@ traces_qd = []
 # globals are `_Thread_local`. Incompatible with `traces_qd` because
 # Traces uses non-TLS static work queues.
 parallel = ["dep:crossbeam-channel"]
-# T11 column-stratified weight-profile cache tier. A new fast path
-# between the RREF primary LRU and the nauty canon call: hash
-# (#w4,#w8,#w12,#w16,#w20) per column → look up cached canonical info.
-# Safe for hashes outside the per-N blocklist (known collisions extracted
-# offline by `dump_t11_blocklist`). Default OFF during initial integration;
-# debug builds assert every hit against nauty. See plan file
-# `last-time-we-profiled-floofy-lollipop.md`.
+# Class-fingerprint cache: per-worker FxHashMap keyed by `compute_t11_hash(D)`,
+# storing only the class-invariant `parent_class_t11 = T11(canonical_parent(D))`.
+# Dispatch lives in `traverse`/`traverse_seed` BEFORE `canon_info(D)`; on a
+# cache hit where the cached value disagrees with the caller's hash_c =
+# T11(class(C)), the candidate is cheap-rejected without invoking nauty.
+# Blocklisted hashes (`t11_blocklist::*`, extracted offline by
+# `dump_t11_blocklist.py`) are never populated and always fall through to
+# nauty. Default OFF during initial integration; debug builds assert every
+# cheap-reject against a full recomputation. Supersedes the earlier
+# σ-storing T11 cache tier (deleted; was unsound — see plan file
+# `implement-and-bench-the-logical-lovelace.md`).
 t11_cache = ["dep:rustc-hash"]
 
 [dependencies]
