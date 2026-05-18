@@ -151,16 +151,31 @@ See `/workspace/markdown/architecture/04-optimisations.md` for the
 per-lever write-up and `architecture/05-retrospective.md` for the
 sign-off retrospective.
 
-Headline: **~20× cumulative at `N = 22`** since the pre-kernel
-D6 baseline (152 s → 7.57 s); **> 80×** since the pre-Q_C original
-baseline (> 600 s → 7.57 s at `N = 22`). `N = 20` runs in 1.07 s;
-`N = 24` in 107 s. We beat Sage's `self_orthogonal_binary_codes`
-by 25× end-to-end at `N = 22`.
+Headline: **~129× cumulative at `N = 22`** since the pre-kernel
+D6 baseline (152 s → 1.18 s with 16t, depth=4); **> 500×** since
+the pre-Q_C original baseline (> 600 s → 1.18 s at `N = 22`).
+Parallel kernel: `N = 20` in 0.22 s; `N = 22` in 1.18 s; `N = 24`
+in 12.3 s; **`N = 26` in 218 s** (494 K classes, all 12 non-trivial
+DFGHILM cells match exactly). Sequential at `N = 22` is 6.87 s.
+We beat Sage's `self_orthogonal_binary_codes` by **~308× end-to-end
+at `N = 22`** (Sage 363.85 s, single-threaded; parallelising Sage
+would be weeks of Cython surgery).
+
+Scaling forecast for `N ≥ 28` lives at
+`/workspace/markdown/architecture/06-scaling-frontier.md`: N=28
+reachable today (~1 hr at 20 threads), N=29 needs the streaming-
+output refactor (1–2 days), N=30 needs streaming + ≥256 GB RAM or
+a small cluster.
 
 Cumulative levers, oldest first:
 
 1. **D2** Quotient-space candidate enumeration (DFGHILM B.3).
-2. **D3** LRU-cached `canon_info`.
+2. **D3** Two-tier canon cache (`rust/src/enumerate.rs:111, 157`):
+   primary LRU keyed by RREF (capacity tunable via
+   `DOUBLY_EVEN_CANON_CACHE_CAP`, default 1M) + secondary
+   weight-enumerator-keyed bucket cache. **The cap is load-bearing
+   at N ≥ 26** — without it, N=26 OOMs at ~500K cached entries per
+   worker × 20 workers. Commit `fd530cb`.
 3. **D4** Weight-enumerator prefilter on the orbit BFS.
 4. **D5a/b** Verified closed-form `gaborit_sigma` + mass-stop
    shortcut in the recursion.
@@ -176,8 +191,9 @@ Cumulative levers, oldest first:
 11. **D12** Paired-iso (Leon §10(i)) prefilter — shipped **dormant**.
 12. **Q6 sparsenauty audit** (2026-05-17) — full `expert-review/
     05-nauty-traces-audit.md` §5 priority list executed:
-    `schreier = TRUE` (-5 %), densenauty (+ 39 / + 42 / + 260 %),
-    Traces (+ 2 %) all regress. `78 µs/call` is the sparsenauty
+    `schreier = TRUE` (+5 %), densenauty (+ 39 / + 42 / + 260 %),
+    Traces (+ 2 %) all regress (all Δ are wall-time slower than
+    baseline 6.97 s). `78 µs/call` is the sparsenauty
     algorithmic floor at this graph shape. Phase 0 `statsblk`
     counters (`numnodes`, `tctotal`, `maxlevel`, `numgenerators`)
     added to the kernel for future audits; four dormant Cargo
@@ -226,10 +242,16 @@ maturin build --release --features parallel -m rust/Cargo.toml \
 ```
 
 At runtime, set `DOUBLY_EVEN_THREADS` (16 on a 13700K is the sweet
-spot for N ≤ 22; 20 at N = 24). `DOUBLY_EVEN_FRONTIER_DEPTH`
-defaults to 4 and rarely needs tweaking — at N = 24 a value of 5
-is marginally better because the tree is bigger and the deeper
-split gives finer load balance.
+spot for N ≤ 22; 20 at N ≥ 24). `DOUBLY_EVEN_FRONTIER_DEPTH`
+defaults to 4 and rarely needs tweaking — at N ≥ 24 a value of 5
+is better because the tree is bigger and the deeper split gives
+finer load balance.
+
+For `N ≥ 26`, also cap the per-worker canon cache via
+`DOUBLY_EVEN_CANON_CACHE_CAP` (default 1,000,000 entries; lower if
+RAM-constrained — at N = 26 with 20 workers, ~500 K cap × 20 = ~64 GB
+canon-cache footprint plus the output Vec). Without a cap, N = 26
+OOMs; this env var is the unlock that landed in `fd530cb`.
 
 ```sh
 DOUBLY_EVEN_THREADS=16 uv run python scripts/bench.py \
@@ -237,6 +259,10 @@ DOUBLY_EVEN_THREADS=16 uv run python scripts/bench.py \
 # Larger N — try the deeper cut for finer balance:
 DOUBLY_EVEN_THREADS=20 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
   uv run python scripts/bench.py --label parallel-t20-d5 --N 24
+# N = 26 — cap canon cache to avoid OOM at 20 workers:
+DOUBLY_EVEN_THREADS=20 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
+  DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
+  uv run python scripts/bench.py --label parallel-t20-d5-n26 --N 26
 ```
 
 V3+ improvements still deferred: per-worker mass-stop using
