@@ -11,7 +11,7 @@ name = "doubly_even_kernel"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
+default = ["t11_cache"]
 # Enable the Leon §10(i) paired-refinement equivalence verifier as the
 # canon_info secondary-cache fast path. With this off (default), the
 # kernel is byte-for-byte identical to the pre-verifier baseline.

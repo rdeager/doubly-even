@@ -151,15 +151,17 @@ See `/workspace/markdown/architecture/04-optimisations.md` for the
 per-lever write-up and `architecture/05-retrospective.md` for the
 sign-off retrospective.
 
-Headline: **~129× cumulative at `N = 22`** since the pre-kernel
-D6 baseline (152 s → 1.18 s with 16t, depth=4); **> 500×** since
-the pre-Q_C original baseline (> 600 s → 1.18 s at `N = 22`).
-Parallel kernel: `N = 20` in 0.22 s; `N = 22` in 1.18 s; `N = 24`
-in 12.3 s; **`N = 26` in 218 s** (494 K classes, all 12 non-trivial
-DFGHILM cells match exactly). Sequential at `N = 22` is 6.87 s.
-We beat Sage's `self_orthogonal_binary_codes` by **~308× end-to-end
-at `N = 22`** (Sage 363.85 s, single-threaded; parallelising Sage
-would be weeks of Cython surgery).
+Headline: **~205× cumulative at `N = 22`** since the pre-kernel
+D6 baseline (152 s → 0.75 s with class-cache + 16t, depth=4);
+**> 800×** since the pre-Q_C original baseline (> 600 s → 0.75 s
+at `N = 22`). Parallel kernel: `N = 20` in 0.16 s; `N = 22` in
+0.75 s; `N = 24` in 7.5 s; **`N = 26` in 218 s** (494 K classes,
+all 12 non-trivial DFGHILM cells match exactly — pre-D14 number;
+re-bench in progress). Sequential at `N = 22` is **1.65 s**
+(class-cache; pre-D14 was 6.87 s). We beat Sage's
+`self_orthogonal_binary_codes` by **~485× end-to-end at `N = 22`**
+(Sage 363.85 s, single-threaded; parallelising Sage would be
+weeks of Cython surgery).
 
 Scaling forecast for `N ≥ 28` lives at
 `/workspace/markdown/architecture/06-scaling-frontier.md`: N=28
@@ -218,6 +220,32 @@ Cumulative levers, oldest first:
     kwarg on the kernel entry. Conflicts with `traces_qd` (Traces
     uses non-TLS static work queues) — guarded by `compile_error!`.
     Determinism harness in `rust/tests/parallel_determinism.rs`.
+14. **D14 Class-fingerprint cache** (2026-05-18) — per-worker
+    `FxHashMap<u64, ClassEntry>` keyed by `compute_t11_hash(D)`,
+    storing only `parent_class_t11 = T11(canonical_parent(D))`
+    (class-invariant; no σ). Dispatch sits in
+    `traverse`/`traverse_seed` BEFORE `canon_info(D)`; on a cache
+    hit where the cached parent_T11 disagrees with the caller's
+    `hash_C = T11(class(C))`, the candidate is cheap-rejected — no
+    nauty call. Populate on the FIRST canon_info per hash
+    (regardless of McKay outcome) is critical: the alternative
+    "populate-on-accept" delivers only 2.6× at N=22 because
+    non-canonical-parent visits arrive before the canonical accept.
+    **4.18× sequential at N=22** (6.88 s → 1.65 s);
+    **1.58× parallel-16t** (1.18 s → 0.75 s);
+    **1.63× parallel-20t-d5 at N=24** (12.3 s → 7.54 s). The
+    parallel speedup is bounded by per-worker cache duplication:
+    each of the N workers populates its own slice independently
+    (N=22 16t: ~7 populates per class on average instead of 1).
+    Cache value is RREF-independent, so the populate work is
+    sound but duplicated; a V2 with a shared concurrent cache
+    (DashMap/RwLock) could close the gap. Sequential remains the
+    headline. Default-on Cargo feature `t11_cache`; debug builds
+    verify every cheap-reject against a fresh recomputation.
+    Per-N blocklists for T11 cross-class collisions in
+    `rust/src/t11_blocklist.rs`; regenerate via
+    `scripts/dump_t11_blocklist.py`. Superseded the dormant
+    σ-storing T11 cache (deleted; was unsound because σ is per-RREF).
 
 `bench.py` lives in `scripts/`; per-step JSON records are in
 `scripts/bench-results/` (gitignored). Rust microbench for
@@ -246,6 +274,15 @@ spot for N ≤ 22; 20 at N ≥ 24). `DOUBLY_EVEN_FRONTIER_DEPTH`
 defaults to 4 and rarely needs tweaking — at N ≥ 24 a value of 5
 is better because the tree is bigger and the deeper split gives
 finer load balance.
+
+**With D14 class-cache enabled**, depth has a different optimum:
+deeper frontier = more workers = more cache rebuild. Empirically
+at N=22 (16t), depth=3 (0.732 s) marginally beats depth=4
+(0.748 s); depth=2 is too shallow (0.943 s; under-parallelism).
+The default of 4 still works fine; users tuning for the very
+best may try depth=3 at smaller N. See
+[[class-cache-landed]] for the per-worker cache duplication
+discussion and the open V2 direction (shared concurrent cache).
 
 For `N ≥ 26`, also cap the per-worker canon cache via
 `DOUBLY_EVEN_CANON_CACHE_CAP` (default 1,000,000 entries; lower if
