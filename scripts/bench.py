@@ -57,7 +57,7 @@ except ImportError:  # pragma: no cover
 
 # Layout of the kernel's `stats` vector — kept in sync by hand with
 # `rust/src/enumerate.rs::enumerate_doubly_even` doc. Indices into the
-# returned 30-element list.
+# returned 32-element list.
 KERNEL_STATS_LAYOUT: tuple[str, ...] = (
     "canon_calls",                # 0
     "primary_hits",               # 1
@@ -86,10 +86,11 @@ KERNEL_STATS_LAYOUT: tuple[str, ...] = (
     "nauty_maxlevel_sum",         # 24 — Q6: deepest level reached
     "nauty_generators_sum",       # 25 — Q6: Aut generators found
     "t11_cheap_rejects",          # 26 — class-cache: parent T11 mismatch → skipped canon_info
-    "t11_cache_populates",        # 27 — class-cache: first canon_info populated entry
+    "t11_cache_populates",        # 27 — class-cache: per-worker lookup misses (D14-V2: each worker that *reached* the populate path; concurrent workers may have inserted first)
     "t11_blocklist_hits",         # 28 — class-cache: blocklisted hash, fell through to canon_info
     "t11_ns",                     # 29 — class-cache: hash + lookup + populate time
     "t11_class_match",            # 30 — class-cache: parent matched, fell through to canon_info
+    "t11_cache_unique_inserts",   # 31 — D14-V2: per-worker successful inserts into shared cache; sum across workers = class_cache.len(). Ratio 27/31 = duplication factor (V1 ≈ 7×; V2 target 1×).
 )
 
 
@@ -294,6 +295,7 @@ def format_table(results: list[PerNResult]) -> str:
             lines.append(
                 f"{'N':>4} {'cheap_rej':>10} {'populate':>10} "
                 f"{'cls_match':>10} {'blocklist':>10} "
+                f"{'unique':>8} {'dup×':>6} "
                 f"{'reject%':>10} {'t11_ms':>9}"
             )
             for r in results:
@@ -302,11 +304,18 @@ def format_table(results: list[PerNResult]) -> str:
                 pop = ks.get("t11_cache_populates", 0)
                 mat = ks.get("t11_class_match", 0)
                 bl = ks.get("t11_blocklist_hits", 0)
+                uniq = ks.get("t11_cache_unique_inserts", 0)
+                # Ratio of per-worker populate-path entries to global
+                # successful inserts — V1 parallel was ~7× (per-worker
+                # caches duplicated populates); V2 target is ~1× (shared
+                # cache collapses races).
+                dup = (pop / uniq) if uniq else 0.0
                 t11_ms = ks.get("t11_ns", 0) / 1_000_000.0
                 total = rej + pop + mat + bl
                 rate = 100.0 * rej / max(total, 1)
                 lines.append(
                     f"{r.N:>4} {rej:>10} {pop:>10} {mat:>10} {bl:>10} "
+                    f"{uniq:>8} {dup:>5.2f}× "
                     f"{rate:>9.1f}% {t11_ms:>9.2f}"
                 )
     return "\n".join(lines)

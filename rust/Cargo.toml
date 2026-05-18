@@ -48,7 +48,7 @@ parallel = ["dep:crossbeam-channel"]
 # cheap-reject against a full recomputation. Supersedes the earlier
 # σ-storing T11 cache tier (deleted; was unsound — see plan file
 # `implement-and-bench-the-logical-lovelace.md`).
-t11_cache = ["dep:rustc-hash"]
+t11_cache = ["dep:rustc-hash", "dep:dashmap"]
 
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }
@@ -58,6 +58,11 @@ crossbeam-channel = { version = "0.5", optional = true }
 # Fixed-seed deterministic hasher for the T11 cache key (under
 # `t11_cache` feature). Same hasher as rustc itself; byte-stable.
 rustc-hash = { version = "2", optional = true }
+# Sharded concurrent map for the D14-V2 shared class-fingerprint cache:
+# one Arc<DashMap> is shared by the seeder + every worker so populates
+# are not duplicated 16×. See plan file
+# `last-session-we-found-vectorized-sifakis.md`.
+dashmap = { version = "5", optional = true }
 # Bounded LRU for the per-worker canon cache. At N ≥ 26 the canon
 # cache grows unbounded without this — N=26 with 20 workers hit the
 # 48 GB cgroup OOM. Hit rate is only 3–5 %, but each hit saves ~80 µs,

@@ -61,12 +61,12 @@ fn check_parallel_matches_sequential(
     quota: Vec<u128>,
     factorial_n: u128,
 ) {
-    let (out_seq, _stats_seq, _pk_seq) =
+    let (out_seq, stats_seq, _pk_seq) =
         enumerate_doubly_even(n, max_k, quota.clone(), factorial_n);
     let seq_rows = canonical_rows(out_seq);
 
     for &nt in &[2usize, 4, 8] {
-        let (out_par, _stats_par, _pk_par) = enumerate_doubly_even_parallel(
+        let (out_par, stats_par, _pk_par) = enumerate_doubly_even_parallel(
             n,
             max_k,
             quota.clone(),
@@ -86,6 +86,21 @@ fn check_parallel_matches_sequential(
             seq_rows, par_rows,
             "N={n} max_k={max_k} threads={nt}: canonical-row set diverged"
         );
+        // D14-V2: slot 31 = `t11_cache_unique_inserts` is the number
+        // of distinct non-blocklisted T11 hashes the recursion
+        // populates. Independent of parallelism: same search tree
+        // visits the same hashes regardless of thread count. Verifies
+        // the shared-cache invariant
+        // `sum(stats_t11_populates_inserted) == class_cache.len()`.
+        #[cfg(feature = "t11_cache")]
+        {
+            assert_eq!(
+                stats_seq[31], stats_par[31],
+                "N={n} max_k={max_k} threads={nt}: \
+                 t11_cache_unique_inserts diverged (seq={} par={})",
+                stats_seq[31], stats_par[31],
+            );
+        }
     }
 }
 
