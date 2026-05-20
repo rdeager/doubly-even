@@ -18,8 +18,6 @@ use pyo3::wrap_pyfunction;
 
 use crate::types::{BinVec, ColPerm, Mat};
 use crate::{experimental, orbit, quotient, types};
-#[cfg(feature = "nauty_hist")]
-use crate::canon;
 
 // ----------------------------------------- debug-submodule wrappers
 //
@@ -420,7 +418,7 @@ fn py_enumerate_doubly_even_with_profile(
 #[pyfunction]
 #[pyo3(name = "drain_nauty_hist")]
 fn py_drain_nauty_hist() -> Vec<(u64, u64, u64, i32, i32, u32, u32, u32, u8)> {
-    canon::nauty_hist_drain()
+    experimental::canon_hist::drain()
         .into_iter()
         .map(|r| {
             (
