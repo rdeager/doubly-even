@@ -1,9 +1,9 @@
-//! **EXPERIMENTAL / D12 dormant verifier.** Leon §10(i) paired-refinement
-//! isomorphism test for binary linear codes. Active only under cargo
-//! feature `equivalence_verifier` (default OFF); closed 2026-05-20 as the
-//! per-probe cost explodes with N (see `project_verifier_dormant.md`).
-//! Kept as the worked example of the algorithm and as a possible
-//! recovery substrate.
+//! `crate::experimental::paired_iso` — Leon §10(i) paired-refinement
+//! isomorphism test for binary linear codes. **EXPERIMENTAL / D12 dormant
+//! verifier**, active only under cargo feature `equivalence_verifier`
+//! (default OFF); closed 2026-05-20 as the per-probe cost explodes with
+//! N (see `project_verifier_dormant.md`). Kept as the worked example of
+//! the algorithm and as a possible recovery substrate.
 //!
 //! Port of `doubly_even.canon.experimental.paired_iso` with the witness
 //! permutation π

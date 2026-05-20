@@ -56,14 +56,16 @@ rust/        Rust kernel (doubly_even_kernel), built with maturin
   src/canon.rs       Q_D-graph low-weight-incidence canonicaliser (D10)
                       + native sparsenauty path; default dispatch.
   src/enumerate.rs   Native enumerate_doubly_even recursion (D11).
-                      EXPERIMENTAL banners on the modules below.
-  src/feulner.rs     Feulner column-side canonicaliser (D9, ~1000 LOC,
+  src/permutations.rs Schreier-Sims + perm_compose / perm_inverse /
+                      compute_column_orbits shared utilities.
+  src/experimental/  Dormant audit substrate — see EXPERIMENTAL.md
+    feulner.rs       Feulner column-side canonicaliser (D9, ~1000 LOC,
                       reference / diff oracle; dispatch closed).
-  src/feulner_clb.rs Jerrum CLB + Lemma 5.9 (Feulner §5.2 substrate).
-  src/paired_iso.rs  Leon §10(i) verifier (D12, dormant under
+    feulner_clb.rs   Jerrum CLB + Lemma 5.9 (Feulner §5.2 substrate).
+    paired_iso.rs    Leon §10(i) verifier (D12, dormant under
                       `equivalence_verifier` feature).
-  src/invariants.rs  WL + T11/T12/T13 collision-experiment substrate.
-  Cargo.toml          Feature flags (all default OFF): parallel,
+    invariants.rs    WL + T11/T12/T13 collision-experiment substrate.
+  Cargo.toml         Feature flags (all default OFF): parallel,
                       equivalence_verifier, dense_qd, dense_qd_tc0,
                       dense_qd_refinvar, traces_qd, nauty_hist.
 ```

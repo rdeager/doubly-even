@@ -22,7 +22,7 @@ Everything below is quarantined.
 ## Feulner D9 (column-side partition-refinement reference oracle)
 
 - Python: `src/doubly_even/canon/experimental/feulner.py`
-- Rust: `rust/src/feulner.rs`, `rust/src/feulner_clb.rs`
+- Rust: `rust/src/experimental/feulner.rs`, `rust/src/experimental/feulner_clb.rs`
 - Reached only via `DOUBLY_EVEN_CANON_BACKEND=feulner` env var; the
   spine `canon/nauty.py` lazily imports the module under that flag.
 
@@ -55,7 +55,7 @@ starting point.
 ## Paired-iso D12 (Leon §10(i) verifier)
 
 - Python: `src/doubly_even/canon/experimental/paired_iso.py`
-- Rust: `rust/src/paired_iso.rs`
+- Rust: `rust/src/experimental/paired_iso.rs`
 - Cargo feature `equivalence_verifier` (default OFF). Spine dispatch
   only when the feature is enabled.
 
@@ -82,7 +82,7 @@ doubly-even shape; useful audit substrate if anyone revisits the
 
 ## WL / T11 / T12 / T13 cheap invariants (research substrate)
 
-- Rust: `rust/src/invariants.rs`
+- Rust: `rust/src/experimental/invariants.rs`
 - Bench scripts: `scripts/experimental/wl_collision_experiment.py`,
   `scripts/experimental/collision_experiment*.py`,
   `scripts/experimental/cubic_tensor_experiment.py`,

@@ -1,7 +1,8 @@
-//! **EXPERIMENTAL / Feulner reference substrate.** Jerrum's complete
-//! labelled branching (CLB) + Feulner §5.2 Lemma 5.9 topological-sort
-//! test. Driven only by the dormant `feulner.rs` canonicaliser; not
-//! reached by the active dispatch.
+//! `crate::experimental::feulner_clb` — Jerrum's complete labelled
+//! branching (CLB) + Feulner §5.2 Lemma 5.9 topological-sort test.
+//! **EXPERIMENTAL / Feulner reference substrate**, driven only by the
+//! dormant `feulner.rs` canonicaliser; not reached by the active
+//! dispatch.
 //!
 //! Direct port of the Python staging in
 //! `doubly_even.canon.experimental.feulner._LabelledBranching`; the

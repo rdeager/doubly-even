@@ -1,5 +1,6 @@
-//! **EXPERIMENTAL / reference oracle.** Feulner-style column-side
-//! canonicaliser, binary + permutation-only.
+//! `crate::experimental::feulner` — Feulner column-side canonicaliser
+//! (D9, ~1000 LOC). **EXPERIMENTAL / reference oracle**, not on the
+//! kernel hot path.
 //!
 //! Active dispatch uses `canon::canon_info_qd_native` (sparsenauty on the
 //! Q_D bipartite graph). This module is kept in tree as the diff oracle
