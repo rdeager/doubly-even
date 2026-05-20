@@ -43,7 +43,7 @@ compile_error!(
 
 use crate::canon::{canon_info_native, canon_info_qd_native, NativeCanonInfo, QD_GRAPH_THRESHOLD};
 #[cfg(feature = "dense_qd")]
-use crate::canon::canon_info_qd_dense;
+use crate::experimental::canon_dense_qd::canon_info_qd_dense;
 #[cfg(feature = "traces_qd")]
 use crate::canon::canon_info_qd_traces;
 use crate::candidates::doubly_even_candidates_q;

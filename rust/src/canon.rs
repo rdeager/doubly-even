@@ -21,30 +21,6 @@ use std::ptr;
 use nauty_Traces_sys::{
     optionblk, sparsegraph, sparsenauty, statsblk, FALSE, TRUE,
 };
-#[cfg(feature = "dense_qd")]
-use nauty_Traces_sys::{densenauty, empty_graph, graph, ADDONEEDGE, SETWORDSNEEDED};
-// `refinvar` is not re-exported by `nauty-Traces-sys` (only `adjacencies`
-// and `adjacencies_sg` are). It is in libnauty under its C symbol name;
-// declare a Rust extern that matches `optionblk::invarproc`'s signature
-// — see the bindings: 11 args, no return.
-#[cfg(feature = "dense_qd_refinvar")]
-use nauty_Traces_sys::{boolean, graph as nauty_graph};
-#[cfg(feature = "dense_qd_refinvar")]
-extern "C" {
-    fn refinvar(
-        g: *mut nauty_graph,
-        lab: *mut c_int,
-        ptn: *mut c_int,
-        level: c_int,
-        numcells: c_int,
-        tvpos: c_int,
-        invar: *mut c_int,
-        invararg: c_int,
-        digraph: boolean,
-        m: c_int,
-        n: c_int,
-    );
-}
 #[cfg(feature = "traces_qd")]
 use nauty_Traces_sys::{Traces, TracesOptions, TracesStats};
 
@@ -93,10 +69,10 @@ pub struct NativeCanonInfo {
 // We collect them into a thread-local Vec; the callback runs synchronously
 // inside `sparsenauty`, so the lifetime is bounded by the call site.
 thread_local! {
-    static AUT_BUFFER: RefCell<Vec<Vec<u32>>> = const { RefCell::new(Vec::new()) };
+    pub(crate) static AUT_BUFFER: RefCell<Vec<Vec<u32>>> = const { RefCell::new(Vec::new()) };
     /// Number of left-side (codeword) vertices; the callback needs to know
     /// where to slice the column part out of the full permutation.
-    static LEFT_VERTEX_COUNT: RefCell<u32> = const { RefCell::new(0) };
+    pub(crate) static LEFT_VERTEX_COUNT: RefCell<u32> = const { RefCell::new(0) };
 }
 
 // E1/E2 sparsenauty histogram (Cargo feature `nauty_hist`, default OFF)
@@ -105,7 +81,7 @@ thread_local! {
 #[cfg(feature = "nauty_hist")]
 use crate::experimental::canon_hist::{push as nauty_hist_push, NautyCallRecord};
 
-extern "C" fn auto_callback(
+pub(crate) extern "C" fn auto_callback(
     _count: c_int,
     perm: *mut c_int,
     _orbits: *mut c_int,
@@ -454,7 +430,7 @@ fn collect_low_weight_codewords(
 /// - `lab` lists vertices in the order each cell is laid out; `ptn[i] = 0`
 ///   marks cell boundaries (nauty convention).
 #[allow(clippy::type_complexity)]
-fn build_low_weight_sparsegraph(
+pub(crate) fn build_low_weight_sparsegraph(
     rref: &[BinVec],
     n: u32,
 ) -> Option<(
@@ -655,102 +631,6 @@ pub fn canon_info_qd_native(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> 
     }
 
     // Restrict canonical labelling to columns and invert into old→new form.
-    let mut new_to_old_right: Vec<u32> = Vec::with_capacity(r);
-    for new_index in 0..total {
-        let old_vertex = lab[new_index] as usize;
-        if old_vertex >= l {
-            new_to_old_right.push((old_vertex - l) as u32);
-        }
-    }
-    let mut canonical_column_order = vec![0u32; r];
-    for (new_col, &old_col) in new_to_old_right.iter().enumerate() {
-        canonical_column_order[old_col as usize] = new_col as u32;
-    }
-
-    let column_orbits: Vec<u32> = orbits[l..].iter().map(|&x| x as u32).collect();
-    let aut_generators = AUT_BUFFER.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
-
-    Some(NativeCanonInfo {
-        canonical_column_order,
-        aut_generators,
-        column_orbits,
-        grpsize1: stats.grpsize1,
-        grpsize2: stats.grpsize2 as i32,
-        numnodes: stats.numnodes as u64,
-        tctotal: stats.tctotal as u64,
-        maxlevel: stats.maxlevel as i32,
-        numgenerators: stats.numgenerators as i32,
-    })
-}
-
-// ---------------------------------------------------- densenauty Q_D-graph
-//
-// Q6 audit Phase 2: at our graph size (`|C_low| + N ≤ ~54` vertices), the
-// dense adjacency is a single 64-bit setword per row (m=1) — total ≤ 432
-// bytes, fits in 7 cache lines. Sparse representation forces nauty's
-// `refine_sg` to pointer-chase through `e[]`/`v[]`/`d[]` triples for every
-// cell-membership query; dense `refine` operates on bitwise AND of two
-// setwords. Both for cache footprint and refinement primitive cost, dense
-// can win at this size — never measured.
-//
-// Build feature `dense_qd` swaps the dispatch in `enumerate.rs`. The sparse
-// implementation above (`canon_info_qd_native`) stays compiled in as the
-// fallback.
-
-#[cfg(feature = "dense_qd")]
-pub fn canon_info_qd_dense(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> {
-    let (v, d, e, mut lab, mut ptn, l) = build_low_weight_sparsegraph(rref, n)?;
-    let r: usize = n as usize;
-    let total = l + r;
-
-    // Dense adjacency: m setwords per row, total*m setwords total.
-    let m = SETWORDSNEEDED(total);
-    let mut g: Vec<graph> = empty_graph(m, total);
-    // Walk left-side adjacency (codeword → column); ADDONEEDGE bidirects.
-    for u in 0..l {
-        let start = v[u];
-        let end = start + d[u] as usize;
-        for &w in &e[start..end] {
-            ADDONEEDGE(&mut g, u, w as usize, m);
-        }
-    }
-    let mut canong: Vec<graph> = empty_graph(m, total);
-
-    let mut orbits = vec![0i32; total];
-
-    let mut options = optionblk::default();
-    options.getcanon = TRUE;
-    options.defaultptn = FALSE;
-    options.userautomproc = Some(auto_callback);
-    #[cfg(feature = "dense_qd_tc0")]
-    {
-        options.tc_level = 0;
-    }
-    #[cfg(feature = "dense_qd_refinvar")]
-    {
-        options.invarproc = Some(refinvar);
-        options.mininvarlevel = 1;
-        options.maxinvarlevel = 1;
-    }
-    let mut stats = statsblk::default();
-
-    AUT_BUFFER.with(|cell| cell.borrow_mut().clear());
-    LEFT_VERTEX_COUNT.with(|cell| *cell.borrow_mut() = l as u32);
-
-    unsafe {
-        densenauty(
-            g.as_mut_ptr(),
-            lab.as_mut_ptr(),
-            ptn.as_mut_ptr(),
-            orbits.as_mut_ptr(),
-            &mut options,
-            &mut stats,
-            m as c_int,
-            total as c_int,
-            canong.as_mut_ptr(),
-        );
-    }
-
     let mut new_to_old_right: Vec<u32> = Vec::with_capacity(r);
     for new_index in 0..total {
         let old_vertex = lab[new_index] as usize;

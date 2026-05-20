@@ -19,6 +19,8 @@
 //! module imports from them — the `experimental` namespace is a one-way
 //! barrier the reader can ignore when tracing the active flow.
 
+#[cfg(feature = "dense_qd")]
+pub mod canon_dense_qd;
 #[cfg(feature = "nauty_hist")]
 pub mod canon_hist;
 pub mod feulner;
