@@ -100,12 +100,66 @@ pub(crate) struct SeedFrontier {
     pub info: CachedInfo,
 }
 
+/// D13-V4 cut 4: shared cross-worker mass tracker for the parallel path.
+///
+/// Each worker (and the seeder) atomically adds `N!/|Aut|` to `mass[k]`
+/// when it emits a code at rank `k`. Workers then consult
+/// `is_full(k+1)` before descending — once any subset of workers has
+/// collectively emitted enough mass at rank `k+1` to hit `quota[k+1]`,
+/// the remaining workers can prune that subtree just as the sequential
+/// mass-stop does. The invariant is one-directional: skipping when
+/// `global_mass >= quota` can only over-search relative to the optimum
+/// (workers may briefly continue past the tipping point before noticing),
+/// never under-search. The class count is still correct.
+///
+/// `std::sync::Mutex<Vec<u128>>` rather than a per-rank atomic because
+/// (a) u128 has no native atomic op on x86-64 and (b) the lock is held
+/// for nanoseconds per emission — well under nauty's ≥ 78 µs/call cost.
+#[cfg(feature = "parallel")]
+pub(crate) struct GlobalMassTracker {
+    mass: std::sync::Mutex<Vec<u128>>,
+    quota: Vec<u128>,
+}
+
+#[cfg(feature = "parallel")]
+impl GlobalMassTracker {
+    pub(crate) fn new(quota: Vec<u128>) -> Self {
+        let len = quota.len();
+        Self {
+            mass: std::sync::Mutex::new(vec![0u128; len]),
+            quota,
+        }
+    }
+
+    /// Atomically add `delta` to `mass[k]`.
+    pub(crate) fn add(&self, k: usize, delta: u128) {
+        let mut m = self.mass.lock().expect("global mass tracker poisoned");
+        m[k] = m[k].checked_add(delta).expect("global mass overflow");
+    }
+
+    /// True iff `mass[k] >= quota[k]`. Returns `false` for out-of-range `k`.
+    pub(crate) fn is_full(&self, k: usize) -> bool {
+        if k >= self.quota.len() {
+            return false;
+        }
+        let m = self.mass.lock().expect("global mass tracker poisoned");
+        m[k] >= self.quota[k]
+    }
+}
+
 pub(crate) struct WorkerState {
     n: u32,
     max_k: u32,
     quota: Vec<u128>,
     mass_at_k: Vec<u128>,
     factorial_n: u128,
+    /// D13-V4 cut 4: when `Some`, every emit atomically increments
+    /// `global_mass.mass[k]` and the candidate-loop mass-stop checks
+    /// consult `global_mass.is_full(k+1)` instead of the local
+    /// `self.mass_at_k`. Set by the parallel driver; `None` for the
+    /// sequential path (no-op cost when absent).
+    #[cfg(feature = "parallel")]
+    global_mass: Option<std::sync::Arc<GlobalMassTracker>>,
     /// When true, the two mass-stop branches in [`traverse`] (`mass_at_k[k+1]
     /// >= quota[k+1]` checks before and inside the candidate loop) become
     /// no-ops. Read once from `DOUBLY_EVEN_NO_MASS_STOP` at construction;
@@ -274,6 +328,8 @@ impl WorkerState {
             mass_at_k: vec![0u128; len],
             factorial_n,
             skip_mass_stop,
+            #[cfg(feature = "parallel")]
+            global_mass: None,
             canon_cache: LruCache::new(canon_cache_capacity()),
             stats_is_canon_aug_calls_by_k: vec![0u64; len],
             stats_parent_eq_hits_by_k: vec![0u64; len],
@@ -601,6 +657,27 @@ impl WorkerState {
         hit
     }
 
+    /// D13-V4 cut 4: shared mass-stop predicate. When `global_mass` is
+    /// `Some` (parallel path), consult the cross-worker counter; otherwise
+    /// fall back to the local `mass_at_k` (sequential, byte-identical
+    /// behaviour to pre-V4).
+    #[inline]
+    fn next_rank_full(&self, k: usize) -> bool {
+        #[cfg(feature = "parallel")]
+        if let Some(gm) = self.global_mass.as_ref() {
+            return gm.is_full(k + 1);
+        }
+        self.mass_at_k[k + 1] >= self.quota[k + 1]
+    }
+
+    /// D13-V4 cut 4: wire a worker (or the seeder) into the shared
+    /// cross-worker mass tracker. Called by `enumerate_doubly_even_parallel`
+    /// before the worker pulls its first seed.
+    #[cfg(feature = "parallel")]
+    pub(crate) fn install_global_mass(&mut self, gm: std::sync::Arc<GlobalMassTracker>) {
+        self.global_mass = Some(gm);
+    }
+
     pub(crate) fn traverse(&mut self, rref: Vec<BinVec>, pivots: Vec<u32>, info: Rc<CachedInfo>) {
         let k = rref.len() as u32;
         // Emit. Cloning Vec fields directly into the output row (instead of
@@ -623,12 +700,16 @@ impl WorkerState {
                 self.mass_at_k[k as usize], self.quota[k as usize]
             );
         }
+        // D13-V4 cut 4: contribute to the shared cross-worker mass counter
+        // so peer workers can mass-stop based on the global total.
+        #[cfg(feature = "parallel")]
+        if let Some(gm) = self.global_mass.as_ref() {
+            gm.add(k as usize, mass_contribution);
+        }
         if k >= self.max_k {
             return;
         }
-        if !self.skip_mass_stop
-            && self.mass_at_k[k as usize + 1] >= self.quota[k as usize + 1]
-        {
+        if !self.skip_mass_stop && self.next_rank_full(k as usize) {
             self.stats_mass_stop_pre_loop_by_k[k as usize] += 1;
             return;
         }
@@ -648,9 +729,7 @@ impl WorkerState {
         let total = candidates.len() as u64;
         self.stats_candidates_total_seen_by_k[k as usize] += total;
         for (idx, v) in candidates.iter().enumerate() {
-            if !self.skip_mass_stop
-                && self.mass_at_k[k as usize + 1] >= self.quota[k as usize + 1]
-            {
+            if !self.skip_mass_stop && self.next_rank_full(k as usize) {
                 let remaining = total - idx as u64;
                 self.stats_mass_stop_in_loop_by_k[k as usize] += 1;
                 self.stats_candidates_skipped_by_k[k as usize] += remaining;
@@ -715,6 +794,12 @@ impl WorkerState {
         self.mass_at_k[k as usize] = self.mass_at_k[k as usize]
             .checked_add(mass_contribution)
             .expect("mass overflow");
+        // D13-V4 cut 4: seeder emissions also contribute to the shared
+        // mass counter so workers' mass-stop sees the full picture.
+        // (Seeder itself does not mass-stop; see comment on traverse_seed.)
+        if let Some(gm) = self.global_mass.as_ref() {
+            gm.add(k as usize, mass_contribution);
+        }
         if k >= self.max_k {
             return;
         }
@@ -947,6 +1032,13 @@ pub fn enumerate_doubly_even_parallel(
     let (result_tx, result_rx) =
         unbounded::<(Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>)>();
 
+    // D13-V4 cut 4: shared cross-worker mass tracker. Workers consult
+    // `gm.is_full(k+1)` instead of local `mass_at_k`, recovering the
+    // 4–11 % sequential mass-stop win that V2/V3 left on the floor.
+    // The worker's *local* quota stays u128::MAX (the local panic check
+    // would otherwise race; global counter is the authoritative one).
+    let global_mass = std::sync::Arc::new(GlobalMassTracker::new(quota.clone()));
+
     let mut handles = Vec::with_capacity(num_threads);
     for _ in 0..num_threads {
         let task_rx = task_rx.clone();
@@ -954,12 +1046,11 @@ pub fn enumerate_doubly_even_parallel(
         let mk = max_k;
         let nn = n;
         let fact = factorial_n;
+        let gm = std::sync::Arc::clone(&global_mass);
         handles.push(std::thread::spawn(move || {
-            // Per-worker mass-stop disabled: u128::MAX quota means the
-            // check never fires. Lose 4–11 % vs sequential mass-stop;
-            // gain ≫1× from parallelism. Tracked under V2 of D13.
             let inf_quota = vec![u128::MAX; (mk + 1) as usize];
             let mut worker = WorkerState::new(nn, mk, inf_quota, fact);
+            worker.install_global_mass(gm);
             while let Ok(seed) = task_rx.recv() {
                 worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
             }
@@ -976,6 +1067,7 @@ pub fn enumerate_doubly_even_parallel(
     // 0..frontier_depth-1 land in seed_state.output here on the main
     // thread; depth-`frontier_depth` seeds travel by channel.
     let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n);
+    seed_state.install_global_mass(std::sync::Arc::clone(&global_mass));
     {
         let zero_rref: Vec<BinVec> = Vec::new();
         let zero_pivots: Vec<u32> = Vec::new();

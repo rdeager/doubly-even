@@ -97,8 +97,14 @@ pub fn enumerate_doubly_even_parallel_with_profile(
     }
 
     let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n);
-    let mut frontier: Vec<SeedFrontier> = Vec::new();
-    {
+    // Bridge V3's channel-based seeder into this profile harness's
+    // two-phase pattern: collect the frontier eagerly via an unbounded
+    // channel, then dispatch it labelled with seed_id afterwards.
+    // (The profile harness predates the pipelined seeder; this is a
+    // shim so parallel_profiling still compiles. For the full
+    // production overlap, see `enumerate::enumerate_doubly_even_parallel`.)
+    let frontier: Vec<SeedFrontier> = {
+        let (frontier_tx, frontier_rx) = unbounded::<SeedFrontier>();
         let zero_rref: Vec<BinVec> = Vec::new();
         let zero_pivots: Vec<u32> = Vec::new();
         let zero_info = seed_state.canon_info(&zero_rref);
@@ -107,9 +113,11 @@ pub fn enumerate_doubly_even_parallel_with_profile(
             zero_pivots,
             zero_info,
             frontier_depth,
-            &mut frontier,
+            &frontier_tx,
         );
-    }
+        drop(frontier_tx);
+        frontier_rx.into_iter().collect()
+    };
     if frontier.is_empty() {
         let (out, stats, per_k) = seed_state.finalize();
         let total_ns = total_t0.elapsed().as_nanos() as u64;
