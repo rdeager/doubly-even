@@ -363,7 +363,7 @@ fn py_enumerate_doubly_even_with_profile(
         )));
     }
     let (out, stats, per_k, profile) = py.allow_threads(|| {
-        crate::enumerate::enumerate_doubly_even_parallel_with_profile(
+        crate::experimental::parallel_profile::enumerate_doubly_even_parallel_with_profile(
             n,
             max_k,
             quota,

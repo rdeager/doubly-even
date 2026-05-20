@@ -29,6 +29,8 @@ pub mod feulner;
 pub mod feulner_clb;
 pub mod invariants;
 pub mod paired_iso;
+#[cfg(feature = "parallel_profiling")]
+pub mod parallel_profile;
 pub mod py_exports;
 #[cfg(feature = "equivalence_verifier")]
 pub mod verifier_dispatch;
