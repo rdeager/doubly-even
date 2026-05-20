@@ -15,3 +15,6 @@ dist/
 scripts/bench-results/
 *.prof
 /rust/core
+
+# Microbench build artefacts.
+scripts/microbench/target/

@@ -1,0 +1,25 @@
+[package]
+name = "microbench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "popcount_probe"
+path = "src/main.rs"
+
+[[bin]]
+name = "nauty_decomp"
+path = "src/nauty_decomp.rs"
+
+[[bin]]
+name = "wl_refine"
+path = "src/wl_refine.rs"
+
+[dependencies]
+nauty-Traces-sys = { version = "0.11", default-features = false, features = ["bundled", "tls", "popcnt"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = true

@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Build and install the doubly_even_kernel Rust wheel into the venv.
+# Bypasses uv's dependency lifecycle so the kernel survives `uv sync` /
+# `uv run` (which would otherwise drop it — see CLAUDE.md).
+#
+# Usage:
+#   scripts/install-kernel.sh                   # baseline
+#   scripts/install-kernel.sh parallel          # D13 parallel
+#   scripts/install-kernel.sh parallel,equivalence_verifier
+#
+# Run from /workspace/src/.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+FEATURES="${1:-}"
+MATURIN_ARGS=(build --release -m rust/Cargo.toml)
+if [[ -n "$FEATURES" ]]; then
+    MATURIN_ARGS+=(--features "$FEATURES")
+fi
+
+.venv/bin/maturin "${MATURIN_ARGS[@]}"
+
+WHEEL=$(ls -t rust/target/wheels/doubly_even_kernel-*.whl | head -1)
+.venv/bin/python -m pip install --quiet --force-reinstall --no-deps "$WHEEL"
+
+echo "Installed: $WHEEL"
+.venv/bin/python -c '
+import doubly_even_kernel as k
+print(f"  build_info: {k.kernel_build_info()}")
+print(f"  module:     {k.__file__}")
+'
