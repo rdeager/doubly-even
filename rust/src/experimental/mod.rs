@@ -24,3 +24,5 @@ pub mod feulner_clb;
 pub mod invariants;
 pub mod paired_iso;
 pub mod py_exports;
+#[cfg(feature = "equivalence_verifier")]
+pub mod verifier_dispatch;

@@ -17,7 +17,9 @@ use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
 use crate::types::{BinVec, ColPerm, Mat};
-use crate::{canon, experimental, orbit, quotient, types};
+use crate::{experimental, orbit, quotient, types};
+#[cfg(feature = "nauty_hist")]
+use crate::canon;
 
 // ----------------------------------------- debug-submodule wrappers
 //

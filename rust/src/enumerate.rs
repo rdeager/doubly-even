@@ -49,11 +49,7 @@ use crate::canon::canon_info_qd_traces;
 use crate::candidates::doubly_even_candidates_q;
 use crate::linalg::{apply_permutation, row_reduce};
 #[cfg(feature = "equivalence_verifier")]
-use crate::experimental::paired_iso::{
-    paired_iso_equitable, reconstruct_aut_generators,
-    reconstruct_canonical_column_order, reconstruct_column_orbits,
-    EquitableResult, PairedIsoCachedCf,
-};
+use crate::experimental::paired_iso::PairedIsoCachedCf;
 use crate::permutations::{
     aut_order_exact, compute_column_orbits, dual_basis, perm_compose, perm_inverse,
 };
@@ -77,11 +73,11 @@ pub struct EnumeratedRaw {
 /// when the `equivalence_verifier` feature is on; otherwise it's `None`
 /// and the entry behaves as an instrumentation-only `(canonical_form, info)`
 /// pair.
-struct BucketEntry {
-    canonical: Vec<BinVec>,
-    info: Rc<CachedInfo>,
+pub(crate) struct BucketEntry {
+    pub(crate) canonical: Vec<BinVec>,
+    pub(crate) info: Rc<CachedInfo>,
     #[cfg(feature = "equivalence_verifier")]
-    cached_cf: Rc<PairedIsoCachedCf>,
+    pub(crate) cached_cf: Rc<PairedIsoCachedCf>,
 }
 
 #[derive(Clone)]
@@ -383,88 +379,37 @@ impl WorkerState {
         };
         let bucket_was_nonempty = bucket_size_at_attempt > 0;
 
-        // --- Feature-gated paired-iso verifier dispatch ---
-        //
-        // If the bucket is non-empty, try the Leon §10(i) paired-iso test
-        // against each entry. On the first match, reconstruct CachedInfo
-        // for D from the cached cf info + witness π — skipping nauty
-        // entirely. See `paired_iso.rs` and the design plan
-        // `/home/dev/.claude/plans/let-s-implement-the-previous-memoized-simon.md`.
+        // Feature-gated paired-iso verifier dispatch — see
+        // `crate::experimental::verifier_dispatch`. The helper walks the
+        // bucket, runs the equitable-partition prefilter, and on a hit
+        // returns a freshly reconstructed CachedInfo for `rref` (bypasses
+        // nauty entirely). The caller just updates stats and short-circuits.
         #[cfg(feature = "equivalence_verifier")]
-        {
-            if bucket_was_nonempty {
-                let v_t0 = std::time::Instant::now();
-                self.stats_verifier_attempts += 1;
-                let we_key_ref = we_key.as_ref().unwrap();
-                // Iterate immutably; if a hit, clone the matching Rc and
-                // exit so the bucket borrow is released before we mutate
-                // `canon_cache`. Cheaper than snapshotting the whole bucket.
-                let mut compares: u64 = 0;
-                // Equitable-partition-only prefilter: cheap, but
-                // INCONCLUSIVE if refinement doesn't fully discretise.
-                // On INCONCLUSIVE the caller falls through to nauty
-                // immediately (we don't pay full paired_iso cost).
-                let hit: Option<(Vec<BinVec>, Rc<CachedInfo>, Vec<u32>)> = {
-                    let bucket = self.secondary_cache.get(we_key_ref).unwrap();
-                    let mut found = None;
-                    let mut any_inconclusive = false;
-                    for entry in bucket {
-                        compares += 1;
-                        match paired_iso_equitable(rref, &entry.cached_cf, self.n) {
-                            EquitableResult::Iso(pi) => {
-                                found = Some((
-                                    entry.canonical.clone(),
-                                    Rc::clone(&entry.info),
-                                    pi,
-                                ));
-                                break;
-                            }
-                            EquitableResult::NotIso => continue,
-                            EquitableResult::Inconclusive => {
-                                any_inconclusive = true;
-                            }
-                        }
-                    }
-                    let _ = any_inconclusive;
-                    found
-                };
-                self.stats_verifier_compares += compares;
-                if let Some((cf, cf_info, pi)) = hit {
-                    let sigma_d = reconstruct_canonical_column_order(
-                        &cf_info.canonical_column_order,
-                        &pi,
+        if bucket_was_nonempty {
+            self.stats_verifier_attempts += 1;
+            let bucket = self
+                .secondary_cache
+                .get(we_key.as_ref().unwrap())
+                .unwrap();
+            let outcome =
+                crate::experimental::verifier_dispatch::try_dispatch(rref, self.n, bucket);
+            self.stats_verifier_compares += outcome.compares;
+            self.stats_verifier_ns += outcome.elapsed_ns;
+            if let Some(new_info) = outcome.hit {
+                #[cfg(debug_assertions)]
+                {
+                    let recon_cf =
+                        self.canonical_form(rref, &new_info.canonical_column_order);
+                    let expected_cf =
+                        outcome.hit_cf.as_ref().expect("hit_cf set when hit Some");
+                    assert_eq!(
+                        &recon_cf, expected_cf,
+                        "verifier reconstruction produced wrong canonical form"
                     );
-                    let gens_d = reconstruct_aut_generators(
-                        &cf_info.aut_generators,
-                        &pi,
-                    );
-                    #[cfg(debug_assertions)]
-                    {
-                        let recon_cf = self.canonical_form(rref, &sigma_d);
-                        if recon_cf != cf {
-                            eprintln!(
-                                "verifier mismatch: rref={:?} cf_bucket={:?} \
-                                 π={:?} σ_cf={:?} σ_d={:?} recon_cf={:?}",
-                                rref, cf, pi,
-                                cf_info.canonical_column_order, sigma_d, recon_cf
-                            );
-                            panic!("verifier reconstruction produced wrong canonical form");
-                        }
-                    }
-                    let _ = cf;
-                    let orbits_d = reconstruct_column_orbits(&gens_d, self.n);
-                    let new_info = Rc::new(CachedInfo {
-                        canonical_column_order: sigma_d,
-                        aut_generators: gens_d,
-                        aut_order: cf_info.aut_order,
-                        column_orbits: orbits_d,
-                    });
-                    self.canon_cache.put(rref.to_vec(), Rc::clone(&new_info));
-                    self.stats_verifier_hits += 1;
-                    self.stats_verifier_ns += v_t0.elapsed().as_nanos();
-                    return new_info;
                 }
-                self.stats_verifier_ns += v_t0.elapsed().as_nanos();
+                self.canon_cache.put(rref.to_vec(), Rc::clone(&new_info));
+                self.stats_verifier_hits += 1;
+                return new_info;
             }
         }
 
