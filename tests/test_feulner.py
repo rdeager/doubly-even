@@ -22,7 +22,7 @@ import random
 import pytest
 
 from doubly_even.canon import nauty as nauty_mod
-from doubly_even.canon.feulner import canon_info_feulner, canon_info_feulner_native
+from doubly_even.canon.experimental.feulner import canon_info_feulner, canon_info_feulner_native
 from doubly_even.canon.nauty import canon_info, canon_info_cache_clear
 from doubly_even.canon.permutations import group_order
 from doubly_even.enumerate.augment import enumerate_doubly_even, enumerate_doubly_even_at

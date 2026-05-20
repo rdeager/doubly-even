@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .feulner import (
+from .experimental.feulner import (
     _column_orbits,
     _PartialKey,
     _individualise,

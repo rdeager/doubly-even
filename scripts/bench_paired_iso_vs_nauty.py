@@ -39,7 +39,7 @@ REPO_ROOT = HERE.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 import doubly_even_kernel as _kernel  # noqa: E402
-from doubly_even.canon.feulner import canon_info_feulner  # noqa: E402
+from doubly_even.canon.experimental.feulner import canon_info_feulner  # noqa: E402
 from doubly_even.canon.paired_iso import (  # noqa: E402
     IsoCounters,
     _weight_multiset,

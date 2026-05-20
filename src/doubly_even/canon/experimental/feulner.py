@@ -40,9 +40,9 @@ import math
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from ..spec.codes import Code
-from .nauty import CanonInfo
-from .permutations import (
+from ...spec.codes import Code
+from ..nauty import CanonInfo
+from ..permutations import (
     Perm,
     compose,
     group_order,

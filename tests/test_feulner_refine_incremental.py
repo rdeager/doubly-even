@@ -15,7 +15,7 @@ from collections import defaultdict
 
 import pytest
 
-from doubly_even.canon.feulner import (
+from doubly_even.canon.experimental.feulner import (
     _initial_partition,
     _invariant_refiners,
     _refine_incremental,

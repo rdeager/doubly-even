@@ -31,7 +31,7 @@ HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from doubly_even.canon.feulner import canon_info_feulner_with_counters  # noqa: E402
+from doubly_even.canon.experimental.feulner import canon_info_feulner_with_counters  # noqa: E402
 from doubly_even.enumerate.augment import enumerate_doubly_even  # noqa: E402
 from doubly_even.spec.codes import Code  # noqa: E402
 

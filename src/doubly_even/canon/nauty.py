@@ -119,7 +119,7 @@ def canon_info(C: Code) -> CanonInfo:
     """
     if _CANON_BACKEND == "feulner" and _kernel is not None:
         # Local import to avoid a top-level circular dep with .feulner.
-        from .feulner import canon_info_feulner_native
+        from .experimental.feulner import canon_info_feulner_native
         return canon_info_feulner_native(C)
     if _CANON_BACKEND == "sage_partn_ref":
         from .experimental.sage_proxy import canon_info_via_sage
