@@ -28,10 +28,10 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 
-from ..canon.nauty import canon_info, canonical_form
-from ..spec.codes import Code
-from ..spec.direct_sum import direct_sum
-from .augment import enumerate_doubly_even
+from ...canon.nauty import canon_info, canonical_form
+from ...spec.codes import Code
+from ...spec.experimental.direct_sum import direct_sum
+from ..augment import enumerate_doubly_even
 
 
 @dataclass(frozen=True)

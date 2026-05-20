@@ -15,7 +15,7 @@ Used by the mass-seeding pre-population in
 
 from __future__ import annotations
 
-from .codes import Code
+from ..codes import Code
 
 
 def direct_sum(C1: Code, C2: Code) -> Code:

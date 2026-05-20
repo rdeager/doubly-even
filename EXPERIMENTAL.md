@@ -146,6 +146,33 @@ kernel at N=22. Kept so the comparison number is reproducible.
 
 ---
 
+## Direct-sum mass-seeding (BHM2012, deferred direction)
+
+- Python: `src/doubly_even/enumerate/experimental/seeds.py`,
+  `src/doubly_even/spec/experimental/direct_sum.py`.
+- Tests: `tests/experimental/test_seeds.py`,
+  `tests/experimental/test_direct_sum.py`.
+
+**What it is.** Phase 1 of the gluing-based mass-seeding plan from
+Betsumiya–Harada–Munemasa 2012: for each rank `k`, compute the set
+of doubly-even codes reachable as direct sums `C1 ⊕ C2` of strictly
+smaller codes, canonicalise them, and pre-credit their mass
+`N! / |Aut|` to the `mass_at_k[k]` accumulator before the
+canonical-augmentation BFS starts. The Gaborit closed-form
+mass-stop then fires sooner.
+
+**Status.** Not yet wired into the active recursion (no spine
+caller). Moved out of spine 2026-05-20 as part of the targeted
+consolidation pass; the future direction (gluing-based mass-stop
+credit) is preserved by quarantining, not deleting.
+
+**Where to read.**
+- `~/.claude/projects/-workspace-src/memory/project_paper_2012_audit.md`
+- `/workspace/markdown/architecture/04-optimisations.md`
+  ("Audit — gluing-based mass-seeding (Phase 0)")
+
+---
+
 ## Engine A multiset / Fourier-domain prototype (deferred direction)
 
 - Python: `scripts/experimental/multiset_enum.py`,
@@ -214,6 +241,10 @@ queues; not thread-safe under HAVE_TLS=1).
   for `aut_orbit_minima_q_witt`.
 - `tests/experimental/test_schreier_sims_gl.py` — GL(L, F_2)
   Schreier–Sims oracle tests.
+- `tests/experimental/test_seeds.py` — BHM2012 direct-sum seed table
+  (doubly-evenness, mass aggregation).
+- `tests/experimental/test_direct_sum.py` — direct-sum operator
+  (rank, double-evenness, equivalence).
 - `tests/test_feulner.py`, `tests/test_feulner_refine_incremental.py`,
   `tests/test_paired_iso.py`, `tests/test_canon_info_reconstruction.py`
   — Feulner / paired-iso tests that exercise the quarantined modules

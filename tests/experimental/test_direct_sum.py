@@ -1,4 +1,4 @@
-"""Tests for :mod:`doubly_even.spec.direct_sum`."""
+"""Tests for :mod:`doubly_even.spec.experimental.direct_sum`."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import pytest
 
 from doubly_even.canon.nauty import are_equivalent, canon_info
 from doubly_even.spec.codes import Code
-from doubly_even.spec.direct_sum import direct_sum
+from doubly_even.spec.experimental.direct_sum import direct_sum
 from doubly_even.spec.doubly_even import is_doubly_even
 
 

@@ -1,4 +1,4 @@
-"""Tests for :mod:`doubly_even.enumerate.seeds`."""
+"""Tests for :mod:`doubly_even.enumerate.experimental.seeds`."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import pytest
 
 from doubly_even.canon.nauty import canon_info, canonical_form
 from doubly_even.enumerate.augment import enumerate_doubly_even
-from doubly_even.enumerate.seeds import (
+from doubly_even.enumerate.experimental.seeds import (
     direct_sum_seeds,
     seed_mass,
 )

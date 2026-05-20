@@ -25,7 +25,7 @@ spec/        readable executable spec (math, no perf work)
   codes.py       Code dataclass (n, basis), rref, dual, contains, extend
   doubly_even.py is_doubly_even via Corollary B.1; augmentation predicate
   mass.py        sigma_brute (works), gaborit_sigma (closed form)
-  direct_sum.py  C1 ⊕ C2 operator (BHM2012 mass-seeding scaffolding)
+  experimental/  BHM2012 direct_sum operator (deferred) — see EXPERIMENTAL.md
 
 canon/       canonical labels + Aut(C); active backend is the Rust kernel
   bipartite.py   G(C) bipartite encoding (codewords × columns)
@@ -48,9 +48,8 @@ enumerate/   the canonical-augmentation search
                   enumerate_doubly_even(N) -> EnumeratedCode iter.
                   Dispatches the whole recursion to the Rust kernel
                   via _kernel.enumerate_doubly_even (D11) when loaded.
-  seeds.py       Direct-sum mass-seeding scaffolding (BHM2012); not
-                  yet wired into active dispatch.
-  experimental/  Witt phase-(b) scaffolding — see EXPERIMENTAL.md
+  experimental/  Witt phase-(b) scaffolding + BHM2012 direct-sum
+                  mass-seeding (seeds.py) — see EXPERIMENTAL.md
 
 rust/        Rust kernel (doubly_even_kernel), built with maturin
   src/canon.rs       Q_D-graph low-weight-incidence canonicaliser (D10)
