@@ -1,5 +1,10 @@
-//! Cheap permutation-invariant signatures for doubly-even codes — Rust port
-//! of the per-code primitives in `scripts/wl_collision_experiment.py`.
+//! **EXPERIMENTAL / WL+T11+T12+T13 collision-experiment substrate.** Cheap
+//! permutation-invariant signatures for doubly-even codes — Rust port of
+//! the per-code primitives in
+//! `scripts/experimental/wl_collision_experiment.py`. Not on the kernel
+//! hot path; exposed as standalone pyfunctions for the collision-rate
+//! audit. See `project_1wl_collision_experiment.md` and
+//! `feedback_no_offline_blocklist.md` for why the entire family closed.
 //!
 //! What's here and why:
 //!

@@ -1,6 +1,14 @@
-//! Feulner-style column-side canonicaliser, binary + permutation-only.
+//! **EXPERIMENTAL / reference oracle.** Feulner-style column-side
+//! canonicaliser, binary + permutation-only.
 //!
-//! Direct port of `doubly_even.canon.feulner` — the Python staging is the
+//! Active dispatch uses `canon::canon_info_qd_native` (sparsenauty on the
+//! Q_D bipartite graph). This module is kept in tree as the diff oracle
+//! for the Python staging and as the substrate for `paired_iso`. See
+//! `/workspace/src/EXPERIMENTAL.md` and the memory bullet
+//! `project_feulner_dispatch_closed.md` for why the dispatch was closed.
+//!
+//! Direct port of `doubly_even.canon.experimental.feulner` — the Python
+//! staging is the
 //! correctness oracle for this module. See that file for the algorithmic
 //! write-up; behaviour here mirrors it line-for-line.
 //!

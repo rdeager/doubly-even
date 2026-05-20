@@ -1,8 +1,11 @@
-//! Jerrum's complete labelled branching (CLB) + Feulner §5.2 Lemma 5.9
-//! topological-sort test.
+//! **EXPERIMENTAL / Feulner reference substrate.** Jerrum's complete
+//! labelled branching (CLB) + Feulner §5.2 Lemma 5.9 topological-sort
+//! test. Driven only by the dormant `feulner.rs` canonicaliser; not
+//! reached by the active dispatch.
 //!
-//! Direct port of the Python staging in `doubly_even.canon.feulner.
-//! _LabelledBranching`; the Python module is the correctness oracle for
+//! Direct port of the Python staging in
+//! `doubly_even.canon.experimental.feulner._LabelledBranching`; the
+//! Python module is the correctness oracle for
 //! this code. Both mirror Sage's `LabelledBranching` in
 //! `sage/groups/perm_gps/partn_ref2/refinement_generic.pyx`. Sage's
 //! implementation delegates the stabiliser chain to libgap; we reuse
