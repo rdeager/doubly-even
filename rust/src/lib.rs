@@ -25,6 +25,7 @@ pub mod experimental;
 pub mod linalg;
 pub mod orbit;
 pub mod permutations;
+pub mod qd_graph;
 pub mod quotient;
 pub mod subspace_orbit;
 pub mod types;
@@ -110,7 +111,7 @@ fn py_canon_info_qd_native(
     rref: Vec<BinVec>,
     n: u32,
 ) -> Option<(Vec<u32>, Vec<Vec<u32>>, f64, i32, Vec<u32>)> {
-    canon::canon_info_qd_native(&rref, n).map(|info| {
+    qd_graph::canon_info_qd_native(&rref, n).map(|info| {
         (
             info.canonical_column_order,
             info.aut_generators,

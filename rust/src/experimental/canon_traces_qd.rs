@@ -16,7 +16,8 @@ use std::ptr;
 
 use nauty_Traces_sys::{sparsegraph, Traces, TracesOptions, TracesStats, FALSE, TRUE};
 
-use crate::canon::{build_low_weight_sparsegraph, NativeCanonInfo, AUT_BUFFER, LEFT_VERTEX_COUNT};
+use crate::canon::{NativeCanonInfo, AUT_BUFFER, LEFT_VERTEX_COUNT};
+use crate::qd_graph::build_low_weight_sparsegraph;
 use crate::types::BinVec;
 
 // Traces' userautomproc has a different signature than sparsenauty's:

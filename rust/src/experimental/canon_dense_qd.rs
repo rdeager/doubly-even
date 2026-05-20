@@ -23,9 +23,8 @@ use nauty_Traces_sys::{
 #[cfg(feature = "dense_qd_refinvar")]
 use nauty_Traces_sys::{boolean, graph as nauty_graph};
 
-use crate::canon::{
-    auto_callback, build_low_weight_sparsegraph, NativeCanonInfo, AUT_BUFFER, LEFT_VERTEX_COUNT,
-};
+use crate::canon::{auto_callback, NativeCanonInfo, AUT_BUFFER, LEFT_VERTEX_COUNT};
+use crate::qd_graph::build_low_weight_sparsegraph;
 use crate::types::BinVec;
 
 // `refinvar` is not re-exported by `nauty-Traces-sys` (only `adjacencies`

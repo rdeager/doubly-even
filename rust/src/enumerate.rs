@@ -41,7 +41,8 @@ compile_error!(
      non-TLS static work queues and is not thread-safe even with HAVE_TLS=1"
 );
 
-use crate::canon::{canon_info_native, canon_info_qd_native, NativeCanonInfo, QD_GRAPH_THRESHOLD};
+use crate::canon::{canon_info_native, NativeCanonInfo, QD_GRAPH_THRESHOLD};
+use crate::qd_graph::canon_info_qd_native;
 #[cfg(feature = "dense_qd")]
 use crate::experimental::canon_dense_qd::canon_info_qd_dense;
 #[cfg(feature = "traces_qd")]
