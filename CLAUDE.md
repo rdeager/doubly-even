@@ -182,15 +182,17 @@ See `/workspace/markdown/architecture/04-optimisations.md` for the
 per-lever write-up and `architecture/05-retrospective.md` for the
 sign-off retrospective.
 
-Headline: **~129× cumulative at `N = 22`** since the pre-kernel
-D6 baseline (152 s → 1.18 s with 16t, depth=4); **> 500×** since
-the pre-Q_C original baseline (> 600 s → 1.18 s at `N = 22`).
-Parallel kernel: `N = 20` in 0.22 s; `N = 22` in 1.18 s; `N = 24`
-in 12.3 s; **`N = 26` in 218 s** (494 K classes, all 12 non-trivial
-DFGHILM cells match exactly). Sequential at `N = 22` is 6.87 s.
-We beat Sage's `self_orthogonal_binary_codes` by **~308× end-to-end
-at `N = 22`** (Sage 363.85 s, single-threaded; parallelising Sage
-would be weeks of Cython surgery).
+Headline (post-D13-V3 pipelined seeder, 2026-05-21):
+**~185× cumulative at `N = 22`** since the pre-kernel D6 baseline
+(152 s → 0.82 s parallel-20t); **> 700×** since the pre-Q_C original
+baseline. Parallel kernel: `N = 20` in 0.22 s; **`N = 22` in 0.82 s**
+(20 threads, depth=4); **`N = 24` in 9.54 s** (22 threads, depth=5);
+**`N = 26` in 218 s** (V2 measurement; not re-run post-V3, but the
+streaming-output bottleneck dominates so V3 wouldn't change it much).
+Sequential at `N = 22` is 7.01 s on this 22-core dev box (6.87 s on
+the older 13700K). We beat Sage's `self_orthogonal_binary_codes`
+by **~440× end-to-end at `N = 22`** (Sage 363.85 s, single-threaded;
+parallelising Sage would be weeks of Cython surgery).
 
 Scaling forecast for `N ≥ 28` lives at
 `/workspace/markdown/architecture/06-scaling-frontier.md`: N=28
@@ -230,25 +232,33 @@ Cumulative levers, oldest first:
     added to the kernel for future audits; four dormant Cargo
     features (`dense_qd`, `dense_qd_tc0`, `dense_qd_refinvar`,
     `traces_qd`) kept as reproducibility substrate.
-13. **D13 Outer-DFS parallelism** (2026-05-18) — sequential traversal
-    to a configurable cut depth, then a crossbeam-channel worker
-    pool runs each accepted subtree on its own thread. Sparsenauty
-    is parallel-safe under the `tls` feature on `nauty-Traces-sys`
-    (already on; `USE_TLS` → `_Thread_local` on mutable globals).
-    Per-worker canon caches; per-worker mass-stop disabled
-    (loses 4–11 % vs sequential; gained outright by parallelism).
-    V1 (depth=3): 3.1× at N=22. **V2 (depth=4, the new default):
-    5.8× at N=22** (6.87 s → 1.18 s, 16 threads on 13700K); 4.4×
-    at N=20. **8.7× at N=24** (107 s → 12.3 s, 20 threads,
-    depth=5). The deeper frontier breaks the tail-task ceiling:
-    at depth=3 the heaviest of 83 subtrees held ~30 % of total
-    work; at depth=4 the ~300 tasks divide that into 3–5 pieces.
-    Behind off-by-default Cargo feature `parallel`; enabled at
-    runtime via `DOUBLY_EVEN_THREADS` env var (and tunable via
+13. **D13 Outer-DFS parallelism** (2026-05-18, V3 2026-05-21) —
+    sequential traversal to a configurable cut depth, then a
+    crossbeam-channel worker pool runs each accepted subtree on its
+    own thread. Sparsenauty is parallel-safe under the `tls` feature
+    on `nauty-Traces-sys` (already on; `USE_TLS` → `_Thread_local`
+    on mutable globals). Per-worker canon caches; per-worker
+    mass-stop disabled (loses 4–11 % vs sequential; gained outright
+    by parallelism). V1 (depth=3): 3.1× at N=22. V2 (depth=4):
+    5.8× at N=22 (6.87 s → 1.18 s, 16t on 13700K). **V3 pipelined
+    seeder (2026-05-21, the new default):** workers spawn first and
+    block on `task_rx.recv()`; the seeder runs on the main thread
+    and pushes each depth-`frontier_depth` seed into the channel as
+    it's discovered, overlapping seeder DFS with worker recursion
+    (DFGHILM Appendix B.4 producer-consumer recipe). Closes the
+    serial-seeder Amdahl ceiling diagnosed in
+    `architecture/07-parallel-scaling-profile.md` (~44 % of V2 wall
+    at N=22 t=16 d=4). **8.55× at N=22** (7.01 s → 0.82 s, 20t d=4
+    on 22-core); **11.2× at N=24** (107 s → 9.54 s, 22t d=5).
+    Bounded channel cap = `num_threads * 4` doubles as backpressure
+    once the seeder pipes directly into it. Behind off-by-default
+    Cargo feature `parallel`; enabled at runtime via
+    `DOUBLY_EVEN_THREADS` env var (and tunable via
     `DOUBLY_EVEN_FRONTIER_DEPTH`, default 4) or `num_threads=`
     kwarg on the kernel entry. Conflicts with `traces_qd` (Traces
     uses non-TLS static work queues) — guarded by `compile_error!`.
-    Determinism harness in `rust/tests/parallel_determinism.rs`.
+    Determinism harness in `rust/tests/parallel_determinism.rs`
+    (covers N = 12, 14, 16 at threads 2, 4, 8).
 
 `bench.py` lives in `scripts/`; per-step JSON records are in
 `scripts/bench-results/` (gitignored). Rust microbench for
@@ -272,11 +282,20 @@ maturin build --release --features parallel -m rust/Cargo.toml \
   && uv pip install rust/target/wheels/doubly_even_kernel-*.whl
 ```
 
-At runtime, set `DOUBLY_EVEN_THREADS` (16 on a 13700K is the sweet
-spot for N ≤ 22; 20 at N ≥ 24). `DOUBLY_EVEN_FRONTIER_DEPTH`
-defaults to 4 and rarely needs tweaking — at N ≥ 24 a value of 5
-is better because the tree is bigger and the deeper split gives
-finer load balance.
+At runtime, set `DOUBLY_EVEN_THREADS`. Post-D13-V3 (pipelined
+seeder, 2026-05-21) measurements on a 22-core box show:
+
+- **N = 22**: sweet spot is `t = cores − 2` (e.g., 20 on a 22-core
+  host). Adding the last two threads (t=22) *regresses* by ~8 %
+  because per-call cost rises with thread count (L3 + nauty TLS
+  contention) faster than the extra parallelism reclaims wall.
+- **N = 24** (and presumably larger N): full core count is best
+  (e.g., 22 on a 22-core host). The deeper tree absorbs the
+  contention cost because there's more parallel work to amortise.
+
+`DOUBLY_EVEN_FRONTIER_DEPTH` defaults to 4 and rarely needs
+tweaking — at N ≥ 24 a value of 5 is better because the tree is
+bigger and the deeper split gives finer load balance.
 
 For `N ≥ 26`, also cap the per-worker canon cache via
 `DOUBLY_EVEN_CANON_CACHE_CAP` (default 1,000,000 entries; lower if
@@ -285,12 +304,13 @@ canon-cache footprint plus the output Vec). Without a cap, N = 26
 OOMs; this env var is the unlock that landed in `fd530cb`.
 
 ```sh
-DOUBLY_EVEN_THREADS=16 uv run python scripts/bench.py \
-  --label parallel-t16 --N 18,20,22
-# Larger N — try the deeper cut for finer balance:
-DOUBLY_EVEN_THREADS=20 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
-  uv run python scripts/bench.py --label parallel-t20-d5 --N 24
-# N = 26 — cap canon cache to avoid OOM at 20 workers:
+# N ≤ 22 — leave 2 cores headroom (use t = cores − 2):
+DOUBLY_EVEN_THREADS=20 uv run python scripts/bench.py \
+  --label parallel-t20 --N 18,20,22
+# Larger N — full core count + deeper cut:
+DOUBLY_EVEN_THREADS=22 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
+  uv run python scripts/bench.py --label parallel-t22-d5 --N 24
+# N = 26 — cap canon cache to avoid OOM at 20+ workers:
 DOUBLY_EVEN_THREADS=20 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
   DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
   uv run python scripts/bench.py --label parallel-t20-d5-n26 --N 26
@@ -308,14 +328,14 @@ uv sync --all-extras --dev               # bootstrap a fresh checkout
 maturin build --release -m rust/Cargo.toml \
   && uv pip install rust/target/wheels/doubly_even_kernel-*.whl
 # verifier build (D12, dormant): add --features equivalence_verifier
-# parallel build (D13, opt-in): add --features parallel
-#   then set DOUBLY_EVEN_THREADS=16 at runtime (or pass num_threads= to
-#   the kernel entry directly). Sequential path is byte-identical when
-#   the env var is unset.
-uv run pytest                            # 517 fast tests + 41 slow-skipped (~7 s)
-uv run pytest --run-slow                 # adds N=17, 18 Table 3 cells (~10 s total)
+# parallel build (D13-V3 pipelined, opt-in): add --features parallel
+#   then set DOUBLY_EVEN_THREADS=<cores − 2> for N ≤ 22 or <cores>
+#   for N ≥ 24 (or pass num_threads= to the kernel entry directly).
+#   Sequential path is byte-identical when the env var is unset.
+uv run pytest                            # 527 fast tests + 41 slow-skipped (~6 s)
+uv run pytest --run-slow                 # adds N=17, 18 Table 3 cells (~7 s total)
 uv run python scripts/bench.py --label baseline  # benchmark; writes JSON
-DOUBLY_EVEN_THREADS=16 uv run python scripts/bench.py --label parallel-t16 --N 20,22
+DOUBLY_EVEN_THREADS=20 uv run python scripts/bench.py --label parallel-t20 --N 20,22
 
 # Enumerate doubly even codes of length N (yields EnumeratedCode objects)
 uv run python -c '
