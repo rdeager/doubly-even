@@ -174,12 +174,13 @@ self-contained quarantine of one closed audit direction.
 
 | Feature | Module(s) | What | Why parked |
 |---------|-----------|------|-----------|
-| `equivalence_verifier` | `paired_iso.rs` | D12 verifier dispatch | See "Paired-iso D12" above |
-| `dense_qd` | `canon.rs` (densenauty path) | Audit Q6: dense Q_D | +39–42 % at N=22 |
-| `dense_qd_tc0` | `canon.rs` | Audit Q6: zero target-cell | +42 % at N=22 |
-| `dense_qd_refinvar` | `canon.rs` | Audit Q6: refinvar FFI | +260 % at N=22 |
-| `traces_qd` | `canon.rs` (Traces path) | Audit Q6: Traces vs sparsenauty | +2 %, within noise; conflicts with `parallel` |
-| `nauty_hist` | `enumerate.rs` (statsblk histogram) | Research-phase instrumentation | Off by default; zero overhead when off |
+| `equivalence_verifier` | `experimental/paired_iso.rs`, `experimental/verifier_dispatch.rs` | D12 verifier dispatch | See "Paired-iso D12" above |
+| `dense_qd` | `experimental/canon_dense_qd.rs` | Audit Q6: dense Q_D | +39–42 % at N=22 |
+| `dense_qd_tc0` | `experimental/canon_dense_qd.rs` | Audit Q6: zero target-cell | +42 % at N=22 |
+| `dense_qd_refinvar` | `experimental/canon_dense_qd.rs` | Audit Q6: refinvar FFI | +260 % at N=22 |
+| `traces_qd` | `experimental/canon_traces_qd.rs` | Audit Q6: Traces vs sparsenauty | +2 %, within noise; conflicts with `parallel` |
+| `nauty_hist` | `experimental/canon_hist.rs` | Per-call sparsenauty statsblk histogram | Off by default; zero overhead when off |
+| `parallel_profiling` | `experimental/parallel_profile.rs` | Phase 3 worker/seed timing | Off by default; mirrors production parallel entry, used for the scaling-loss diagnosis |
 
 The conflict guard `parallel ↔ traces_qd` lives at
 `rust/src/enumerate.rs:38-42` (Traces uses non-TLS static work
