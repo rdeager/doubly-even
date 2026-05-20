@@ -27,7 +27,7 @@ orbit-enumeration code does not need it.
 
 from __future__ import annotations
 
-from .quotient import singular_reps_Q
+from ..quotient import singular_reps_Q
 
 
 def count_singular(m: int, eps: str) -> int:

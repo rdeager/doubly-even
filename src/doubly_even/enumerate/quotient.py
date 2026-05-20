@@ -1,4 +1,4 @@
-"""Q_C-coordinate candidate pipeline (Milestone 4 phase (a)).
+"""Q_C-coordinate candidate pipeline.
 
 For a doubly even code ``C`` of length ``N`` and rank ``k`` we want the
 ``Aut(C)``-orbit reps of nonzero cosets ``v + C ⊆ C⊥`` with
@@ -31,13 +31,17 @@ the orbit-min survivor list, so the cost is negligible.
 The output type of :func:`doubly_even_candidates_Q` matches the
 existing ``doubly_even_candidates``: a sorted ``list[int]`` of
 ``F_2^N`` vectors. ``filters.doubly_even_candidates`` delegates here.
+
+The Milestone 4 phase-(b) ``aut_orbit_minima_Q_witt`` alternative — a
+direct ``mat_apply`` BFS that skips the σ_Q table build — lives in
+:mod:`doubly_even.enumerate.experimental.quotient_witt`. Phase (a)
+(this module) wins at every measured ``L`` in pure Python.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
 
-from ..canon._linalg_f2 import Mat, mat_apply, mat_identity
 from ..spec.codes import Code
 from ..spec.vectors import wt
 
@@ -224,68 +228,6 @@ def aut_orbit_minima_Q(
     return minima
 
 
-def aut_orbit_minima_Q_witt(
-    sigma_Qs: list[Mat],
-    singular_set: Iterable[int],
-    L: int,
-) -> list[int]:
-    """One Q-rep per ``⟨sigma_Qs⟩``-orbit, applying σ_Q directly.
-
-    Drop-in alternative to :func:`aut_orbit_minima_Q` (Milestone 4
-    phase (b)): same global orbit-decomposition BFS, but skips the
-    ``2^L``-per-generator :func:`_sigma_Q_table` build. Instead applies
-    each generator via :func:`mat_apply` — one bit-walk of length
-    ``popcount(current)`` per BFS step.
-
-    The σ_Q table build dominates the post-(a) profile (~59% wall at
-    ``N = 18`` per the architecture doc D6); for the L = 10..14 regime
-    that matters at ``N = 18..22``, the per-step bit-walk is cheaper
-    than the amortised table build. At very small ``L`` the table-based
-    pipeline (a) wins on absolute time; the caller in
-    :func:`doubly_even_candidates_Q` dispatches between the two.
-
-    Precondition for correctness of the orbit-min decomposition:
-    ``singular_set`` is closed under ``⟨sigma_Qs⟩`` (so each orbit is
-    fully inside it). The caller ensures this by passing the
-    ``wt mod 4 = 0`` Q-coords, which ``Aut(C)`` preserves on doubly
-    even cosets.
-
-    With an empty generator set every element is its own orbit — return
-    a sorted list of the input.
-    """
-    if not sigma_Qs:
-        return sorted(singular_set)
-    identity = mat_identity(L)
-    gens = [g for g in sigma_Qs if g != identity]
-    if not gens:
-        return sorted(singular_set)
-    reps_sorted = sorted(singular_set)
-    seen: set[int] = set()
-    minima: list[int] = []
-    for v in reps_sorted:
-        if v in seen:
-            continue
-        minima.append(v)
-        seen.add(v)
-        queue: list[int] = [v]
-        while queue:
-            next_queue: list[int] = []
-            for current in queue:
-                for g in gens:
-                    # Inlined mat_apply: walk set bits of `current`.
-                    out = 0
-                    u = current
-                    while u:
-                        lsb = u & -u
-                        out ^= g[lsb.bit_length() - 1]
-                        u ^= lsb
-                    if out not in seen:
-                        seen.add(out)
-                        next_queue.append(out)
-            queue = next_queue
-    return minima
-
-
 def singular_reps_Q(V_basis: tuple[int, ...]) -> list[int]:
     """Yield ``Q``-coordinate ints ``u`` whose lift has ``wt ≡ 0 (mod 4)``.
 
@@ -342,40 +284,6 @@ def doubly_even_candidates_Q(
     """
     V_basis, pivots_V = Q_basis(C)
     sigma_Qs = aut_image_on_Q(aut_generators, C, V_basis, pivots_V)
-    L = len(V_basis)
     reps_Q = singular_reps_Q(V_basis)
-    if _use_witt_path(sigma_Qs, L):
-        orbit_min = aut_orbit_minima_Q_witt(sigma_Qs, reps_Q, L)
-    else:
-        orbit_min = aut_orbit_minima_Q(reps_Q, sigma_Qs)
+    orbit_min = aut_orbit_minima_Q(reps_Q, sigma_Qs)
     return sorted(lift(u, V_basis) for u in orbit_min)
-
-
-def _use_witt_path(sigma_Qs: list[Mat], L: int) -> bool:
-    """Cheap predicate deciding which orbit-min path to take.
-
-    The Milestone-4-(b) :func:`aut_orbit_minima_Q_witt` skips the
-    ``2^L``-per-generator :func:`_sigma_Q_table` build, applying each
-    σ_Q via an inlined bit-walk on every BFS step. Phase (a)'s profile
-    pegged the table build at ~59% of wall-clock at ``N = 18``, which
-    looked like a clean target.
-
-    Empirically (see D7 in ``architecture/04-optimisations.md``) the
-    pure-Python bit-walk is enough slower per BFS step that the
-    table-based path remains the absolute-time winner across every
-    ``L`` in our enumeration tree — the wins from skipping the
-    ``O(2^L)`` build are eaten by the ``O(|singular set|)`` per-step
-    overhead. Phase (b) is therefore left as scaffolding for the
-    native-code session that follows; the dispatch defaults to
-    phase (a) at every ``L`` and the witt path is only reached via
-    direct calls from the cross-check tests.
-
-    The infrastructure (``canon/matrix_group.py``, ``enumerate/witt.py``,
-    and this function's witt branch) stays in tree because the
-    Schreier–Sims-on-``GL(L, F_2)`` machinery is the natural primitive
-    a C/Rust kernel would expose — when per-step cost drops by 10×+,
-    the witt path's structural advantage flips it back to a win.
-    """
-    # No-op dispatch today: always phase (a). See docstring.
-    del sigma_Qs, L
-    return False

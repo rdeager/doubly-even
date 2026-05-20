@@ -1,4 +1,4 @@
-"""Tests for :mod:`doubly_even.enumerate.witt`.
+"""Tests for :mod:`doubly_even.enumerate.experimental.witt`.
 
 The witt module's role in phase (b) is intentionally minimal — per the
 plan-doc directive that the structural win is in orbit enumeration and
@@ -20,7 +20,7 @@ import pytest
 
 from doubly_even.enumerate.augment import enumerate_doubly_even
 from doubly_even.enumerate.quotient import Q_basis, singular_reps_Q
-from doubly_even.enumerate.witt import count_singular, singular_vectors
+from doubly_even.enumerate.experimental.witt import count_singular, singular_vectors
 
 
 # ---------------------------------------------------------- count_singular
