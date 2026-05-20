@@ -384,6 +384,86 @@ fn py_kernel_build_info() -> &'static str {
     enumerate::build_info()
 }
 
+/// Phase 3 parallel profiling entry. Same return shape as
+/// [`py_enumerate_doubly_even`] plus a profile payload:
+///
+///   `(workers: list[(worker_id, active_ns, idle_ns, seed_count)],
+///     seeds:   list[(worker_id, seed_id, ns, nodes, emitted)],
+///     frontier_depth, total_wall_ns)`
+///
+/// Only available when the kernel is built with
+/// `--features parallel_profiling`. `num_threads` must be >= 2 to
+/// exercise the worker pool; smaller values run the sequential driver
+/// and return a single rolled-up worker row.
+#[cfg(feature = "parallel_profiling")]
+#[pyfunction]
+#[pyo3(
+    name = "enumerate_doubly_even_with_profile",
+    signature = (n, max_k, quota, factorial_n, num_threads)
+)]
+fn py_enumerate_doubly_even_with_profile(
+    py: Python<'_>,
+    n: u32,
+    max_k: u32,
+    quota: Vec<u128>,
+    factorial_n: u128,
+    num_threads: u32,
+) -> PyResult<(
+    Vec<(Vec<BinVec>, Vec<u32>, Vec<Vec<u32>>, String, Vec<u32>)>,
+    Vec<u128>,
+    Vec<Vec<u64>>,
+    (
+        Vec<(u32, u64, u64, u32)>,
+        Vec<(u32, u32, u64, u64, u32)>,
+        u32,
+        u64,
+    ),
+)> {
+    if n > types::MAX_N {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "n = {n} exceeds MAX_N = {}; the u64 kernel supports N up to 64",
+            types::MAX_N,
+        )));
+    }
+    let (out, stats, per_k, profile) = py.allow_threads(|| {
+        enumerate::enumerate_doubly_even_parallel_with_profile(
+            n,
+            max_k,
+            quota,
+            factorial_n,
+            num_threads as usize,
+        )
+    });
+    let result: Vec<_> = out
+        .into_iter()
+        .map(|e| {
+            (
+                e.rref,
+                e.canonical_column_order,
+                e.aut_generators,
+                e.aut_order.to_string(),
+                e.column_orbits,
+            )
+        })
+        .collect();
+    let workers: Vec<(u32, u64, u64, u32)> = profile
+        .workers
+        .iter()
+        .map(|w| (w.worker_id, w.active_ns, w.idle_ns, w.seed_count))
+        .collect();
+    let seeds: Vec<(u32, u32, u64, u64, u32)> = profile
+        .seeds
+        .iter()
+        .map(|s| (s.worker_id, s.seed_id, s.ns, s.nodes, s.emitted))
+        .collect();
+    Ok((
+        result,
+        stats,
+        per_k,
+        (workers, seeds, profile.frontier_depth, profile.total_wall_ns),
+    ))
+}
+
 // ───────────────────────────────────────────── invariants (collision experiment)
 //
 // Substrate for `scripts/experimental/wl_collision_experiment.py`'s N=24/26 Rust port —
@@ -579,6 +659,8 @@ fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_kernel_build_info, m)?)?;
     #[cfg(feature = "nauty_hist")]
     m.add_function(wrap_pyfunction!(py_drain_nauty_hist, m)?)?;
+    #[cfg(feature = "parallel_profiling")]
+    m.add_function(wrap_pyfunction!(py_enumerate_doubly_even_with_profile, m)?)?;
 
     // Invariants (collision experiment substrate; not on the hot path).
     m.add_function(wrap_pyfunction!(py_wl_signature, m)?)?;

@@ -44,6 +44,15 @@ parallel = ["dep:crossbeam-channel"]
 # Off by default; zero overhead when off. Used to measure mean nauty
 # cost split by easy (numnodes=1) vs hard (numnodes>1) buckets.
 nauty_hist = []
+# Phase 3 parallel-scaling profile: extend the D13 parallel kernel
+# with per-worker (active/idle ns, seed count) and per-seed (ns,
+# nodes, emitted) histograms. Exposed via a separate entry point
+# `enumerate_doubly_even_parallel_with_profile`; production builds
+# keep the original `enumerate_doubly_even_parallel` untouched. Off
+# by default; only used for the scaling-diagnosis sweep in
+# `markdown/architecture/07-parallel-scaling-profile.md`. Implies
+# `parallel`.
+parallel_profiling = ["parallel"]
 
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }
