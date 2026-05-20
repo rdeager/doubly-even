@@ -30,6 +30,12 @@ pub mod quotient;
 pub mod subspace_orbit;
 pub mod types;
 
+// D13-V4: see Cargo.toml mimalloc dep for rationale. Per-thread arena
+// allocator; replaces glibc ptmalloc which becomes the contention surface
+// under 20 workers each allocating ~210 KB / call into canon_info_*.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use pyo3::prelude::*;
 
 use crate::types::{BinVec, ColPerm};
