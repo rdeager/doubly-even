@@ -137,6 +137,10 @@ class PerNResult:
     # Kernel stats vector keyed by KERNEL_STATS_LAYOUT name. Empty when
     # the kernel isn't loaded.
     kernel_stats: dict[str, int] = field(default_factory=dict)
+    # --profile-parallel payload, populated only when running through
+    # the `enumerate_doubly_even_with_profile` entry (requires the
+    # kernel to be built with `--features parallel_profiling`).
+    parallel_profile: dict | None = None
 
 
 def run_one(N: int) -> PerNResult:
@@ -186,6 +190,165 @@ def run_one(N: int) -> PerNResult:
         result.classes += 1
     result.seconds = time.perf_counter() - t0
     return result
+
+
+def run_one_with_profile(N: int, num_threads: int) -> PerNResult:
+    """Profiling variant of :func:`run_one`.
+
+    Calls the kernel's `enumerate_doubly_even_with_profile` entry
+    (requires the kernel to be built with
+    ``--features parallel_profiling``) and captures the per-worker /
+    per-seed breakdown into ``PerNResult.parallel_profile``. The
+    timing-overhead added by the in-kernel Instant calls is small
+    (~tens of ns per traverse), but profile-mode wall times are NOT
+    directly comparable to production-mode wall times.
+    """
+    if _kernel is None:
+        raise RuntimeError("--profile-parallel requires the doubly_even_kernel wheel")
+    if not hasattr(_kernel, "enumerate_doubly_even_with_profile"):
+        raise RuntimeError(
+            "--profile-parallel requires the kernel to be built with "
+            "`--features parallel_profiling`. The currently installed wheel "
+            "does not export `enumerate_doubly_even_with_profile`."
+        )
+    factorial_N = math.factorial(N)
+    cap = N // 2
+    quota_vec = [gaborit_sigma(N, k) for k in range(cap + 1)]
+    canon_info_cache_clear()
+    rref_cache_clear()
+    dual_cache_clear()
+    weight_enum_cache_clear()
+    t0 = time.perf_counter()
+    raw, stats, _per_k, profile = _kernel.enumerate_doubly_even_with_profile(
+        N, cap, quota_vec, factorial_N, num_threads,
+    )
+    wall = time.perf_counter() - t0
+    workers, seeds, frontier_depth, total_wall_ns = profile
+    result = PerNResult(N=N, seconds=wall)
+    for rref, _ccol, _gens, aord_str, _orbits in raw:
+        k = len(rref)
+        slot = result.per_k.setdefault(k, PerKResult(k=k))
+        slot.classes += 1
+        slot.mass += factorial_N // int(aord_str)
+        result.classes += 1
+    result.kernel_stats = {
+        name: int(stats[i]) for i, name in enumerate(KERNEL_STATS_LAYOUT)
+    }
+    result.parallel_profile = {
+        "num_threads": int(num_threads),
+        "frontier_depth": int(frontier_depth),
+        "total_wall_ns": int(total_wall_ns),
+        "workers": [
+            {
+                "worker_id": int(w[0]),
+                "active_ns": int(w[1]),
+                "idle_ns": int(w[2]),
+                "seed_count": int(w[3]),
+            }
+            for w in workers
+        ],
+        "seeds": [
+            {
+                "worker_id": int(s[0]),
+                "seed_id": int(s[1]),
+                "ns": int(s[2]),
+                "nodes": int(s[3]),
+                "emitted": int(s[4]),
+            }
+            for s in seeds
+        ],
+    }
+    return result
+
+
+def _gini(values: list[int]) -> float:
+    """Gini coefficient of a list of non-negative integers (0 = equal,
+    → 1 = maximally concentrated). Returns 0.0 for an empty or all-zero
+    input."""
+    if not values:
+        return 0.0
+    s = sum(values)
+    if s == 0:
+        return 0.0
+    sorted_vals = sorted(values)
+    n = len(sorted_vals)
+    cum = 0
+    for i, v in enumerate(sorted_vals, start=1):
+        cum += i * v
+    return (2.0 * cum) / (n * s) - (n + 1.0) / n
+
+
+def render_profile_summary(r: PerNResult) -> str:
+    """Human-readable summary of a `parallel_profile` payload."""
+    p = r.parallel_profile
+    if p is None:
+        return ""
+    workers = p["workers"]
+    seeds = p["seeds"]
+    nt = p["num_threads"]
+    fd = p["frontier_depth"]
+    wall_s = p["total_wall_ns"] / 1e9
+    if not workers:
+        return f"  (no worker data — sequential fallback at N={r.N})"
+    active_ns = [w["active_ns"] for w in workers]
+    idle_ns = [w["idle_ns"] for w in workers]
+    max_active = max(active_ns)
+    min_active = min(active_ns)
+    mean_active = sum(active_ns) / len(active_ns)
+    idle_pct = 100.0 * sum(idle_ns) / max(sum(active_ns) + sum(idle_ns), 1)
+    # Worker imbalance: ratio of max-worker active to mean active. 1.0 =
+    # perfectly balanced; > 1.0 = one worker holds more than its share.
+    imbalance = max_active / max(mean_active, 1.0)
+    seeds_ns = [s["ns"] for s in seeds]
+    seed_gini = _gini(seeds_ns)
+    top5 = sorted(seeds, key=lambda s: s["ns"], reverse=True)[:5]
+    top5_share = sum(s["ns"] for s in top5) / max(sum(seeds_ns), 1) * 100.0
+    lines = [
+        f"  N={r.N}  threads={nt}  frontier_depth={fd}  wall={wall_s:.3f} s",
+        f"  workers: max_active={max_active / 1e6:.1f} ms  "
+        f"min_active={min_active / 1e6:.1f} ms  "
+        f"mean={mean_active / 1e6:.1f} ms  "
+        f"imbalance(max/mean)={imbalance:.2f}×",
+        f"  idle: {idle_pct:.1f} % of total worker time spent in recv()",
+        f"  seeds: total={len(seeds)}  gini={seed_gini:.3f}  "
+        f"top-5 share = {top5_share:.1f} %",
+    ]
+    if top5:
+        lines.append("  top-5 heaviest seeds (worker, seed, ms, nodes, emitted):")
+        for s in top5:
+            lines.append(
+                f"    w{s['worker_id']:>2}  s{s['seed_id']:>3}  "
+                f"{s['ns'] / 1e6:>7.1f} ms  "
+                f"nodes={s['nodes']:>7}  emitted={s['emitted']:>5}"
+            )
+    return "\n".join(lines)
+
+
+def write_profile_json(label: str, results: list[PerNResult]) -> Path:
+    """Write the profile payload to a separate JSON next to the main
+    bench JSON. Single-file rather than appended so subsequent runs at
+    different (N, threads, depth) don't overwrite."""
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_dir = HERE / "bench-results"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{ts}-{label}-profile.json"
+    payload = {
+        "label": label,
+        "timestamp_utc": ts,
+        "git_sha": git_sha(),
+        "per_N": {
+            r.N: {
+                "seconds": r.seconds,
+                "classes": r.classes,
+                "kernel_stats": r.kernel_stats,
+                "parallel_profile": r.parallel_profile,
+            }
+            for r in results
+            if r.parallel_profile is not None
+        },
+    }
+    out_path.write_text(json.dumps(payload, indent=2) + "\n")
+    return out_path
 
 
 def check_against_table(results: list[PerNResult]) -> list[str]:
@@ -307,6 +470,14 @@ def parse_args() -> argparse.Namespace:
         help="Run cProfile on a single value of N and dump a .prof file "
         "next to the script. Implies a single-N run.",
     )
+    p.add_argument(
+        "--profile-parallel",
+        action="store_true",
+        help="Call the kernel's `enumerate_doubly_even_with_profile` "
+        "entry (requires `--features parallel_profiling`) and dump a "
+        "per-worker / per-seed JSON next to the main bench JSON. "
+        "DOUBLY_EVEN_THREADS must be set to ≥ 2.",
+    )
     return p.parse_args()
 
 
@@ -324,6 +495,34 @@ def main() -> int:
         results = [result]
         print(f"cProfile output: {prof_path}")
         print(format_table(results), flush=True)
+    elif args.profile_parallel:
+        nt = _parse_thread_env(_os.environ.get("DOUBLY_EVEN_THREADS"))
+        if nt is None or nt < 2:
+            raise SystemExit(
+                "--profile-parallel needs DOUBLY_EVEN_THREADS >= 2; "
+                "otherwise the kernel falls back to the sequential driver."
+            )
+        Ns = [int(s.strip()) for s in args.N.split(",") if s.strip()]
+        results = []
+        print(MAIN_HEADER, flush=True)
+        for N in Ns:
+            r = run_one_with_profile(N, nt)
+            results.append(r)
+            print(format_main_row(r), flush=True)
+        if any(r.kernel_stats for r in results):
+            print()
+            print(STATS_HEADER, flush=True)
+            for r in results:
+                if r.kernel_stats:
+                    print(format_stats_row(r), flush=True)
+        print()
+        print("parallel-profile summary:")
+        for r in results:
+            summary = render_profile_summary(r)
+            if summary:
+                print(summary)
+        profile_path = write_profile_json(args.label, results)
+        print(f"\nWrote profile JSON {profile_path}")
     else:
         Ns = [int(s.strip()) for s in args.N.split(",") if s.strip()]
         results = []
