@@ -108,6 +108,12 @@ struct WorkerState {
     quota: Vec<u128>,
     mass_at_k: Vec<u128>,
     factorial_n: u128,
+    /// When true, the two mass-stop branches in [`traverse`] (`mass_at_k[k+1]
+    /// >= quota[k+1]` checks before and inside the candidate loop) become
+    /// no-ops. Read once from `DOUBLY_EVEN_NO_MASS_STOP` at construction;
+    /// kept off the parallel workers regardless because they already have
+    /// `quota = u128::MAX`. Ablation knob for the refactor profiling pass.
+    skip_mass_stop: bool,
     canon_cache: LruCache<Vec<BinVec>, Rc<CachedInfo>>,
     /// Per-k breakdown of `is_canonical_augmentation` outcomes. Indexed by
     /// the parent rank (i.e., rank of C; the child D has rank k+1). Used
@@ -274,12 +280,16 @@ impl WorkerState {
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         let feature_on = cfg!(feature = "equivalence_verifier");
+        let skip_mass_stop = std::env::var("DOUBLY_EVEN_NO_MASS_STOP")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
         Self {
             n,
             max_k,
             quota,
             mass_at_k: vec![0u128; len],
             factorial_n,
+            skip_mass_stop,
             canon_cache: LruCache::new(canon_cache_capacity()),
             stats_is_canon_aug_calls_by_k: vec![0u64; len],
             stats_parent_eq_hits_by_k: vec![0u64; len],
@@ -686,7 +696,9 @@ impl WorkerState {
         if k >= self.max_k {
             return;
         }
-        if self.mass_at_k[k as usize + 1] >= self.quota[k as usize + 1] {
+        if !self.skip_mass_stop
+            && self.mass_at_k[k as usize + 1] >= self.quota[k as usize + 1]
+        {
             self.stats_mass_stop_pre_loop_by_k[k as usize] += 1;
             return;
         }
@@ -706,7 +718,9 @@ impl WorkerState {
         let total = candidates.len() as u64;
         self.stats_candidates_total_seen_by_k[k as usize] += total;
         for (idx, v) in candidates.iter().enumerate() {
-            if self.mass_at_k[k as usize + 1] >= self.quota[k as usize + 1] {
+            if !self.skip_mass_stop
+                && self.mass_at_k[k as usize + 1] >= self.quota[k as usize + 1]
+            {
                 let remaining = total - idx as u64;
                 self.stats_mass_stop_in_loop_by_k[k as usize] += 1;
                 self.stats_candidates_skipped_by_k[k as usize] += remaining;
