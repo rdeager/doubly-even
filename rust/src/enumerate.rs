@@ -45,7 +45,7 @@ use crate::canon::{canon_info_native, canon_info_qd_native, NativeCanonInfo, QD_
 #[cfg(feature = "dense_qd")]
 use crate::experimental::canon_dense_qd::canon_info_qd_dense;
 #[cfg(feature = "traces_qd")]
-use crate::canon::canon_info_qd_traces;
+use crate::experimental::canon_traces_qd::canon_info_qd_traces;
 use crate::candidates::doubly_even_candidates_q;
 use crate::linalg::{apply_permutation, row_reduce};
 #[cfg(feature = "equivalence_verifier")]

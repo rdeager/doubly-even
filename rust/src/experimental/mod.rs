@@ -23,6 +23,8 @@
 pub mod canon_dense_qd;
 #[cfg(feature = "nauty_hist")]
 pub mod canon_hist;
+#[cfg(feature = "traces_qd")]
+pub mod canon_traces_qd;
 pub mod feulner;
 pub mod feulner_clb;
 pub mod invariants;

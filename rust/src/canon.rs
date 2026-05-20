@@ -21,8 +21,6 @@ use std::ptr;
 use nauty_Traces_sys::{
     optionblk, sparsegraph, sparsenauty, statsblk, FALSE, TRUE,
 };
-#[cfg(feature = "traces_qd")]
-use nauty_Traces_sys::{Traces, TracesOptions, TracesStats};
 
 use crate::linalg::row_reduce;
 use crate::types::BinVec;
@@ -94,24 +92,6 @@ pub(crate) extern "C" fn auto_callback(
     let mut col_perm = vec![0u32; n - l as usize];
     // `perm[i] = j` means "old vertex i → new vertex j" in nauty's convention.
     // Columns live in `[l, n)`; restrict the action and re-zero the index.
-    for old in (l as usize)..n {
-        let new_v = unsafe { *perm.add(old) } as u32;
-        col_perm[old - l as usize] = new_v - l;
-    }
-    AUT_BUFFER.with(|cell| cell.borrow_mut().push(col_perm));
-}
-
-// Traces' userautomproc has a different signature than sparsenauty's:
-// (count, perm, n) instead of (count, perm, orbits, numorbits, stabvertex, n).
-#[cfg(feature = "traces_qd")]
-unsafe extern "C" fn auto_callback_traces(
-    _count: c_int,
-    perm: *mut c_int,
-    n: c_int,
-) {
-    let l = LEFT_VERTEX_COUNT.with(|cell| *cell.borrow());
-    let n = n as usize;
-    let mut col_perm = vec![0u32; n - l as usize];
     for old in (l as usize)..n {
         let new_v = unsafe { *perm.add(old) } as u32;
         col_perm[old - l as usize] = new_v - l;
@@ -655,103 +635,6 @@ pub fn canon_info_qd_native(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> 
         numnodes: stats.numnodes as u64,
         tctotal: stats.tctotal as u64,
         maxlevel: stats.maxlevel as i32,
-        numgenerators: stats.numgenerators as i32,
-    })
-}
-
-// ------------------------------------------------------- Traces Q_D-graph
-//
-// Q6 audit Phase 3: Traces is "generally recommended for sparse graphs
-// with many automorphisms, which describes our case" (audit §2(e)) but
-// has never been benched. Identical sparse-graph input; different
-// canonicalisation engine. `TracesOptions` lacks `invarproc` /
-// `mininvarlevel` / `maxinvarlevel`.
-
-#[cfg(feature = "traces_qd")]
-pub fn canon_info_qd_traces(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> {
-    let (mut v, mut d, mut e, mut lab, mut ptn, l) = build_low_weight_sparsegraph(rref, n)?;
-    let r: usize = n as usize;
-    let total = l + r;
-
-    let mut sg = sparsegraph {
-        nde: e.len(),
-        v: v.as_mut_ptr(),
-        nv: total as c_int,
-        d: d.as_mut_ptr(),
-        e: e.as_mut_ptr(),
-        w: ptr::null_mut(),
-        vlen: v.len(),
-        dlen: d.len(),
-        elen: e.len(),
-        wlen: 0,
-    };
-
-    let mut orbits = vec![0i32; total];
-    let mut options = TracesOptions {
-        getcanon: TRUE,
-        defaultptn: FALSE,
-        userautomproc: Some(auto_callback_traces),
-        ..TracesOptions::default()
-    };
-    let mut stats = TracesStats::default();
-
-    let mut cg_v = vec![0usize; total];
-    let mut cg_d = vec![0i32; total];
-    let mut cg_e = vec![0i32; e.len()];
-    let mut canon_sg = sparsegraph {
-        nde: 0,
-        v: cg_v.as_mut_ptr(),
-        nv: total as c_int,
-        d: cg_d.as_mut_ptr(),
-        e: cg_e.as_mut_ptr(),
-        w: ptr::null_mut(),
-        vlen: cg_v.len(),
-        dlen: cg_d.len(),
-        elen: cg_e.len(),
-        wlen: 0,
-    };
-
-    AUT_BUFFER.with(|cell| cell.borrow_mut().clear());
-    LEFT_VERTEX_COUNT.with(|cell| *cell.borrow_mut() = l as u32);
-
-    unsafe {
-        Traces(
-            &mut sg,
-            lab.as_mut_ptr(),
-            ptn.as_mut_ptr(),
-            orbits.as_mut_ptr(),
-            &mut options,
-            &mut stats,
-            &mut canon_sg,
-        );
-    }
-
-    let mut new_to_old_right: Vec<u32> = Vec::with_capacity(r);
-    for new_index in 0..total {
-        let old_vertex = lab[new_index] as usize;
-        if old_vertex >= l {
-            new_to_old_right.push((old_vertex - l) as u32);
-        }
-    }
-    let mut canonical_column_order = vec![0u32; r];
-    for (new_col, &old_col) in new_to_old_right.iter().enumerate() {
-        canonical_column_order[old_col as usize] = new_col as u32;
-    }
-
-    let column_orbits: Vec<u32> = orbits[l..].iter().map(|&x| x as u32).collect();
-    let aut_generators = AUT_BUFFER.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
-
-    // Traces doesn't expose numnodes/tctotal/maxlevel — emit zeros for
-    // those Q6 counters; numgenerators is still in TracesStats.
-    Some(NativeCanonInfo {
-        canonical_column_order,
-        aut_generators,
-        column_orbits,
-        grpsize1: stats.grpsize1,
-        grpsize2: stats.grpsize2 as i32,
-        numnodes: 0,
-        tctotal: 0,
-        maxlevel: 0,
         numgenerators: stats.numgenerators as i32,
     })
 }
