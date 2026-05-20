@@ -307,7 +307,7 @@ maturin build --release --features parallel -m rust/Cargo.toml \
   && uv pip install rust/target/wheels/doubly_even_kernel-*.whl
 ```
 
-At runtime, set `DOUBLY_EVEN_THREADS`. Post-D13-V4 measurements on
+At runtime, set `DOUBLY_EVEN_THREADS`. Post-D13-V5 measurements on
 the 13700K (16 physical / 24 logical) confirm:
 
 - **N = 22**: sweet spot at `t = 20` (mean 0.691 s over 3 runs;
@@ -317,9 +317,16 @@ the 13700K (16 physical / 24 logical) confirm:
   remains `t = N − 2`; on hybrid the actual sweet spot is empirical
   per topology — see `architecture/07-parallel-scaling-profile.md`
   § "V4 contention/memory sprint".
-- **N = 24** (and presumably larger N): full core count is best
-  (e.g., 22 on the 13700K). The deeper tree absorbs the contention
-  cost because there's more parallel work to amortise.
+- **N ≥ 24**: sweet spot at **`t = 24` (full logical core count)**.
+  D13-V5 re-measurement (2026-05-23) on the 13700K:
+  N=24 t=24 = 8.90 s vs t=22 = 9.12 s (**-2.4 %**, mean of 3);
+  N=26 t=24 = 169.8 s vs t=20 = 184.2 s (**-7.8 %**). V4's
+  per-call thread-local scratch + mimalloc cut SMT contention enough
+  that oversubscribed P-core siblings now pay back the latency cost.
+  Going above 24 (t=26, t=28) regresses — true logical-core
+  count is the ceiling, not a target to exceed. See
+  `architecture/07-parallel-scaling-profile.md` § "V5 thread-count
+  recalibration".
 
 `DOUBLY_EVEN_FRONTIER_DEPTH` defaults to 4 and rarely needs
 tweaking — at N ≥ 24 a value of 5 is better because the tree is
@@ -335,20 +342,41 @@ OOMs; this env var is the unlock that landed in `fd530cb`.
 # N ≤ 22 — leave 2 cores headroom (use t = cores − 2):
 DOUBLY_EVEN_THREADS=20 uv run python scripts/bench.py \
   --label parallel-t20 --N 18,20,22
-# Larger N — full core count + deeper cut:
-DOUBLY_EVEN_THREADS=22 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
-  uv run python scripts/bench.py --label parallel-t22-d5 --N 24
-# N = 26 — cap canon cache to avoid OOM at 20+ workers:
-DOUBLY_EVEN_THREADS=20 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
+# N ≥ 24 — full logical-core count (V5 finding) + deeper cut:
+DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
+  uv run python scripts/bench.py --label parallel-t24-d5 --N 24
+# N = 26 — cap canon cache to avoid OOM at 24 workers:
+DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
   DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
-  uv run python scripts/bench.py --label parallel-t20-d5-n26 --N 26
+  uv run python scripts/bench.py --label parallel-t24-d5-n26 --N 26
 ```
 
-Post-V4 improvements still deferred: adaptive per-seed depth
-selection (split heavy seeds at depth 5 or 6 while light seeds stay
-at depth 4) — estimated 10-15 % at N=22 / much more at N=24. Shared
-canon LRU cross workers (lock-free reads) — estimated 3-5 %. Both
-are bigger surgery than V4 and deferred to a separate session.
+D13-V5 sprint (2026-05-23) investigated and closed the two named
+post-V4 candidates:
+- **Adaptive per-seed depth**: doesn't apply at N ≥ 24. Channel-based
+  load balancing already absorbs the heavy-seed tail (N=24 t=22
+  max/mean = 1.01× per `parallel_profiling` measurement; the N=22
+  1.28× imbalance is an N ≤ 22-shape artifact). Forcing adaptive
+  recursion at the boundary regresses N=24 by **+43-56 %** when
+  enabled at any threshold — the depth-4 → 5 split explodes the
+  seed set, the bounded channel backpressures, and the seeder runs
+  finely-grained work that workers could otherwise parallelise.
+  Profile data + analysis in
+  `architecture/07-parallel-scaling-profile.md` § "V5 thread-count
+  recalibration". No code change shipped.
+- **Shared canon LRU**: intra-worker primary-cache hit rate at N=24
+  is only **3.13 %** (41 K hits / 1.31 M is_canon_aug calls). The
+  cross-worker dedup opportunity is capped by the same rate; even
+  if every per-worker miss became a shared hit, the wall reduction
+  ceiling is ~4 %, and DashMap shard contention plus `Rc → Arc`
+  surgery would eat most of it. Below the engineering threshold for
+  "final lever" status. Closed.
+
+The shipped V5 win is **the threading recommendation update**: use
+`t = 24` (full logical-core count) at N ≥ 24, not `t = 22` as the
+post-V4 docs suggested. Pure env-var change, no recompile. V4's
+per-call thread-local scratch + mimalloc cut SMT contention enough
+that oversubscribed P-cores now pay back the latency cost.
 
 ## Useful commands
 
