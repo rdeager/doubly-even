@@ -62,7 +62,7 @@ wall = time.perf_counter() - t0
 out = {{"N": {N}, "wall": wall, "classes": classes, "per_k": per_k}}
 # If using the sage backend, dump per-process IPC stats too.
 if {backend!r} == 'sage_partn_ref':
-    from doubly_even.canon.sage_proxy import stats
+    from doubly_even.canon.experimental.sage_proxy import stats
     out['sage_stats'] = stats()
 print('@@RESULT@@' + json.dumps(out))
 """

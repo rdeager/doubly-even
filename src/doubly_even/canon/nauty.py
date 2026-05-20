@@ -112,7 +112,8 @@ def canon_info(C: Code) -> CanonInfo:
     2. ``DOUBLY_EVEN_CANON_BACKEND=sage_partn_ref`` → bench-only daemon
        path that proxies to a long-lived Sage subprocess running
        :class:`LinearBinaryCodeStruct` (Robert Miller's binary-specialised
-       partition refinement). See :mod:`doubly_even.canon.sage_proxy`.
+       partition refinement). See
+       :mod:`doubly_even.canon.experimental.sage_proxy`.
     3. Rust kernel built → :func:`_canon_info_via_kernel` (nauty bipartite path).
     4. Pure Python fallback → :func:`_canon_info_via_pynauty`.
     """
@@ -121,7 +122,7 @@ def canon_info(C: Code) -> CanonInfo:
         from .feulner import canon_info_feulner_native
         return canon_info_feulner_native(C)
     if _CANON_BACKEND == "sage_partn_ref":
-        from .sage_proxy import canon_info_via_sage
+        from .experimental.sage_proxy import canon_info_via_sage
         return canon_info_via_sage(C)
     if _kernel is not None:
         return _canon_info_via_kernel(C)
