@@ -20,9 +20,9 @@
 //! reducing yields cf's row-span.
 
 use crate::feulner::{
-    compute_column_orbits, individualise, initial_partition,
-    invariant_refiners, perm_compose, perm_inverse, refine, PartialKey, Perm,
+    individualise, initial_partition, invariant_refiners, refine, PartialKey, Perm,
 };
+use crate::permutations::{compute_column_orbits, perm_compose, perm_inverse};
 use crate::types::BinVec;
 
 /// Sorted weight multiset of all `2^k` codewords spanned by `rref`. Cheap

@@ -50,7 +50,8 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use crate::feulner::{perm_compose, perm_identity, perm_inverse, Perm};
+use crate::feulner::{perm_identity, Perm};
+use crate::permutations::{perm_compose, perm_inverse};
 
 const ROOT: u32 = u32::MAX;
 

@@ -26,6 +26,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::feulner_clb::LabelledBranching;
+use crate::permutations::{compute_column_orbits, perm_compose, perm_inverse};
 use crate::types::BinVec;
 
 /// Output of [`canon_info_feulner`], mirroring `canon.feulner.CanonInfo`.
@@ -47,20 +48,6 @@ pub(crate) type Perm = Vec<u32>;
 
 pub(crate) fn perm_identity(n: u32) -> Perm {
     (0..n).collect()
-}
-
-/// `(p ∘ q)[i] = p[q[i]]` — apply `q` first, then `p`. Same convention as
-/// `doubly_even.canon.permutations.compose`.
-pub(crate) fn perm_compose(p: &[u32], q: &[u32]) -> Perm {
-    q.iter().map(|&qi| p[qi as usize]).collect()
-}
-
-pub(crate) fn perm_inverse(p: &[u32]) -> Perm {
-    let mut inv = vec![0u32; p.len()];
-    for (i, &j) in p.iter().enumerate() {
-        inv[j as usize] = i as u32;
-    }
-    inv
 }
 
 // ------------------------------------- Schreier–Sims for permutation groups
@@ -136,43 +123,6 @@ pub fn group_order(gens: &[Perm], n: u32) -> u128 {
 }
 
 // ----------------------------------------------------- column-orbit helpers
-
-pub(crate) fn compute_column_orbits(aut_gens: &[Perm], n: u32) -> Vec<u32> {
-    let mut parent: Vec<u32> = (0..n).collect();
-
-    fn find(parent: &mut [u32], i: u32) -> u32 {
-        let mut cur = i;
-        while parent[cur as usize] != cur {
-            let next = parent[cur as usize];
-            let gp = parent[next as usize];
-            parent[cur as usize] = gp;
-            cur = gp;
-        }
-        cur
-    }
-
-    fn union(parent: &mut [u32], a: u32, b: u32) {
-        let ra = find(parent, a);
-        let rb = find(parent, b);
-        if ra == rb {
-            return;
-        }
-        if ra < rb {
-            parent[rb as usize] = ra;
-        } else {
-            parent[ra as usize] = rb;
-        }
-    }
-
-    for g in aut_gens {
-        for (i, &j) in g.iter().enumerate() {
-            if i as u32 != j {
-                union(&mut parent, i as u32, j);
-            }
-        }
-    }
-    (0..n).map(|i| find(&mut parent, i)).collect()
-}
 
 /// Orbit-rep map under `⟨gens⟩` restricted to `subset`. Assumes each `g`
 /// maps `subset` to itself (the caller filters gens by "fixes path", which

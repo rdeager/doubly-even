@@ -47,7 +47,6 @@ use crate::canon::canon_info_qd_dense;
 #[cfg(feature = "traces_qd")]
 use crate::canon::canon_info_qd_traces;
 use crate::candidates::doubly_even_candidates_q;
-use crate::feulner::{perm_compose, perm_inverse};
 use crate::linalg::{apply_permutation, row_reduce};
 #[cfg(feature = "equivalence_verifier")]
 use crate::paired_iso::{
@@ -55,7 +54,9 @@ use crate::paired_iso::{
     reconstruct_canonical_column_order, reconstruct_column_orbits,
     EquitableResult, PairedIsoCachedCf,
 };
-use crate::permutations::{aut_order_exact, dual_basis};
+use crate::permutations::{
+    aut_order_exact, compute_column_orbits, dual_basis, perm_compose, perm_inverse,
+};
 use crate::subspace_orbit::subspace_in_orbit;
 use crate::types::BinVec;
 
@@ -550,10 +551,7 @@ impl WorkerState {
                     .iter()
                     .map(|g| perm_compose(sigma, &perm_compose(g, &sigma_inv)))
                     .collect();
-                let orbits_canonical = crate::feulner::compute_column_orbits(
-                    &gens_canonical,
-                    self.n,
-                );
+                let orbits_canonical = compute_column_orbits(&gens_canonical, self.n);
                 let info_canonical = Rc::new(CachedInfo {
                     canonical_column_order: (0..self.n).collect(),
                     aut_generators: gens_canonical,

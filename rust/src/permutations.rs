@@ -1,4 +1,7 @@
-//! Small Schreier-Sims for exact `|Aut|` and dual-basis construction.
+//! Small Schreier-Sims for exact `|Aut|` and dual-basis construction,
+//! plus the column-permutation utilities (`perm_compose`, `perm_inverse`,
+//! `compute_column_orbits`) shared by the hot path and the dormant
+//! Feulner / paired-iso substrate.
 //!
 //! Direct port of `doubly_even.canon.permutations.group_order` — exact
 //! permutation-group order via base-point orbits + Schreier generators.
@@ -7,17 +10,58 @@ use std::collections::{HashMap, HashSet};
 
 use crate::types::{BinVec, ColPerm};
 
-/// Compose: `(p ∘ q)[i] = p[q[i]]`.
-fn compose(p: &[u32], q: &[u32]) -> Vec<u32> {
+/// Compose two column permutations: `(p ∘ q)[i] = p[q[i]]` — apply `q`
+/// first, then `p`. Mirrors `doubly_even.canon.permutations.compose`.
+pub(crate) fn perm_compose(p: &[u32], q: &[u32]) -> Vec<u32> {
     q.iter().map(|&i| p[i as usize]).collect()
 }
 
-fn inverse(p: &[u32]) -> Vec<u32> {
+/// Inverse of a column permutation.
+pub(crate) fn perm_inverse(p: &[u32]) -> Vec<u32> {
     let mut inv = vec![0u32; p.len()];
     for (i, &j) in p.iter().enumerate() {
         inv[j as usize] = i as u32;
     }
     inv
+}
+
+/// Union-find over `n` points: each generator's non-fixed `(i, g[i])`
+/// pair gets unioned. Returns the root of each column's orbit.
+pub(crate) fn compute_column_orbits(aut_gens: &[Vec<u32>], n: u32) -> Vec<u32> {
+    let mut parent: Vec<u32> = (0..n).collect();
+
+    fn find(parent: &mut [u32], i: u32) -> u32 {
+        let mut cur = i;
+        while parent[cur as usize] != cur {
+            let next = parent[cur as usize];
+            let gp = parent[next as usize];
+            parent[cur as usize] = gp;
+            cur = gp;
+        }
+        cur
+    }
+
+    fn union(parent: &mut [u32], a: u32, b: u32) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra == rb {
+            return;
+        }
+        if ra < rb {
+            parent[rb as usize] = ra;
+        } else {
+            parent[ra as usize] = rb;
+        }
+    }
+
+    for g in aut_gens {
+        for (i, &j) in g.iter().enumerate() {
+            if i as u32 != j {
+                union(&mut parent, i as u32, j);
+            }
+        }
+    }
+    (0..n).map(|i| find(&mut parent, i)).collect()
 }
 
 /// Exact order of `⟨generators⟩` acting on `n` points.
@@ -46,7 +90,7 @@ pub fn group_order(generators: &[ColPerm], n: u32) -> u128 {
                     let q = g[p as usize];
                     if !transversal.contains_key(&q) {
                         let t_p = transversal[&p].clone();
-                        transversal.insert(q, compose(g, &t_p));
+                        transversal.insert(q, perm_compose(g, &t_p));
                         orbit.push(q);
                         next.push(q);
                     }
@@ -64,9 +108,9 @@ pub fn group_order(generators: &[ColPerm], n: u32) -> u128 {
             let t_p = transversal[p].clone();
             for g in &gens {
                 let q = g[*p as usize];
-                let t_q_inv = inverse(&transversal[&q]);
-                let inner = compose(g, &t_p);
-                let schreier = compose(&t_q_inv, &inner);
+                let t_q_inv = perm_inverse(&transversal[&q]);
+                let inner = perm_compose(g, &t_p);
+                let schreier = perm_compose(&t_q_inv, &inner);
                 if schreier != identity {
                     new_gens.insert(schreier);
                 }
