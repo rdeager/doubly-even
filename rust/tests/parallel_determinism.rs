@@ -8,9 +8,12 @@
 //! 2. Per-rank class counts match between sequential and parallel runs.
 //! 3. The `aut_order` field per canonical RREF matches.
 //!
-//! Coverage: `N = 12, 14`. `N = 12, max_k = 6` has 7 ranks and 21 depth-3
-//! frontier nodes, enough to exercise the worker pool. `N = 14, max_k = 7`
-//! is larger and stresses load balance across workers.
+//! Coverage: `N = 12, 14, 16`. `N = 12, max_k = 6` has 7 ranks and 21
+//! depth-3 frontier nodes, enough to exercise the worker pool.
+//! `N = 14, max_k = 7` is larger and stresses load balance.
+//! `N = 16, max_k = 8` is the smallest case where the pipelined seeder
+//! sees a frontier large enough that worker-overlap is visibly non-trivial
+//! — added when the pipelined-seeder splice landed.
 //!
 //! σ(N, k) and N! constants below are from
 //! `doubly_even.spec.mass.gaborit_sigma` (Python source); see the
@@ -54,6 +57,20 @@ const SIGMA_N14: [u128; 8] = [
     0,
 ];
 const FACT_N14: u128 = 87_178_291_200;
+
+/// σ(16, k) for k = 0..8.
+const SIGMA_N16: [u128; 9] = [
+    1,
+    16_511,
+    22_891_115,
+    3_451_225_635,
+    62_449_776_675,
+    143_919_296_235,
+    44_388_662_175,
+    1_885_422_825,
+    9_845_550,
+];
+const FACT_N16: u128 = 20_922_789_888_000;
 
 fn check_parallel_matches_sequential(
     n: u32,
@@ -106,6 +123,16 @@ fn parallel_matches_sequential_n14() {
         7,
         SIGMA_N14.to_vec(),
         FACT_N14,
+    );
+}
+
+#[test]
+fn parallel_matches_sequential_n16() {
+    check_parallel_matches_sequential(
+        16,
+        8,
+        SIGMA_N16.to_vec(),
+        FACT_N16,
     );
 }
 

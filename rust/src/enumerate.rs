@@ -257,20 +257,6 @@ fn weight_enum(rref: &[BinVec]) -> Vec<u32> {
     weights
 }
 
-/// Compose two column permutations: `(p ∘ q)[i] = p[q[i]]`.
-fn compose_perm(p: &[u32], q: &[u32]) -> Vec<u32> {
-    q.iter().map(|&i| p[i as usize]).collect()
-}
-
-/// Inverse of a column permutation.
-fn inverse_perm(p: &[u32]) -> Vec<u32> {
-    let mut inv = vec![0u32; p.len()];
-    for (i, &j) in p.iter().enumerate() {
-        inv[j as usize] = i as u32;
-    }
-    inv
-}
-
 impl WorkerState {
     pub(crate) fn new(n: u32, max_k: u32, quota: Vec<u128>, factorial_n: u128) -> Self {
         let len = (max_k + 1) as usize;
@@ -545,7 +531,7 @@ impl WorkerState {
         }
         let parent_in_canon: &[BinVec] = &rref_rows[..rref_rows.len() - 1];
         // Apply inverse σ.
-        let inv_sigma: Vec<u32> = inverse_perm(canonical_column_order);
+        let inv_sigma: Vec<u32> = perm_inverse(canonical_column_order);
         let parent_basis: Vec<BinVec> = parent_in_canon
             .iter()
             .map(|&b| apply_permutation(b, &inv_sigma))
@@ -685,11 +671,16 @@ impl WorkerState {
     /// Variant of [`Self::traverse`] used by the parallel seeder.
     ///
     /// Behaves identically to `traverse` for `k < frontier_depth`. At
-    /// `k == frontier_depth` the node is captured into `frontier` (as a
-    /// by-value, `Send`-friendly [`SeedFrontier`]) — it is NOT pushed
-    /// into `self.output` and recursion stops. The worker that receives
-    /// this seed will call `traverse` on it, which will emit the node
-    /// and recurse through the rest of the subtree.
+    /// `k == frontier_depth` the node is sent on `task_tx` (as a by-value,
+    /// `Send`-friendly [`SeedFrontier`]) — it is NOT pushed into
+    /// `self.output` and recursion stops. The worker that receives this
+    /// seed will call `traverse` on it, emitting the node and recursing
+    /// through the rest of the subtree.
+    ///
+    /// Pipelined: workers consume seeds from the channel as the seeder
+    /// discovers them, overlapping seeder DFS with worker recursion. See
+    /// `architecture/07-parallel-scaling-profile.md` for the Amdahl
+    /// analysis that motivated this design.
     ///
     /// Mass-stop is intentionally disabled during seeding: stopping based
     /// on partial seed mass would preempt valid worker seeds.
@@ -700,7 +691,7 @@ impl WorkerState {
         pivots: Vec<u32>,
         info: Rc<CachedInfo>,
         frontier_depth: u32,
-        frontier: &mut Vec<SeedFrontier>,
+        task_tx: &crossbeam_channel::Sender<SeedFrontier>,
     ) {
         let k = rref.len() as u32;
         if k == frontier_depth {
@@ -708,7 +699,9 @@ impl WorkerState {
                 Ok(info) => info,
                 Err(rc) => (*rc).clone(),
             };
-            frontier.push(SeedFrontier { rref, pivots, info: info_owned });
+            task_tx
+                .send(SeedFrontier { rref, pivots, info: info_owned })
+                .expect("worker pool closed before seeder finished");
             return;
         }
         self.output.push(EnumeratedRaw {
@@ -746,7 +739,7 @@ impl WorkerState {
             if !self.is_canonical_augmentation(k as usize, &rref, &d_rref, &info_d) {
                 continue;
             }
-            self.traverse_seed(d_rref, d_pivots, info_d, frontier_depth, frontier);
+            self.traverse_seed(d_rref, d_pivots, info_d, frontier_depth, task_tx);
         }
     }
 
@@ -874,31 +867,43 @@ pub fn enumerate_doubly_even(
     state.finalize()
 }
 
-/// Parallel driver: outer-DFS subtree fan-out across a worker pool.
+/// Parallel driver: pipelined outer-DFS subtree fan-out across a worker pool.
 ///
-/// Traverses sequentially down to `frontier_depth = 3`, then dispatches each
-/// accepted depth-3 canonical code as an independent subtree task to one of
-/// `num_threads` long-lived workers (crossbeam `bounded` channel). Each worker
-/// runs the existing recursion on its assigned seed with its own canon
-/// cache and stat counters; mass-stop is disabled inside workers (per-worker
-/// quota = `u128::MAX`) so the V1 path loses the global Gaborit quota
-/// pruning (4–11 % regression measured per `architecture/04-optimisations.md`
-/// §D5). The trade is a coarse-grained parallelism win typically dominant
-/// at N ≥ 18.
+/// `num_threads` long-lived workers spawn first and wait on a bounded
+/// crossbeam channel. The seeder runs on the main thread, walking the
+/// canonical-augmentation DFS sequentially through depths `0 ..
+/// frontier_depth - 1` (emitting those codes into the seeder's own
+/// `output`), and **pushing each depth-`frontier_depth` accepted seed
+/// directly into the channel as it discovers it**. Workers pick up
+/// seeds as soon as they arrive, so seeder DFS and worker recursion
+/// overlap on wall time. Bounded channel capacity `(num_threads * 4)
+/// .max(8)` provides backpressure: if workers are saturated, the seeder
+/// blocks on `send` rather than racing ahead.
 ///
-/// V1 conditions for falling back to [`enumerate_doubly_even`]:
+/// This is the producer-consumer model endorsed by DFGHILM Appendix B.4
+/// ("survivors become fodder for the next worker"). It replaces the
+/// pre-2026-05-21 design that built a complete frontier `Vec` before
+/// any worker started — that design left the seeder as a serial
+/// Amdahl ceiling (~44 % of wall at N=22, t=16, d=4, per
+/// `architecture/07-parallel-scaling-profile.md`).
+///
+/// Each worker holds its own canon cache and stat counters; mass-stop
+/// is disabled inside workers (per-worker quota = `u128::MAX`) so the
+/// V1 path loses the global Gaborit quota pruning (4–11 % regression
+/// measured per `architecture/04-optimisations.md` §D5). The trade is
+/// a coarse-grained parallelism win dominant at N ≥ 18.
+///
+/// Fallbacks to [`enumerate_doubly_even`] (the sequential driver):
 ///
 /// - `num_threads <= 1`, OR
-/// - `max_k <= frontier_depth` (no work for workers — the seeder covered it),
-/// - any of the above; the function quietly forwards to the sequential
-///   driver to avoid the worker-pool overhead.
+/// - `max_k <= frontier_depth` (no work for workers — the seeder
+///   would cover everything itself).
 ///
-/// Output ordering: not DFS order. Codes of depth `< frontier_depth` appear
-/// in DFS order (seeder), followed by per-task concatenated output (worker
-/// receive order). Callers that need deterministic order must sort
-/// downstream — Python's `augment.enumerate_doubly_even` already turns the
-/// raw row stream into a generator and downstream consumers (bench,
-/// tests) treat the set as unordered.
+/// Output ordering: not DFS order. Seeder emissions (`k < frontier_depth`)
+/// come in DFS order; worker outputs append in receive order. Callers
+/// that need deterministic order must sort downstream — Python's
+/// `augment.enumerate_doubly_even` already treats the raw stream as
+/// unordered.
 ///
 /// **Safety**: workers call into `sparsenauty` via the bundled
 /// `nauty-Traces-sys` build. The `tls` Cargo feature on
@@ -933,28 +938,10 @@ pub fn enumerate_doubly_even_parallel(
         return enumerate_doubly_even(n, max_k, quota, factorial_n);
     }
 
-    // Phase 1: sequential seeder, walks depths 0..frontier_depth-1, emits
-    // them, and collects the frontier_depth-depth nodes as worker seeds.
-    let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n);
-    let mut frontier: Vec<SeedFrontier> = Vec::new();
-    {
-        let zero_rref: Vec<BinVec> = Vec::new();
-        let zero_pivots: Vec<u32> = Vec::new();
-        let zero_info = seed_state.canon_info(&zero_rref);
-        seed_state.traverse_seed(
-            zero_rref,
-            zero_pivots,
-            zero_info,
-            frontier_depth,
-            &mut frontier,
-        );
-    }
-    if frontier.is_empty() {
-        // No work past frontier_depth (e.g. N tiny). Already finished.
-        return seed_state.finalize();
-    }
-
-    // Phase 2: worker pool.
+    // Worker pool spawns first and waits on the (initially empty)
+    // task channel. The bounded cap doubles as backpressure once the
+    // seeder is producing — saturated workers stall the seeder rather
+    // than letting the queue grow without bound.
     let cap = (num_threads * 4).max(8);
     let (task_tx, task_rx) = bounded::<SeedFrontier>(cap);
     let (result_tx, result_rx) =
@@ -982,8 +969,24 @@ pub fn enumerate_doubly_even_parallel(
     drop(task_rx);
     drop(result_tx);
 
-    for seed in frontier {
-        task_tx.send(seed).expect("worker pool closed unexpectedly");
+    // Seeder runs on the main thread, pushing each frontier-depth seed
+    // into task_tx as the DFS discovers it. Workers (already blocking
+    // on task_rx.recv()) pick them up immediately, overlapping the
+    // seeder's traversal cost with worker recursion. Codes at depths
+    // 0..frontier_depth-1 land in seed_state.output here on the main
+    // thread; depth-`frontier_depth` seeds travel by channel.
+    let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n);
+    {
+        let zero_rref: Vec<BinVec> = Vec::new();
+        let zero_pivots: Vec<u32> = Vec::new();
+        let zero_info = seed_state.canon_info(&zero_rref);
+        seed_state.traverse_seed(
+            zero_rref,
+            zero_pivots,
+            zero_info,
+            frontier_depth,
+            &task_tx,
+        );
     }
     drop(task_tx);
 
