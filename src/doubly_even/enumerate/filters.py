@@ -16,24 +16,36 @@ Furthermore, two cosets in the same ``Aut(C)``-orbit produce
 permutation-equivalent extensions. Taking one representative per orbit is
 the cheap pre-canonical filter.
 
-What this module exposes:
+Module layout
+-------------
+
+This module is in **two halves**:
+
+1. **F_2^N reference oracle** (this docstring through
+   :func:`aut_orbit_minima`). The historical implementation that
+   builds canonical coset reps in the full ``F_2^N`` space — readable,
+   spec-shaped, and preserved as the cross-check oracle for the
+   ``Q_C``-pipeline tests. Not on the hot path.
+
+2. **Hot-path dispatcher** (from :func:`doubly_even_candidates`
+   downward). Routes to the Rust kernel's
+   ``doubly_even_candidates_q`` when the extension module is loaded,
+   otherwise delegates to
+   :func:`doubly_even.enumerate.quotient.doubly_even_candidates_Q`
+   (the σ_Q-coordinate pipeline).
+
+The oracle exposes:
 
 * :func:`coset_reps_in_dual_mod_code` — one element per coset of ``C`` in
-  ``C⊥``. Readable spec; enumerates all ``2^(n-k)`` dual codewords and
-  deduplicates. Retained as the reference oracle for tests.
+  ``C⊥`` via the full-dual deduplication path.
 * :func:`standard_form_coset_reps` — DFGHILM B.3 quotient-space
-  enumeration: directly emits each of the ``2^(n-2k)`` coset reps of
-  doubly even ``C`` in ``C⊥`` without going through ``C⊥``'s full
-  ``2^(n-k)`` elements. This is the function used by
-  :func:`doubly_even_candidates` in the hot path.
-* :func:`weight_mod_four_zero` — keeps cosets whose representative has
-  weight ``≡ 0 (mod 4)``.
-* :func:`aut_orbit_minima` — among a set of candidate cosets, keeps only
-  those that are the lex-min in their ``Aut(C)``-orbit.
+  enumeration: directly emits each of the ``2^(n-2k)`` coset reps.
+* :func:`weight_mod_four_zero` — coset weight filter.
+* :func:`aut_orbit_minima` — orbit-min representative selection.
 
 The chain ``standard_form_coset_reps → weight_mod_four_zero →
-aut_orbit_minima`` is the candidate set that feeds the canonical-
-augmentation test in :mod:`.augment`.
+aut_orbit_minima`` is the F_2^N candidate set used to validate the
+quotient-space pipeline's output in the tests.
 """
 
 from __future__ import annotations
@@ -51,6 +63,9 @@ def reduce_mod_code(v: int, C: Code) -> int:
     column is set in ``v``. The result has bit ``c`` cleared at every pivot
     column ``c``, making cosets uniquely keyed by their value at non-pivot
     columns.
+
+    Shared primitive: used by both the F_2^N reference oracle below and
+    the cross-check tests against the Q_C-coordinate pipeline.
     """
     rref, pivots = C.rref_basis()
     rep = v
@@ -58,6 +73,11 @@ def reduce_mod_code(v: int, C: Code) -> int:
         if (rep >> c) & 1:
             rep ^= row
     return rep
+
+
+# ---------------------------------------------------------------------------
+# F_2^N reference oracle (cross-check only; not on the hot path).
+# ---------------------------------------------------------------------------
 
 
 def coset_reps_in_dual_mod_code(C: Code) -> Iterator[int]:
@@ -199,6 +219,11 @@ def _is_orbit_min(
                     next_queue.append(new_v)
         queue = next_queue
     return True
+
+
+# ---------------------------------------------------------------------------
+# Hot path: kernel dispatcher.
+# ---------------------------------------------------------------------------
 
 
 try:  # pragma: no cover -- import-side switch
