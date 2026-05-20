@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from ..canon.matrix_group import Mat, mat_apply, mat_identity
+from ..canon._linalg_f2 import Mat, mat_apply, mat_identity
 from ..spec.codes import Code
 from ..spec.vectors import wt
 

@@ -1,22 +1,22 @@
-"""Cross-checks for the ``GL(L, F_2)`` Schreier–Sims module.
+"""Cross-checks for the experimental ``GL(L, F_2)`` Schreier–Sims module.
 
 The matrix-group machinery mirrors :mod:`doubly_even.canon.permutations`;
 tests here are structurally analogous to the permutation-group tests
 (``test_canon.py``'s ``group_order`` cases) but on the linear action.
 
+Quarantined under ``tests/experimental/`` because
+:mod:`doubly_even.canon.experimental.schreier_sims_gl` is the
+phase-(b) scaffolding that the active dispatch never reaches.
+
 Validation tiers:
 
-1. ``mat_apply`` agrees with a naïve double-loop reference matrix-vector
-   product. Pins the column-form convention.
-2. ``mat_mul`` associates and respects the action: ``mat_apply(A·B, v) ==
-   mat_apply(A, mat_apply(B, v))``.
-3. ``mat_inv`` round-trip: ``mat_mul(A, mat_inv(A)) == I`` for invertible
+1. ``mat_inv`` round-trip: ``mat_mul(A, mat_inv(A)) == I`` for invertible
    ``A``; raises on singular input.
-4. ``group_order_matrix`` agrees with closed-form ``|GL(L, F_2)|`` on the
+2. ``group_order_matrix`` agrees with closed-form ``|GL(L, F_2)|`` on the
    full transvection generating set, with ``n!`` on permutation-matrix
    embeddings of ``S_n``, and with a direct BFS enumeration of the
    generated group for small groups.
-5. ``group_order_matrix`` on the image of ``Aut(C)`` in ``GL(L, F_2)``
+3. ``group_order_matrix`` on the image of ``Aut(C)`` in ``GL(L, F_2)``
    divides ``|Aut(C)|`` for every parent at small ``N`` (the quotient is
    the kernel size).
 """
@@ -28,36 +28,21 @@ from math import factorial
 
 import pytest
 
-from doubly_even.canon.matrix_group import (
+from doubly_even.canon._linalg_f2 import (
     Mat,
-    group_order_matrix,
     mat_apply,
     mat_identity,
-    mat_inv,
     mat_mul,
+)
+from doubly_even.canon.experimental.schreier_sims_gl import (
+    group_order_matrix,
+    mat_inv,
     orbit_and_transversal_matrix,
     stabilizer_chain,
 )
 from doubly_even.canon.nauty import canon_info
 from doubly_even.enumerate.augment import enumerate_doubly_even
 from doubly_even.enumerate.quotient import Q_basis, aut_image_on_Q
-
-
-# ----------------------------------------------------------- reference helpers
-
-
-def _naive_apply(M: Mat, v: int) -> int:
-    """Reference matrix-vector product, double loop over (row, col)."""
-    L = len(M)
-    out = 0
-    for i in range(L):
-        bit = 0
-        for j in range(L):
-            if (v >> j) & 1 and (M[j] >> i) & 1:
-                bit ^= 1
-        if bit:
-            out |= 1 << i
-    return out
 
 
 def _random_invertible(L: int, rng: random.Random) -> Mat:
@@ -114,43 +99,6 @@ def _bfs_group_order(gens: list[Mat], L: int) -> int:
                     next_queue.append(h)
         queue = next_queue
     return len(seen)
-
-
-# --------------------------------------------------------- mat_apply / mat_mul
-
-
-@pytest.mark.parametrize("L", [3, 5, 8])
-def test_mat_apply_matches_naive(L: int):
-    rng = random.Random(0xC0DE + L)
-    M = _random_invertible(L, rng)
-    for _ in range(64):
-        v = rng.randrange(1 << L)
-        assert mat_apply(M, v) == _naive_apply(M, v), (
-            f"mat_apply mismatch at L={L}, M={M}, v={v:#x}"
-        )
-
-
-@pytest.mark.parametrize("L", [2, 4, 6])
-def test_mat_mul_action_homomorphism(L: int):
-    """``mat_apply(A·B, v) == mat_apply(A, mat_apply(B, v))``."""
-    rng = random.Random(0xBEEF + L)
-    for _ in range(16):
-        A = _random_invertible(L, rng)
-        B = _random_invertible(L, rng)
-        AB = mat_mul(A, B)
-        for _ in range(16):
-            v = rng.randrange(1 << L)
-            assert mat_apply(AB, v) == mat_apply(A, mat_apply(B, v))
-
-
-@pytest.mark.parametrize("L", [2, 4, 6, 8])
-def test_mat_mul_identity(L: int):
-    rng = random.Random(0xFADE + L)
-    I = mat_identity(L)
-    for _ in range(8):
-        A = _random_invertible(L, rng)
-        assert mat_mul(I, A) == A
-        assert mat_mul(A, I) == A
 
 
 # ------------------------------------------------------------------- mat_inv

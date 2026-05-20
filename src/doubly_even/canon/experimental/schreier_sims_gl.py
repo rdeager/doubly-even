@@ -1,21 +1,19 @@
-"""Pure-Python Schreier–Sims on ``GL(L, F_2)``.
+"""Pure-Python Schreier–Sims on ``GL(L, F_2)`` — phase-(b) scaffolding.
 
-Matrices are stored in **column form**: ``M`` is a tuple of ``L`` ints
-where ``M[j]`` is the ``j``-th column of the ``L × L`` matrix over
-``F_2``. Bit ``i`` of ``M[j]`` is the entry at row ``i``, column ``j``.
-The action on a column vector ``v ∈ F_2^L`` (also an ``L``-bit int) is::
+EXPERIMENTAL / dormant. The active dispatcher never reaches this code.
+Reachable only via :func:`doubly_even.enumerate.experimental.quotient_witt.aut_orbit_minima_Q_witt`,
+the Witt phase-(b) orbit-min path that lost to phase (a) at every
+measured ``N`` (see :mod:`doubly_even.enumerate.experimental.quotient_witt`).
+Kept in tree for pedagogical reference and in case the trade-off flips
+at some future ``N``.
 
-    mat_apply(M, v) = XOR over i of M[i] when bit i of v is set
-                    = sum_{i: v_i = 1} M[:, i]
+The four spine primitives this module depends on
+(:data:`Mat`, :func:`mat_identity`, :func:`mat_apply`, :func:`mat_mul`)
+live in :mod:`doubly_even.canon._linalg_f2`.
 
-This matches the convention produced by
-:func:`doubly_even.enumerate.quotient.aut_image_on_Q` and consumed by
-its callers — ``σ_Q[i]`` is "``σ`` applied to the ``i``-th basis vector",
-i.e. the ``i``-th column.
-
-Schreier–Sims structure mirrors :mod:`.permutations` one-to-one:
-:func:`orbit_and_transversal_matrix` is the matrix analogue of
-:func:`.permutations.orbit_and_transversal`, and
+Schreier–Sims structure mirrors :mod:`doubly_even.canon.permutations`
+one-to-one: :func:`orbit_and_transversal_matrix` is the matrix
+analogue of :func:`.permutations.orbit_and_transversal`, and
 :func:`group_order_matrix` mirrors :func:`.permutations.group_order`
 with base points the unit vectors ``1 << 0, …, 1 << (L-1)`` of
 ``F_2^L``. Those form a base for any subgroup of ``GL(L, F_2)`` since
@@ -26,37 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
-
-Mat = tuple[int, ...]
-
-
-def mat_identity(L: int) -> Mat:
-    """Identity in column form: column ``j`` is the unit vector ``e_j``."""
-    return tuple(1 << j for j in range(L))
-
-
-def mat_apply(M: Mat, v: int) -> int:
-    """Apply ``M`` to column vector ``v ∈ F_2^L``.
-
-    Walks only the *set* bits of ``v`` via the ``v & -v`` trick, so cost
-    is ``popcount(v)`` iterations — strictly cheaper than a shift loop
-    for sparse vectors and equal in the dense limit.
-    """
-    out = 0
-    while v:
-        lsb = v & -v
-        out ^= M[lsb.bit_length() - 1]
-        v ^= lsb
-    return out
-
-
-def mat_mul(A: Mat, B: Mat) -> Mat:
-    """Matrix product over ``F_2``: ``(A·B)[j] = A · B[j]``.
-
-    Composition order matches ``compose(p, q)`` in :mod:`.permutations`:
-    ``mat_mul(A, B)`` applies ``B`` first, then ``A``.
-    """
-    return tuple(mat_apply(A, B[j]) for j in range(len(B)))
+from .._linalg_f2 import Mat, mat_apply, mat_identity, mat_mul
 
 
 def _transpose(M: Mat, L: int) -> list[int]:
@@ -115,7 +83,7 @@ def orbit_and_transversal_matrix(
 
     Returns ``(orbit, transversal)`` where ``transversal[p]`` is a matrix
     that maps ``base`` to ``p`` (identity at ``base``). Mirrors
-    :func:`.permutations.orbit_and_transversal`.
+    :func:`doubly_even.canon.permutations.orbit_and_transversal`.
     """
     orbit = [base]
     transversal: dict[int, Mat] = {base: mat_identity(L)}
@@ -144,8 +112,8 @@ def stabilizer_chain(
     but still appended for shape consistency). The product of orbit
     sizes equals ``|⟨generators⟩|``.
 
-    Same structure as :func:`.permutations.group_order` lifted to the
-    linear action.
+    Same structure as :func:`doubly_even.canon.permutations.group_order`
+    lifted to the linear action.
     """
     gens: list[Mat] = [tuple(g) for g in generators]
     chain: list[tuple[list[int], dict[int, Mat]]] = []
@@ -177,8 +145,8 @@ def group_order_matrix(generators: Iterable[Mat], L: int) -> int:
     """Exact ``|⟨generators⟩|`` for a subgroup of ``GL(L, F_2)``.
 
     Returns 1 for empty generator set. Same algorithm as
-    :func:`.permutations.group_order`, adapted to the linear action via
-    :func:`stabilizer_chain`.
+    :func:`doubly_even.canon.permutations.group_order`, adapted to the
+    linear action via :func:`stabilizer_chain`.
     """
     order = 1
     for orbit, _ in stabilizer_chain(generators, L):
