@@ -23,7 +23,7 @@ use nauty_Traces_sys::{
 #[cfg(feature = "dense_qd_refinvar")]
 use nauty_Traces_sys::{boolean, graph as nauty_graph};
 
-use crate::canon::{auto_callback, NativeCanonInfo, AUT_BUFFER, LEFT_VERTEX_COUNT};
+use crate::canon::{auto_callback, NativeCanonInfo, AUT_BUFFER, LEFT_VERTEX_COUNT, SCRATCH};
 use crate::qd_graph::build_low_weight_sparsegraph;
 use crate::types::BinVec;
 
@@ -48,7 +48,15 @@ extern "C" {
 }
 
 pub fn canon_info_qd_dense(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> {
-    let (v, d, e, mut lab, mut ptn, l) = build_low_weight_sparsegraph(rref, n)?;
+    // Dormant audit substrate: take a snapshot of the sparsegraph fields
+    // out of the shared scratch into owned Vecs so we don't hold the
+    // RefCell borrow across the densenauty call (which is unrelated and
+    // doesn't need scratch reuse — this path is benched, not hot).
+    let (v, d, e, mut lab, mut ptn, l) = SCRATCH.with(|sc| {
+        let mut sc = sc.borrow_mut();
+        let (_, l) = build_low_weight_sparsegraph(rref, n, &mut sc)?;
+        Some((sc.v.clone(), sc.d.clone(), sc.e.clone(), sc.lab.clone(), sc.ptn.clone(), l))
+    })?;
     let r: usize = n as usize;
     let total = l + r;
 

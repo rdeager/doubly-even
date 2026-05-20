@@ -18,7 +18,9 @@ use std::ptr;
 
 use nauty_Traces_sys::{optionblk, sparsegraph, sparsenauty, statsblk, FALSE, TRUE};
 
-use crate::canon::{auto_callback, NativeCanonInfo, AUT_BUFFER, LEFT_VERTEX_COUNT};
+use crate::canon::{
+    auto_callback, CanonScratch, NativeCanonInfo, AUT_BUFFER, LEFT_VERTEX_COUNT, SCRATCH,
+};
 use crate::linalg::row_reduce;
 use crate::types::BinVec;
 
@@ -32,7 +34,11 @@ use crate::types::BinVec;
 /// is the count of codewords belonging to the `i`-th included weight
 /// stratum, in ascending weight order. The flat list is the strata
 /// concatenated.
-fn collect_low_weight_codewords(rref: &[BinVec], n: u32) -> Option<(Vec<BinVec>, Vec<usize>)> {
+/// Returns `Some(L)` (the codeword-side vertex count) on success; the
+/// caller reads the populated codeword set from `scratch.accum` and the
+/// stratum sizes from `scratch.stratum_sizes`. Reuses
+/// `scratch.by_weight` / `.accum` / `.stratum_sizes` across calls.
+fn collect_low_weight_codewords(rref: &[BinVec], n: u32, scratch: &mut CanonScratch) -> Option<usize> {
     let k = rref.len();
     if k == 0 {
         // Rank-0 code: only the zero codeword. No useful low-weight set;
@@ -45,33 +51,39 @@ fn collect_low_weight_codewords(rref: &[BinVec], n: u32) -> Option<(Vec<BinVec>,
     // Gray-code walk: enumerate all nonzero codewords with one XOR per step.
     // Group by Hamming weight into `by_weight[w] = Vec<codeword>`. We use a
     // BTreeMap-like structure but cap at n+1 distinct possible weights.
-    let mut by_weight: Vec<Vec<BinVec>> = vec![Vec::new(); (n as usize) + 1];
+    if scratch.by_weight.len() < (n as usize) + 1 {
+        scratch.by_weight.resize((n as usize) + 1, Vec::new());
+    }
+    for bucket in scratch.by_weight.iter_mut().take((n as usize) + 1) {
+        bucket.clear();
+    }
     let mut w: BinVec = 0;
     for mask in 1..total_codewords {
         let lo_bit = (mask & mask.wrapping_neg()).trailing_zeros() as usize;
         w ^= rref[lo_bit];
-        by_weight[w.count_ones() as usize].push(w);
+        scratch.by_weight[w.count_ones() as usize].push(w);
     }
 
     // Walk strata in ascending weight, growing the accumulated low-weight
     // set until its span equals C. We rebuild RREF each round on the
     // accumulated set; cheap relative to the nauty call we're about to skip.
-    let mut accum: Vec<BinVec> = Vec::new();
-    let mut stratum_sizes: Vec<usize> = Vec::new();
+    scratch.accum.clear();
+    scratch.stratum_sizes.clear();
     for weight in 1..=(n as usize) {
-        if by_weight[weight].is_empty() {
+        if scratch.by_weight[weight].is_empty() {
             continue;
         }
-        let stratum = std::mem::take(&mut by_weight[weight]);
-        let stratum_len = stratum.len();
-        accum.extend(stratum);
-        stratum_sizes.push(stratum_len);
-        if accum.len() > bail_threshold {
+        let stratum_len = scratch.by_weight[weight].len();
+        // Drain the stratum into accum without re-allocating the bucket.
+        let drain = scratch.by_weight[weight].drain(..);
+        scratch.accum.extend(drain);
+        scratch.stratum_sizes.push(stratum_len);
+        if scratch.accum.len() > bail_threshold {
             return None;
         }
-        let (rr, _) = row_reduce(&accum, n);
+        let (rr, _) = row_reduce(&scratch.accum, n);
         if rr.len() == k {
-            return Some((accum, stratum_sizes));
+            return Some(scratch.accum.len());
         }
     }
     // If we exhaust strata without spanning, something is wrong with the
@@ -92,66 +104,81 @@ fn collect_low_weight_codewords(rref: &[BinVec], n: u32) -> Option<(Vec<BinVec>,
 /// - `lab` lists vertices in the order each cell is laid out; `ptn[i] = 0`
 ///   marks cell boundaries (nauty convention).
 #[allow(clippy::type_complexity)]
+/// Returns `Some((nde, l))` on success and populates
+/// `scratch.{v,d,e,lab,ptn}`. Returns `None` (and leaves scratch in a
+/// best-effort partial state) when the span-aware builder bails. Reuses
+/// `scratch.{by_weight,accum,stratum_sizes,col_by_deg,right_lists}` as
+/// internal storage.
 pub(crate) fn build_low_weight_sparsegraph(
     rref: &[BinVec],
     n: u32,
-) -> Option<(
-    Vec<usize>, // v
-    Vec<i32>,   // d
-    Vec<i32>,   // e
-    Vec<c_int>, // lab
-    Vec<c_int>, // ptn
-    usize,      // L (number of codeword-side vertices)
-)> {
-    let (codewords, stratum_sizes) = collect_low_weight_codewords(rref, n)?;
-    let l: usize = codewords.len();
+    scratch: &mut CanonScratch,
+) -> Option<(usize, usize)> {
+    let l: usize = collect_low_weight_codewords(rref, n, scratch)?;
     let r: usize = n as usize;
     let total = l + r;
 
     // Per-vertex degrees.
-    let mut d = vec![0i32; total];
-    for (i, &cw) in codewords.iter().enumerate() {
-        d[i] = cw.count_ones() as i32;
+    scratch.d.clear();
+    scratch.d.resize(total, 0);
+    for (i, &cw) in scratch.accum.iter().enumerate() {
+        scratch.d[i] = cw.count_ones() as i32;
     }
     for j in 0..r {
         let bit = 1u64 << j;
         let mut deg = 0i32;
-        for &cw in &codewords {
+        for &cw in &scratch.accum {
             if cw & bit != 0 {
                 deg += 1;
             }
         }
-        d[l + j] = deg;
+        scratch.d[l + j] = deg;
     }
 
     // Offsets via prefix sum.
-    let nde: usize = d.iter().map(|&x| x as usize).sum();
-    let mut v = vec![0usize; total];
+    let nde: usize = scratch.d.iter().map(|&x| x as usize).sum();
+    scratch.v.clear();
+    scratch.v.resize(total, 0);
     let mut acc = 0usize;
     for i in 0..total {
-        v[i] = acc;
-        acc += d[i] as usize;
+        scratch.v[i] = acc;
+        acc += scratch.d[i] as usize;
     }
 
     // Edge lists: walk each codeword's set bits once.
-    let mut e = vec![0i32; nde];
-    let mut left_write = v.clone();
-    let mut right_lists: Vec<Vec<i32>> =
-        (0..r).map(|j| Vec::with_capacity(d[l + j] as usize)).collect();
+    //
+    // Cut 3: avoid cloning `v` for the left-side write cursor — use a
+    // stack-local that's initialised from `v[i]` per outer iteration.
+    scratch.e.clear();
+    scratch.e.resize(nde, 0);
+    if scratch.right_lists.len() < r {
+        scratch.right_lists.resize_with(r, Vec::new);
+    }
+    for j in 0..r {
+        scratch.right_lists[j].clear();
+        scratch.right_lists[j].reserve(scratch.d[l + j] as usize);
+    }
+    let codewords = &scratch.accum;
+    let d_ref = &scratch.d;
+    let v_ref = &scratch.v;
+    let e_ref = &mut scratch.e;
+    let right_lists = &mut scratch.right_lists;
     for (i, &cw) in codewords.iter().enumerate() {
+        let mut cursor = v_ref[i];
         let mut bits = cw;
         while bits != 0 {
             let j = bits.trailing_zeros() as usize;
-            e[left_write[i]] = (l + j) as i32;
-            left_write[i] += 1;
+            e_ref[cursor] = (l + j) as i32;
+            cursor += 1;
             right_lists[j].push(i as i32);
             bits &= bits - 1;
         }
+        debug_assert_eq!(cursor, v_ref[i] + d_ref[i] as usize);
     }
     for j in 0..r {
-        let base = v[l + j];
-        for (offset, &neighbour) in right_lists[j].iter().enumerate() {
-            e[base + offset] = neighbour;
+        let base = scratch.v[l + j];
+        for (offset, &neighbour) in scratch.right_lists[j].iter().enumerate() {
+            scratch.e[base + offset] = neighbour;
         }
     }
 
@@ -159,18 +186,20 @@ pub(crate) fn build_low_weight_sparsegraph(
     // stratum is one cell). Column side: subdivide by degree (the existing
     // bipartite encoding does the same — see `canon_info_native` in canon.rs).
     // `ptn[i] = 0` marks the end of a cell.
-    let mut lab: Vec<c_int> = Vec::with_capacity(total);
-    let mut ptn: Vec<c_int> = Vec::with_capacity(total);
+    scratch.lab.clear();
+    scratch.lab.reserve(total);
+    scratch.ptn.clear();
+    scratch.ptn.reserve(total);
     let mut cursor = 0usize;
-    for &size in &stratum_sizes {
+    for &size in &scratch.stratum_sizes {
         for idx in cursor..(cursor + size) {
-            lab.push(idx as c_int);
-            ptn.push(1);
+            scratch.lab.push(idx as c_int);
+            scratch.ptn.push(1);
         }
         // mark end of stratum
-        if !ptn.is_empty() {
-            let last = ptn.len() - 1;
-            ptn[last] = 0;
+        if !scratch.ptn.is_empty() {
+            let last = scratch.ptn.len() - 1;
+            scratch.ptn[last] = 0;
         }
         cursor += size;
     }
@@ -180,26 +209,27 @@ pub(crate) fn build_low_weight_sparsegraph(
     // partition; the fingerprint-construction cost outweighed nauty's
     // refinement savings at every N from 18 through 22 — measured ~1-5%
     // regression. Reverted to degree-only.)
-    let mut col_by_deg: Vec<(i32, c_int)> = (0..r as c_int)
-        .map(|j| (d[l + j as usize], (l as c_int) + j))
-        .collect();
-    col_by_deg.sort_unstable_by_key(|&(deg, _)| deg);
-    let col_start = lab.len();
-    for &(_, vid) in &col_by_deg {
-        lab.push(vid);
-        ptn.push(1);
+    scratch.col_by_deg.clear();
+    scratch.col_by_deg.extend(
+        (0..r as c_int).map(|j| (scratch.d[l + j as usize], (l as c_int) + j)),
+    );
+    scratch.col_by_deg.sort_unstable_by_key(|&(deg, _)| deg);
+    let col_start = scratch.lab.len();
+    for &(_, vid) in &scratch.col_by_deg {
+        scratch.lab.push(vid);
+        scratch.ptn.push(1);
     }
     for i in 0..r.saturating_sub(1) {
-        if col_by_deg[i].0 != col_by_deg[i + 1].0 {
-            ptn[col_start + i] = 0;
+        if scratch.col_by_deg[i].0 != scratch.col_by_deg[i + 1].0 {
+            scratch.ptn[col_start + i] = 0;
         }
     }
-    if !ptn.is_empty() {
-        let last = ptn.len() - 1;
-        ptn[last] = 0;
+    if !scratch.ptn.is_empty() {
+        let last = scratch.ptn.len() - 1;
+        scratch.ptn[last] = 0;
     }
 
-    Some((v, d, e, lab, ptn, l))
+    Some((nde, l))
 }
 
 /// Q_D-graph canonicaliser: nauty over the low-weight-codeword × column
@@ -210,24 +240,36 @@ pub(crate) fn build_low_weight_sparsegraph(
 /// shape of `NativeCanonInfo` is identical so the dispatch site needs no
 /// extra plumbing.
 pub fn canon_info_qd_native(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> {
-    let (mut v, mut d, mut e, mut lab, mut ptn, l) = build_low_weight_sparsegraph(rref, n)?;
+    SCRATCH.with(|scratch_cell| {
+        let mut scratch = scratch_cell.borrow_mut();
+        canon_info_qd_native_impl(rref, n, &mut scratch)
+    })
+}
+
+fn canon_info_qd_native_impl(
+    rref: &[BinVec],
+    n: u32,
+    scratch: &mut CanonScratch,
+) -> Option<NativeCanonInfo> {
+    let (nde, l) = build_low_weight_sparsegraph(rref, n, scratch)?;
     let r: usize = n as usize;
     let total = l + r;
 
     let mut sg = sparsegraph {
-        nde: e.len(),
-        v: v.as_mut_ptr(),
+        nde,
+        v: scratch.v.as_mut_ptr(),
         nv: total as c_int,
-        d: d.as_mut_ptr(),
-        e: e.as_mut_ptr(),
+        d: scratch.d.as_mut_ptr(),
+        e: scratch.e.as_mut_ptr(),
         w: ptr::null_mut(),
-        vlen: v.len(),
-        dlen: d.len(),
-        elen: e.len(),
+        vlen: scratch.v.len(),
+        dlen: scratch.d.len(),
+        elen: scratch.e.len(),
         wlen: 0,
     };
 
-    let mut orbits = vec![0i32; total];
+    scratch.orbits.clear();
+    scratch.orbits.resize(total, 0);
     let mut options = optionblk::default_sparse();
     options.getcanon = TRUE;
     options.defaultptn = FALSE;
@@ -238,19 +280,22 @@ pub fn canon_info_qd_native(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> 
 
     // Canonical-graph output buffers (nauty needs writable storage even
     // when we discard the canonical sparsegraph).
-    let mut cg_v = vec![0usize; total];
-    let mut cg_d = vec![0i32; total];
-    let mut cg_e = vec![0i32; e.len()];
+    scratch.cg_v.clear();
+    scratch.cg_v.resize(total, 0);
+    scratch.cg_d.clear();
+    scratch.cg_d.resize(total, 0);
+    scratch.cg_e.clear();
+    scratch.cg_e.resize(nde, 0);
     let mut canon_sg = sparsegraph {
         nde: 0,
-        v: cg_v.as_mut_ptr(),
+        v: scratch.cg_v.as_mut_ptr(),
         nv: total as c_int,
-        d: cg_d.as_mut_ptr(),
-        e: cg_e.as_mut_ptr(),
+        d: scratch.cg_d.as_mut_ptr(),
+        e: scratch.cg_e.as_mut_ptr(),
         w: ptr::null_mut(),
-        vlen: cg_v.len(),
-        dlen: cg_d.len(),
-        elen: cg_e.len(),
+        vlen: scratch.cg_v.len(),
+        dlen: scratch.cg_d.len(),
+        elen: scratch.cg_e.len(),
         wlen: 0,
     };
 
@@ -263,9 +308,9 @@ pub fn canon_info_qd_native(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> 
     unsafe {
         sparsenauty(
             &mut sg,
-            lab.as_mut_ptr(),
-            ptn.as_mut_ptr(),
-            orbits.as_mut_ptr(),
+            scratch.lab.as_mut_ptr(),
+            scratch.ptn.as_mut_ptr(),
+            scratch.orbits.as_mut_ptr(),
             &mut options,
             &mut stats,
             &mut canon_sg,
@@ -289,20 +334,19 @@ pub fn canon_info_qd_native(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> 
         });
     }
 
-    // Restrict canonical labelling to columns and invert into old→new form.
-    let mut new_to_old_right: Vec<u32> = Vec::with_capacity(r);
+    // Restrict canonical labelling to columns and invert into old→new form
+    // in a single pass. Result Vec sizes are O(n) — leave fresh-allocated.
+    let mut canonical_column_order = vec![0u32; r];
+    let mut new_col_counter = 0u32;
     for new_index in 0..total {
-        let old_vertex = lab[new_index] as usize;
+        let old_vertex = scratch.lab[new_index] as usize;
         if old_vertex >= l {
-            new_to_old_right.push((old_vertex - l) as u32);
+            canonical_column_order[old_vertex - l] = new_col_counter;
+            new_col_counter += 1;
         }
     }
-    let mut canonical_column_order = vec![0u32; r];
-    for (new_col, &old_col) in new_to_old_right.iter().enumerate() {
-        canonical_column_order[old_col as usize] = new_col as u32;
-    }
 
-    let column_orbits: Vec<u32> = orbits[l..].iter().map(|&x| x as u32).collect();
+    let column_orbits: Vec<u32> = scratch.orbits[l..].iter().map(|&x| x as u32).collect();
     let aut_generators = AUT_BUFFER.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
 
     Some(NativeCanonInfo {

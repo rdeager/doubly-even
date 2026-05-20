@@ -16,7 +16,7 @@ use std::ptr;
 
 use nauty_Traces_sys::{sparsegraph, Traces, TracesOptions, TracesStats, FALSE, TRUE};
 
-use crate::canon::{NativeCanonInfo, AUT_BUFFER, LEFT_VERTEX_COUNT};
+use crate::canon::{NativeCanonInfo, AUT_BUFFER, LEFT_VERTEX_COUNT, SCRATCH};
 use crate::qd_graph::build_low_weight_sparsegraph;
 use crate::types::BinVec;
 
@@ -34,7 +34,14 @@ unsafe extern "C" fn auto_callback_traces(_count: c_int, perm: *mut c_int, n: c_
 }
 
 pub fn canon_info_qd_traces(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> {
-    let (mut v, mut d, mut e, mut lab, mut ptn, l) = build_low_weight_sparsegraph(rref, n)?;
+    // Dormant audit substrate: snapshot the sparsegraph out of the shared
+    // scratch into owned Vecs. Traces holds its own per-call state and
+    // doesn't benefit from scratch reuse here.
+    let (mut v, mut d, mut e, mut lab, mut ptn, l) = SCRATCH.with(|sc| {
+        let mut sc = sc.borrow_mut();
+        let (_, l) = build_low_weight_sparsegraph(rref, n, &mut sc)?;
+        Some((sc.v.clone(), sc.d.clone(), sc.e.clone(), sc.lab.clone(), sc.ptn.clone(), l))
+    })?;
     let r: usize = n as usize;
     let total = l + r;
 
