@@ -8,12 +8,9 @@
 pub mod candidates;
 pub mod canon;
 pub mod enumerate;
-pub mod feulner;
-pub mod feulner_clb;
-pub mod invariants;
+pub mod experimental;
 pub mod linalg;
 pub mod orbit;
-pub mod paired_iso;
 pub mod permutations;
 pub mod quotient;
 pub mod subspace_orbit;
@@ -214,7 +211,7 @@ fn py_canon_info_feulner_native(
             types::MAX_N,
         )));
     }
-    let info = feulner::canon_info_feulner(&rref, n);
+    let info = experimental::feulner::canon_info_feulner(&rref, n);
     Ok((
         info.canonical_column_order,
         info.aut_generators,
@@ -236,7 +233,7 @@ fn py_canon_info_feulner_counters(
             "n = {n} exceeds MAX_N = {}", types::MAX_N,
         )));
     }
-    let info = feulner::canon_info_feulner(&rref, n);
+    let info = experimental::feulner::canon_info_feulner(&rref, n);
     Ok((info.leaves, info.prunes))
 }
 
@@ -255,7 +252,7 @@ fn py_canon_info_feulner_counters_v2(
             "n = {n} exceeds MAX_N = {}", types::MAX_N,
         )));
     }
-    let info = feulner::canon_info_feulner(&rref, n);
+    let info = experimental::feulner::canon_info_feulner(&rref, n);
     Ok((info.leaves, info.prunes, info.clb_prunes))
 }
 
@@ -414,11 +411,11 @@ fn py_wl_signature(
     init: &str,
 ) -> PyResult<(Vec<u64>, u32, bool)> {
     let g_opt = match graph {
-        "min" => match invariants::build_low_weight_bipartite(&rref, n) {
+        "min" => match experimental::invariants::build_low_weight_bipartite(&rref, n) {
             Some(g) => (g, false),
-            None => (invariants::build_full_bipartite(&rref, n), true),
+            None => (experimental::invariants::build_full_bipartite(&rref, n), true),
         },
-        "full" => (invariants::build_full_bipartite(&rref, n), false),
+        "full" => (experimental::invariants::build_full_bipartite(&rref, n), false),
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "graph must be 'min' or 'full', got {other:?}"
@@ -426,8 +423,8 @@ fn py_wl_signature(
         }
     };
     let init_mode = match init {
-        "vanilla" => invariants::InitMode::Vanilla,
-        "degree_init" => invariants::InitMode::DegreeAndWeight,
+        "vanilla" => experimental::invariants::InitMode::Vanilla,
+        "degree_init" => experimental::invariants::InitMode::DegreeAndWeight,
         other => {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "init must be 'vanilla' or 'degree_init', got {other:?}"
@@ -435,7 +432,7 @@ fn py_wl_signature(
         }
     };
     let (g, fallback) = g_opt;
-    let (sig, rounds) = invariants::wl_refine(&g, init_mode);
+    let (sig, rounds) = experimental::invariants::wl_refine(&g, init_mode);
     Ok((sig, rounds, fallback))
 }
 
@@ -445,8 +442,8 @@ fn py_wl_signature(
 #[pyfunction]
 #[pyo3(name = "t11_signature")]
 fn py_t11_signature(rref: Vec<BinVec>, n: u32, weights: Vec<u32>) -> Vec<u128> {
-    let cws = invariants::full_codewords(&rref, n);
-    invariants::t11_signature(&cws, n, &weights)
+    let cws = experimental::invariants::full_codewords(&rref, n);
+    experimental::invariants::t11_signature(&cws, n, &weights)
 }
 
 /// T11 on the low-weight spanning subset (the "G_min" T11). Falls back to
@@ -458,28 +455,28 @@ fn py_t11_signature_gmin(
     n: u32,
     weights: Vec<u32>,
 ) -> Vec<u128> {
-    let cws = match invariants::low_weight_codewords_pub(&rref, n) {
+    let cws = match experimental::invariants::low_weight_codewords_pub(&rref, n) {
         Some((c, _)) => c,
-        None => invariants::full_codewords(&rref, n),
+        None => experimental::invariants::full_codewords(&rref, n),
     };
-    invariants::t11_signature(&cws, n, &weights)
+    experimental::invariants::t11_signature(&cws, n, &weights)
 }
 
 /// T12: sorted multiset over min-weight-codeword triples.
 #[pyfunction]
 #[pyo3(name = "t12_signature")]
 fn py_t12_signature(rref: Vec<BinVec>, n: u32) -> Vec<u64> {
-    let cws = invariants::full_codewords(&rref, n);
+    let cws = experimental::invariants::full_codewords(&rref, n);
     let _ = n;
-    invariants::t12_signature(&cws)
+    experimental::invariants::t12_signature(&cws)
 }
 
 /// T13 (pair-gram): per-column-pair tuple of #wt-w cws containing both.
 #[pyfunction]
 #[pyo3(name = "t13_signature")]
 fn py_t13_signature(rref: Vec<BinVec>, n: u32, weights: Vec<u32>) -> Vec<u64> {
-    let cws = invariants::full_codewords(&rref, n);
-    invariants::t13_signature(&cws, n, &weights)
+    let cws = experimental::invariants::full_codewords(&rref, n);
+    experimental::invariants::t13_signature(&cws, n, &weights)
 }
 
 /// Compute every signature for one code in a single Rust call.
@@ -513,7 +510,7 @@ fn py_all_invariants(
     weights: Vec<u32>,
     gmin_weights: Vec<u32>,
 ) -> (Vec<u128>, bool, Vec<u32>, Vec<u64>) {
-    let r = invariants::compute_all_invariants(&rref, n, &weights, &gmin_weights);
+    let r = experimental::invariants::compute_all_invariants(&rref, n, &weights, &gmin_weights);
     let digests = vec![
         r.wl_min_vanilla,
         r.wl_min_degree,

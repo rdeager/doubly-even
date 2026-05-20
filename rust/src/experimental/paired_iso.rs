@@ -19,7 +19,7 @@
 //! [`crate::linalg::apply_permutation`]. Applying π to D and re-row-
 //! reducing yields cf's row-span.
 
-use crate::feulner::{
+use crate::experimental::feulner::{
     individualise, initial_partition, invariant_refiners, refine, PartialKey, Perm,
 };
 use crate::permutations::{compute_column_orbits, perm_compose, perm_inverse};

@@ -25,7 +25,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use crate::feulner_clb::LabelledBranching;
+use crate::experimental::feulner_clb::LabelledBranching;
 use crate::permutations::{compute_column_orbits, perm_compose, perm_inverse};
 use crate::types::BinVec;
 

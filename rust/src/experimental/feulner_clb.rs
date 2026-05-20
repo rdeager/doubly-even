@@ -50,12 +50,12 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use crate::feulner::{perm_identity, Perm};
+use crate::experimental::feulner::{perm_identity, Perm};
 use crate::permutations::{perm_compose, perm_inverse};
 
 const ROOT: u32 = u32::MAX;
 
-/// Reuses [`crate::feulner::orbit_and_transversal`] semantics — a small
+/// Reuses [`crate::experimental::feulner::orbit_and_transversal`] semantics — a small
 /// re-implementation kept private to avoid widening the parent module's
 /// API. Same BFS as Python `permutations.orbit_and_transversal`.
 fn orbit_and_transversal(

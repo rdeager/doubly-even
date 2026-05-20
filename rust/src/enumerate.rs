@@ -49,7 +49,7 @@ use crate::canon::canon_info_qd_traces;
 use crate::candidates::doubly_even_candidates_q;
 use crate::linalg::{apply_permutation, row_reduce};
 #[cfg(feature = "equivalence_verifier")]
-use crate::paired_iso::{
+use crate::experimental::paired_iso::{
     paired_iso_equitable, reconstruct_aut_generators,
     reconstruct_canonical_column_order, reconstruct_column_orbits,
     EquitableResult, PairedIsoCachedCf,
