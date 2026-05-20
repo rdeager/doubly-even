@@ -25,6 +25,7 @@ spec/        readable executable spec (math, no perf work)
   codes.py       Code dataclass (n, basis), rref, dual, contains, extend
   doubly_even.py is_doubly_even via Corollary B.1; augmentation predicate
   mass.py        sigma_brute (works), gaborit_sigma (closed form)
+  direct_sum.py  C1 ⊕ C2 operator (BHM2012 mass-seeding scaffolding)
 
 canon/       canonical labels + Aut(C); active backend is the Rust kernel
   bipartite.py   G(C) bipartite encoding (codewords × columns)
@@ -33,50 +34,48 @@ canon/       canonical labels + Aut(C); active backend is the Rust kernel
                   via nauty-Traces-sys); pynauty kept as Python fallback
   permutations.py hand-rolled Schreier-Sims for exact |Aut| when nauty's
                   float grpsize would lose precision past ~2^53
-  matrix_group.py Schreier-Sims on GL(L, F_2) — phase-(b) scaffolding,
-                  reachable via witt orbit path but not in active dispatch
-  feulner.py     Python oracle for the Rust Feulner column-side
-                  canonicaliser (rust/src/feulner.rs); D9 — still slower
-                  than nauty per call (~18 ms structural floor on Golay
-                  vs nauty Q_D's 0.82 ms), kept as diff oracle / verifier
-                  substrate, not active default. Includes Feulner §5.2
-                  CLB + Lemma 5.9 (`_LabelledBranching`) as of 2026-05-20
-                  — faithful port of Sage's `LabelledBranching`. See
-                  `project_feulner_clb_implemented.md` in user memory.
-  paired_iso.py  Python prototype + reconstruction algebra for the
-                  Leon §10(i) paired-iso prefilter (D12, dormant)
+  _linalg_f2.py  Spine GL(L, F_2) primitives (Mat, mat_apply, mat_mul,
+                  mat_identity) consumed by enumerate/quotient.py
+  experimental/  Dormant canonicalisers — see /workspace/src/EXPERIMENTAL.md
 
 enumerate/   the canonical-augmentation search
-  filters.py     coset reps in C-perp/C, weight-mod-4, Aut(C)-orbit-min
-                  (oracle paths kept for cross-checks; entry point
-                  doubly_even_candidates delegates to quotient.py)
-  quotient.py    Q_C-coordinate orbit-min with σ_Q lookup tables
-                  (Milestone 4 phase (a); the hot path).
-                  aut_orbit_minima_Q_witt is the phase-(b) alternative
-                  (no σ_Q table build); reachable but dispatch defaults
-                  to phase (a) — see D7 in 04-optimisations.md.
-  witt.py        closed-form Witt-type counts; singular_vectors is a
-                  thin alias of singular_reps_Q (phase (b) stub)
+  filters.py     Hot dispatcher (doubly_even_candidates) + F_2^N reference
+                  oracle (cross-check only); two-half layout, section
+                  banner inside.
+  quotient.py    Q_C-coordinate orbit-min with σ_Q lookup tables (the
+                  hot path).
   augment.py     canonical_parent(D); is_canonical_augmentation;
                   enumerate_doubly_even(N) -> EnumeratedCode iter.
                   Dispatches the whole recursion to the Rust kernel
                   via _kernel.enumerate_doubly_even (D11) when loaded.
+  seeds.py       Direct-sum mass-seeding scaffolding (BHM2012); not
+                  yet wired into active dispatch.
+  experimental/  Witt phase-(b) scaffolding — see EXPERIMENTAL.md
 
 rust/        Rust kernel (doubly_even_kernel), built with maturin
   src/canon.rs       Q_D-graph low-weight-incidence canonicaliser (D10)
                       + native sparsenauty path; default dispatch.
+  src/enumerate.rs   Native enumerate_doubly_even recursion (D11).
+                      EXPERIMENTAL banners on the modules below.
   src/feulner.rs     Feulner column-side canonicaliser (D9, ~1000 LOC,
-                      reference / diff oracle). Now also calls into
-                      `feulner_clb` for §5.2 aut-based pruning.
-  src/feulner_clb.rs Jerrum complete labelled branching (CLB) + Lemma 5.9
-                      topological-sort test (Feulner §5.2). Mirrors
-                      Sage's `LabelledBranching`. 2026-05-20.
-  src/enumerate.rs   Native enumerate_doubly_even recursion (D11) +
-                      paired-iso prefilter dispatch (D12, gated).
-  src/paired_iso.rs  Leon §10(i) paired-iso witness search (D12).
-  Cargo.toml          'equivalence_verifier' feature flag (default OFF)
-                      gates the D12 prefilter.
+                      reference / diff oracle; dispatch closed).
+  src/feulner_clb.rs Jerrum CLB + Lemma 5.9 (Feulner §5.2 substrate).
+  src/paired_iso.rs  Leon §10(i) verifier (D12, dormant under
+                      `equivalence_verifier` feature).
+  src/invariants.rs  WL + T11/T12/T13 collision-experiment substrate.
+  Cargo.toml          Feature flags (all default OFF): parallel,
+                      equivalence_verifier, dense_qd, dense_qd_tc0,
+                      dense_qd_refinvar, traces_qd, nauty_hist.
 ```
+
+## Quarantine layout
+
+Dormant / experimental / audit-substrate code is kept in tree under
+`canon/experimental/`, `enumerate/experimental/`, and
+`scripts/experimental/`. **Quarantine, don't delete** — every
+closed optimisation direction has its code preserved so a future
+contributor can revisit it. Top-level index:
+`/workspace/src/EXPERIMENTAL.md`.
 
 ## Conventions
 
@@ -121,7 +120,7 @@ Three independent checks the test suite relies on:
   precomputed blocklists of T11 multiset collisions. The blocklists
   presuppose a full enumeration to generate, so the approach **cannot
   scale to N ≥ 26** under a single-pass constraint. Audit
-  (`scripts/pair_gram_class_audit.py`, in tree as a standalone) showed
+  (`scripts/experimental/pair_gram_class_audit.py`, in tree as a standalone) showed
   every cheap class invariant tested has tuple collisions that grow
   rapidly with N (t11_stacked_w4cubic: 2 at N=22, 137 at N=24,
   thousands extrapolated for N=26). At N=32 the "cheap" invariants
@@ -153,14 +152,16 @@ Three independent checks the test suite relies on:
   expected to break 2× without a per-probe-cost unlock.
 - **Engine A (§5 column-multiset / Fourier-domain) Rust port** is
   the unblocked next deliverable — Python prototype exists in
-  `scripts/multiset_*.py`, `scripts/collision_experiment.py`. Target:
+  `scripts/experimental/multiset_*.py`,
+  `scripts/experimental/collision_experiment.py`. Target:
   `N = 32, k ≤ 4` frontier (the existing pipeline dies at `N ≥ 28`).
   Does not speed up `N ≤ 22`.
 - **GPU canonicaliser (PEACE-style)** is the only published
   direction with > 5× headroom at `N ≤ 22`. Multi-week.
 - **Audit 2026-05-17** (kernel instrumentation in `rust/src/enumerate.rs`
-  per_k_stats matrix, scripts `bfs_rejects_measurement.py`,
-  `cubic_tensor_experiment.py`, `mass_check_ablation.py`):
+  per_k_stats matrix, scripts `experimental/bfs_rejects_measurement.py`,
+  `experimental/cubic_tensor_experiment.py`,
+  `experimental/mass_check_ablation.py`):
   - σ_Q + weight-enum prefilter is near-perfect — final BFS rejects
     only 0.4 % of survivors at `N = 22` (308 / 82 413). The canon test
     is mostly confirmatory; "direct canonical generation" lever is
