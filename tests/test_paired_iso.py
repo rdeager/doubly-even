@@ -23,7 +23,7 @@ import random
 import pytest
 
 from doubly_even.canon.nauty import canon_info
-from doubly_even.canon.paired_iso import IsoCounters, paired_iso
+from doubly_even.canon.experimental.paired_iso import IsoCounters, paired_iso
 from doubly_even.enumerate.augment import enumerate_doubly_even_at
 from doubly_even.spec.codes import Code
 from doubly_even.spec.vectors import apply_permutation
@@ -88,7 +88,7 @@ def test_paired_iso_negative(N: int, k: int) -> None:
     # cross-reject under paired_iso.
     from collections import defaultdict
 
-    from doubly_even.canon.paired_iso import _weight_multiset
+    from doubly_even.canon.experimental.paired_iso import _weight_multiset
 
     by_we: dict[tuple[int, ...], list[tuple[int, ...]]] = defaultdict(list)
     for ec in classes:

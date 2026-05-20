@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .experimental.feulner import (
+from .feulner import (
     _column_orbits,
     _PartialKey,
     _individualise,
@@ -30,8 +30,8 @@ from .experimental.feulner import (
     _invariant_refiners,
     _refine,
 )
-from .nauty import CanonInfo
-from .permutations import Perm, compose, inverse
+from ..nauty import CanonInfo
+from ..permutations import Perm, compose, inverse
 
 
 @dataclass

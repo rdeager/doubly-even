@@ -26,7 +26,7 @@ import random
 import pytest
 
 from doubly_even.canon.nauty import CanonInfo, canon_info
-from doubly_even.canon.paired_iso import (
+from doubly_even.canon.experimental.paired_iso import (
     paired_iso_with_witness,
     reconstruct_canon_info,
 )
