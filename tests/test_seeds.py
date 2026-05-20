@@ -82,7 +82,7 @@ def test_seed_aut_orders_match_canon_info():
 @pytest.mark.parametrize(
     "N,expected_counts",
     [
-        # From scripts/seed_mass_estimate.py — seed class counts per k.
+        # From scripts/experimental/seed_mass_estimate.py — seed class counts per k.
         # These are determined by the constituent enumeration tables;
         # locking these down catches behaviour regressions in the
         # canonicaliser-or-dedup path.

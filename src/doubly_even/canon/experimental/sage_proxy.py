@@ -1,6 +1,6 @@
 """Bench-only proxy to a Sage daemon for ``canon_info``.
 
-Spawns ``scripts/sage_canon_daemon.py`` on first use and proxies per-code
+Spawns ``scripts/experimental/sage_canon_daemon.py`` on first use and proxies per-code
 canon_info requests over stdin/stdout. Returns the same :class:`CanonInfo`
 shape as the in-tree backends so :func:`enumerate_doubly_even` can use it
 unchanged.
@@ -21,11 +21,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ..spec.codes import Code
-from .nauty import CanonInfo
+from ...spec.codes import Code
+from ..nauty import CanonInfo
 
 _SAGE_BIN = os.environ.get("SAGE_BIN", "/usr/local/bin/sage")
-_DAEMON_SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "sage_canon_daemon.py"
+_DAEMON_SCRIPT = (
+    Path(__file__).resolve().parents[4]
+    / "scripts"
+    / "experimental"
+    / "sage_canon_daemon.py"
+)
 
 _proc: subprocess.Popen | None = None
 _call_count = 0

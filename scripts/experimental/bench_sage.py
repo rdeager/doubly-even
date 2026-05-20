@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-REPO_ROOT = HERE.parent
+REPO_ROOT = HERE.parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from doubly_even.canon.nauty import canon_info_cache_clear  # noqa: E402

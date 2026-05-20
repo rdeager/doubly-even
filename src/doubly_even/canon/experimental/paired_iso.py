@@ -38,7 +38,7 @@ from ..permutations import Perm, compose, inverse
 class IsoCounters:
     """Diagnostic counters carried through the paired search.
 
-    Used by ``scripts/bench_paired_iso_vs_nauty.py`` to extrapolate
+    Used by ``scripts/experimental/bench_paired_iso_vs_nauty.py`` to extrapolate
     Rust-port wall cost from Python operation counts.
     """
 

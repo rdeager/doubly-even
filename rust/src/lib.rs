@@ -389,7 +389,7 @@ fn py_kernel_build_info() -> &'static str {
 
 // ───────────────────────────────────────────── invariants (collision experiment)
 //
-// Substrate for `scripts/wl_collision_experiment.py`'s N=24/26 Rust port —
+// Substrate for `scripts/experimental/wl_collision_experiment.py`'s N=24/26 Rust port —
 // 1-WL on (full G(C) | G_min) bipartite graphs + T11/T12/T13 cheap
 // invariants. Not on the kernel hot path; pure standalone signatures.
 

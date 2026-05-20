@@ -47,7 +47,7 @@ pub fn doubly_even_candidates_q(
 /// In Rust the per-step cost of the `mat_apply` bit-walk inside the
 /// witt BFS is ~2× cheaper than building the per-generator `2^L` table
 /// and walking it. Measured at N ∈ {18, 20, 22} via
-/// `scripts/bench_witt_profile.py` (see `04-optimisations.md` §D13):
+/// `scripts/experimental/bench_witt_profile.py` (see `04-optimisations.md` §D13):
 /// mean `doubly_even_candidates_q` latency 245 → 116 µs at N=22,
 /// 1.08–1.11× total wall reduction. Phase (b) wins at every benched
 /// `(N, L)`, so dispatch is unconditional — no `L` threshold needed.
