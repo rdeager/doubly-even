@@ -182,17 +182,17 @@ See `/workspace/markdown/architecture/04-optimisations.md` for the
 per-lever write-up and `architecture/05-retrospective.md` for the
 sign-off retrospective.
 
-Headline (post-D13-V3 pipelined seeder, 2026-05-21):
-**~185× cumulative at `N = 22`** since the pre-kernel D6 baseline
-(152 s → 0.82 s parallel-20t); **> 700×** since the pre-Q_C original
-baseline. Parallel kernel: `N = 20` in 0.22 s; **`N = 22` in 0.82 s**
-(20 threads, depth=4); **`N = 24` in 9.54 s** (22 threads, depth=5);
-**`N = 26` in 218 s** (V2 measurement; not re-run post-V3, but the
-streaming-output bottleneck dominates so V3 wouldn't change it much).
-Sequential at `N = 22` is 7.01 s on this 22-core dev box (6.87 s on
-the older 13700K). We beat Sage's `self_orthogonal_binary_codes`
-by **~440× end-to-end at `N = 22`** (Sage 363.85 s, single-threaded;
-parallelising Sage would be weeks of Cython surgery).
+Headline (post-D13-V4 mass-stop + memory work, 2026-05-22, 13700K):
+**~220× cumulative at `N = 22`** since the pre-kernel D6 baseline
+(152 s → 0.691 s parallel-20t); **> 880×** since the pre-Q_C original
+baseline. Parallel kernel: `N = 20` in 0.22 s; **`N = 22` in 0.691 s**
+(20 threads, depth=4, mean of 3); **`N = 24` in 9.13 s** (22 threads,
+depth=5); **`N = 26` in 184.8 s** (20 threads, depth=5, cap=500K —
+down from 218 s pre-V4). Sequential at `N = 22` is **6.64 s** post-V4
+(was 7.01 s on dev box, 6.87 s on 13700K pre-V4). We beat Sage's
+`self_orthogonal_binary_codes` by **~525× end-to-end at `N = 22`**
+(Sage 363.85 s, single-threaded; parallelising Sage would be weeks of
+Cython surgery).
 
 Scaling forecast for `N ≥ 28` lives at
 `/workspace/markdown/architecture/06-scaling-frontier.md`: N=28
@@ -259,6 +259,31 @@ Cumulative levers, oldest first:
     uses non-TLS static work queues) — guarded by `compile_error!`.
     Determinism harness in `rust/tests/parallel_determinism.rs`
     (covers N = 12, 14, 16 at threads 2, 4, 8).
+14. **D13-V4 sprint** (2026-05-22, 13700K): four cuts attacking
+    per-call memory pressure + recovering the worker mass-stop V2/V3
+    left disabled. Net: N=22 0.82 → 0.691 s (-16 %), N=26 218 →
+    184.8 s (-15 %), seq 7.01 → 6.64 s (-5.3 %).
+    - **Cut 1 (`40dc251`)**: `mimalloc` global allocator. Per-thread
+      arenas eliminate ptmalloc cross-thread contention on the ~210 KB
+      of fresh allocs per `canon_info_*` call. -3.6 % seq, -4.8 %
+      parallel-unbound, -3.8 % N=24. One line in `lib.rs`.
+    - **Cut 2+3 (`ec6e65f`)**: thread-local `CanonScratch` struct
+      hoists all 13 per-call Vecs (`cw`, `d`, `v`, `e`, `lab`, `ptn`,
+      `orbits`, `cg_v`, `cg_d`, `cg_e`, `right_lists`, `by_cell`,
+      `by_weight`) shared between `canon_info_native` +
+      `canon_info_qd_native`. Grow-only via `.clear()`/`.resize()`;
+      zero per-call heap allocs after warmup. Also drops the
+      `left_write = v.clone()` (~8 KB memcpy/call) in both
+      `build_sparsegraph` and `build_low_weight_sparsegraph` via a
+      stack-local cursor. -2.2 % seq wall, -3 % per-call parallel.
+    - **Cut 4 (`0059089`)**: per-worker mass-stop via shared
+      `GlobalMassTracker` (Mutex<Vec<u128>> + Arc). Workers atomically
+      add `N!/|Aut|` on every emit; consult `is_full(k+1)` before
+      descending. Invariant: skip-when-full can only over-search,
+      never under-search (canonical augmentation forbids duplicates).
+      **The single biggest V4 lever**: -20.7 % wall at N=22 PEEP,
+      -20.3 % unbound, -0.8 % at N=24. Also fixes pre-existing
+      `parallel_profiling` feature breakage from V3 ship.
 
 `bench.py` lives in `scripts/`; per-step JSON records are in
 `scripts/bench-results/` (gitignored). Rust microbench for
@@ -282,16 +307,19 @@ maturin build --release --features parallel -m rust/Cargo.toml \
   && uv pip install rust/target/wheels/doubly_even_kernel-*.whl
 ```
 
-At runtime, set `DOUBLY_EVEN_THREADS`. Post-D13-V3 (pipelined
-seeder, 2026-05-21) measurements on a 22-core box show:
+At runtime, set `DOUBLY_EVEN_THREADS`. Post-D13-V4 measurements on
+the 13700K (16 physical / 24 logical) confirm:
 
-- **N = 22**: sweet spot is `t = cores − 2` (e.g., 20 on a 22-core
-  host). Adding the last two threads (t=22) *regresses* by ~8 %
-  because per-call cost rises with thread count (L3 + nauty TLS
-  contention) faster than the extra parallelism reclaims wall.
+- **N = 22**: sweet spot at `t = 20` (mean 0.691 s over 3 runs;
+  t=18 = 0.720, t=22 = 0.717, both ~4 % worse). On the 13700K this
+  uses all 8 P-core SMT pairs + 4 E-cores, leaving 4 E-cores idle
+  for scheduler migration. On a symmetric N-core host the rough rule
+  remains `t = N − 2`; on hybrid the actual sweet spot is empirical
+  per topology — see `architecture/07-parallel-scaling-profile.md`
+  § "V4 contention/memory sprint".
 - **N = 24** (and presumably larger N): full core count is best
-  (e.g., 22 on a 22-core host). The deeper tree absorbs the
-  contention cost because there's more parallel work to amortise.
+  (e.g., 22 on the 13700K). The deeper tree absorbs the contention
+  cost because there's more parallel work to amortise.
 
 `DOUBLY_EVEN_FRONTIER_DEPTH` defaults to 4 and rarely needs
 tweaking — at N ≥ 24 a value of 5 is better because the tree is
@@ -316,10 +344,11 @@ DOUBLY_EVEN_THREADS=20 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
   uv run python scripts/bench.py --label parallel-t20-d5-n26 --N 26
 ```
 
-V3+ improvements still deferred: per-worker mass-stop using
-Gaborit residual (recovers the 4–11 % sequential mass-stop win);
-heuristic per-seed depth selection (light seeds at depth 3, heavy
-seeds at depth 5+) once depth-4 hits a ceiling at larger N.
+Post-V4 improvements still deferred: adaptive per-seed depth
+selection (split heavy seeds at depth 5 or 6 while light seeds stay
+at depth 4) — estimated 10-15 % at N=22 / much more at N=24. Shared
+canon LRU cross workers (lock-free reads) — estimated 3-5 %. Both
+are bigger surgery than V4 and deferred to a separate session.
 
 ## Useful commands
 
