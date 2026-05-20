@@ -37,6 +37,13 @@ traces_qd = []
 # globals are `_Thread_local`. Incompatible with `traces_qd` because
 # Traces uses non-TLS static work queues.
 parallel = ["dep:crossbeam-channel"]
+# E1/E2 measurement substrate (research-plan
+# `any-speed-improvement-to-tender-wave`): record per-call sparsenauty
+# elapsed_ns + statsblk fields into a global Mutex<Vec> in
+# `canon_info_qd_native`, drained from Python via `drain_nauty_hist()`.
+# Off by default; zero overhead when off. Used to measure mean nauty
+# cost split by easy (numnodes=1) vs hard (numnodes>1) buckets.
+nauty_hist = []
 
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }

@@ -9,6 +9,8 @@ pub mod candidates;
 pub mod canon;
 pub mod enumerate;
 pub mod feulner;
+pub mod feulner_clb;
+pub mod invariants;
 pub mod linalg;
 pub mod orbit;
 pub mod paired_iso;
@@ -238,6 +240,25 @@ fn py_canon_info_feulner_counters(
     Ok((info.leaves, info.prunes))
 }
 
+/// Extended Feulner counters — `(leaves, prefix_prunes, clb_prunes)`.
+/// Companion to the v1 entry above; new tests use this one. Kept
+/// alongside the v1 entry so existing callers (and `golay_canon_bench.py`)
+/// stay green during the CLB rollout.
+#[pyfunction]
+#[pyo3(name = "canon_info_feulner_counters_v2")]
+fn py_canon_info_feulner_counters_v2(
+    rref: Vec<BinVec>,
+    n: u32,
+) -> PyResult<(u64, u64, u64)> {
+    if n > types::MAX_N {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "n = {n} exceeds MAX_N = {}", types::MAX_N,
+        )));
+    }
+    let info = feulner::canon_info_feulner(&rref, n);
+    Ok((info.leaves, info.prunes, info.clb_prunes))
+}
+
 // ---------------------------------------- McKay subspace-orbit BFS surface
 
 /// BFS test for `_in_aut_orbit_of_subspace` — the inner loop of the McKay
@@ -366,7 +387,188 @@ fn py_kernel_build_info() -> &'static str {
     enumerate::build_info()
 }
 
+// ───────────────────────────────────────────── invariants (collision experiment)
+//
+// Substrate for `scripts/wl_collision_experiment.py`'s N=24/26 Rust port —
+// 1-WL on (full G(C) | G_min) bipartite graphs + T11/T12/T13 cheap
+// invariants. Not on the kernel hot path; pure standalone signatures.
+
+/// 1-WL signature on the codeword × column bipartite graph.
+///
+/// - `graph`: `"min"` (low-weight spanning subset, falls back to full G(C)
+///   when low-weight set exceeds 2^(k-1)) or `"full"` (all 2^k − 1 nonzero
+///   codewords).
+/// - `init`: `"vanilla"` (codewords colour 0, columns colour 1) or
+///   `"degree_init"` (codewords by weight stratum, columns by degree).
+///
+/// Returns the sorted multiset of final per-vertex content-hashes
+/// (side-tagged so left/right colour spaces are disjoint). Permutation
+/// invariant; bucketing-equivalent to (but byte-incompatible with) the
+/// Python wl_signature.
+#[pyfunction]
+#[pyo3(name = "wl_signature")]
+fn py_wl_signature(
+    rref: Vec<BinVec>,
+    n: u32,
+    graph: &str,
+    init: &str,
+) -> PyResult<(Vec<u64>, u32, bool)> {
+    let g_opt = match graph {
+        "min" => match invariants::build_low_weight_bipartite(&rref, n) {
+            Some(g) => (g, false),
+            None => (invariants::build_full_bipartite(&rref, n), true),
+        },
+        "full" => (invariants::build_full_bipartite(&rref, n), false),
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "graph must be 'min' or 'full', got {other:?}"
+            )))
+        }
+    };
+    let init_mode = match init {
+        "vanilla" => invariants::InitMode::Vanilla,
+        "degree_init" => invariants::InitMode::DegreeAndWeight,
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "init must be 'vanilla' or 'degree_init', got {other:?}"
+            )))
+        }
+    };
+    let (g, fallback) = g_opt;
+    let (sig, rounds) = invariants::wl_refine(&g, init_mode);
+    Ok((sig, rounds, fallback))
+}
+
+/// T11: per-column profile of (#wt-w cws through col j, for w in weights).
+/// Computed over the full nonzero codeword set. Per-column tuple packed
+/// losslessly into u128 (16 bits per count × ≤ 8 weights).
+#[pyfunction]
+#[pyo3(name = "t11_signature")]
+fn py_t11_signature(rref: Vec<BinVec>, n: u32, weights: Vec<u32>) -> Vec<u128> {
+    let cws = invariants::full_codewords(&rref, n);
+    invariants::t11_signature(&cws, n, &weights)
+}
+
+/// T11 on the low-weight spanning subset (the "G_min" T11). Falls back to
+/// full G(C) when low-weight bails.
+#[pyfunction]
+#[pyo3(name = "t11_signature_gmin")]
+fn py_t11_signature_gmin(
+    rref: Vec<BinVec>,
+    n: u32,
+    weights: Vec<u32>,
+) -> Vec<u128> {
+    let cws = match invariants::low_weight_codewords_pub(&rref, n) {
+        Some((c, _)) => c,
+        None => invariants::full_codewords(&rref, n),
+    };
+    invariants::t11_signature(&cws, n, &weights)
+}
+
+/// T12: sorted multiset over min-weight-codeword triples.
+#[pyfunction]
+#[pyo3(name = "t12_signature")]
+fn py_t12_signature(rref: Vec<BinVec>, n: u32) -> Vec<u64> {
+    let cws = invariants::full_codewords(&rref, n);
+    let _ = n;
+    invariants::t12_signature(&cws)
+}
+
+/// T13 (pair-gram): per-column-pair tuple of #wt-w cws containing both.
+#[pyfunction]
+#[pyo3(name = "t13_signature")]
+fn py_t13_signature(rref: Vec<BinVec>, n: u32, weights: Vec<u32>) -> Vec<u64> {
+    let cws = invariants::full_codewords(&rref, n);
+    invariants::t13_signature(&cws, n, &weights)
+}
+
+/// Compute every signature for one code in a single Rust call.
+///
+/// Returns `(digests, fallback, metadata, component_nanos)`:
+/// - `digests` is a list of 9 u128 hashes in this order:
+///   `[wl_min_vanilla, wl_min_degree, wl_full_vanilla, wl_full_degree,
+///     t11_full, t11_gmin, t12, t13, t13_min]`. Each entry is a 128-bit
+///   content hash of the sorted multiset signature — collision
+///   probability is ~10⁻²³ over a 494K-class N=26 run (negligible), and
+///   per-code memory is fixed at 9 × 16 = 144 bytes regardless of |L+R|.
+/// - `fallback` is true iff the low-weight builder bailed (full G(C) used
+///   for wl_min variants).
+/// - `metadata` is a 6-element list:
+///   `[rounds_min_vanilla, rounds_min_degree, rounds_full_vanilla,
+///     rounds_full_degree, l_min, l_full]`
+/// - `component_nanos` is a 9-element list of per-component wall-time
+///   nanoseconds (same index order as `digests`). Caller accumulates
+///   these across codes to report per-component µs/code. Excludes the
+///   shared codeword-set / bipartite-graph builds (those would
+///   double-count across components).
+///
+/// `weights` is used for T11_full and T13 (typically (4, 8, 12, 16));
+/// `gmin_weights` is used for T11_gmin (typically multiples of 4 up to N).
+/// `t13_min` is T13 over the auto-detected minimum-weight stratum.
+#[pyfunction]
+#[pyo3(name = "all_invariants")]
+fn py_all_invariants(
+    rref: Vec<BinVec>,
+    n: u32,
+    weights: Vec<u32>,
+    gmin_weights: Vec<u32>,
+) -> (Vec<u128>, bool, Vec<u32>, Vec<u64>) {
+    let r = invariants::compute_all_invariants(&rref, n, &weights, &gmin_weights);
+    let digests = vec![
+        r.wl_min_vanilla,
+        r.wl_min_degree,
+        r.wl_full_vanilla,
+        r.wl_full_degree,
+        r.t11_full,
+        r.t11_gmin,
+        r.t12,
+        r.t13,
+        r.t13_min,
+    ];
+    let metadata = vec![
+        r.rounds_min_vanilla,
+        r.rounds_min_degree,
+        r.rounds_full_vanilla,
+        r.rounds_full_degree,
+        r.l_min,
+        r.l_full,
+    ];
+    (digests, r.fallback, metadata, r.component_nanos.to_vec())
+}
+
 // ------------------------------------------------------ module assembly
+
+/// E1/E2 measurement: drain the per-call sparsenauty histogram. Only
+/// available when the kernel is built with `--features nauty_hist`. Each
+/// tuple is
+/// `(elapsed_ns, numnodes, tctotal, maxlevel, numgenerators,
+///   left_vertices, right_vertices, rank, qd_path)` — one record per
+/// sparsenauty call since the last drain. `qd_path` is `1` if the call
+/// went through `canon_info_qd_native` (low-weight-incidence path) and
+/// `0` if it went through `canon_info_native` (full bipartite —
+/// either Q_D dispatch skipped or `collect_low_weight_codewords`
+/// bailed).
+#[cfg(feature = "nauty_hist")]
+#[pyfunction]
+#[pyo3(name = "drain_nauty_hist")]
+fn py_drain_nauty_hist() -> Vec<(u64, u64, u64, i32, i32, u32, u32, u32, u8)> {
+    canon::nauty_hist_drain()
+        .into_iter()
+        .map(|r| {
+            (
+                r.elapsed_ns,
+                r.numnodes,
+                r.tctotal,
+                r.maxlevel,
+                r.numgenerators,
+                r.left_vertices,
+                r.right_vertices,
+                r.rank,
+                if r.qd_path { 1u8 } else { 0u8 },
+            )
+        })
+        .collect()
+}
 
 #[pymodule]
 fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -378,6 +580,16 @@ fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_subspace_in_orbit, m)?)?;
     m.add_function(wrap_pyfunction!(py_enumerate_doubly_even, m)?)?;
     m.add_function(wrap_pyfunction!(py_kernel_build_info, m)?)?;
+    #[cfg(feature = "nauty_hist")]
+    m.add_function(wrap_pyfunction!(py_drain_nauty_hist, m)?)?;
+
+    // Invariants (collision experiment substrate; not on the hot path).
+    m.add_function(wrap_pyfunction!(py_wl_signature, m)?)?;
+    m.add_function(wrap_pyfunction!(py_t11_signature, m)?)?;
+    m.add_function(wrap_pyfunction!(py_t11_signature_gmin, m)?)?;
+    m.add_function(wrap_pyfunction!(py_t12_signature, m)?)?;
+    m.add_function(wrap_pyfunction!(py_t13_signature, m)?)?;
+    m.add_function(wrap_pyfunction!(py_all_invariants, m)?)?;
 
     // Stage-level helpers under `doubly_even_kernel.debug`.
     let debug = PyModule::new(m.py(), "debug")?;
@@ -392,6 +604,7 @@ fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     debug.add_function(wrap_pyfunction!(py_aut_orbit_minima_q_table, &debug)?)?;
     debug.add_function(wrap_pyfunction!(py_aut_orbit_minima_q_witt, &debug)?)?;
     debug.add_function(wrap_pyfunction!(py_canon_info_feulner_counters, &debug)?)?;
+    debug.add_function(wrap_pyfunction!(py_canon_info_feulner_counters_v2, &debug)?)?;
     m.add_submodule(&debug)?;
     Ok(())
 }

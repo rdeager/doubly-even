@@ -42,7 +42,14 @@ from dataclasses import dataclass, field
 
 from ..spec.codes import Code
 from .nauty import CanonInfo
-from .permutations import Perm, compose, group_order, inverse
+from .permutations import (
+    Perm,
+    compose,
+    group_order,
+    identity,
+    inverse,
+    orbit_and_transversal,
+)
 
 try:  # pragma: no cover -- import-side switch
     import doubly_even_kernel as _kernel
@@ -84,6 +91,12 @@ class _SearchState:
     # Counters (Phase A diagnostic; tiny overhead, kept for Phase B tuning).
     leaves_visited: int = 0
     prune_fires: int = 0
+    clb_prune_fires: int = 0
+    use_clb: bool = True
+    clb: _LabelledBranching = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.clb = _LabelledBranching(n=self.n)
 
     def push_aut(self, g: Perm) -> None:
         """Dedupe before pushing — a leaf that matches the canonical
@@ -94,6 +107,8 @@ class _SearchState:
             return
         self._seen_gens.add(g)
         self.aut_gens.append(g)
+        if self.use_clb:
+            self.clb.add_gen(g)
 
 
 @dataclass
@@ -160,12 +175,131 @@ class _PartialKey:
         self.absorbed_cols |= 1 << c
 
 
-def canon_info_feulner(C: Code) -> CanonInfo:
+@dataclass
+class _LabelledBranching:
+    """Jerrum's complete labelled branching of `<gens> ≤ S_n` (Feulner §5.2).
+
+    The branching is encoded by the parent array ``father``:
+    ``father[j] = i`` means there is an arc ``(i → j)`` in `B` with
+    ``i < j``; ``father[j] = -1`` means ``j`` is a root of the forest.
+
+    Two operations:
+
+    * :meth:`add_gen` records a new generator. The ``father`` array is
+      rebuilt lazily on the next :meth:`has_empty_intersection` call.
+    * :meth:`has_empty_intersection` is Lemma 5.9: given the current
+      ordered partition `π = [α_0, …, α_m]`, return ``True`` iff the
+      coset ``S_π·π`` contains **no** topological sort of `B` — in which
+      case the entire subtree at this search node is unreachable from
+      any canonical leaf and can be pruned.
+
+    Mirrors Sage's ``LabelledBranching`` from
+    ``sage/groups/perm_gps/partn_ref2/refinement_generic.pyx``. Sage
+    delegates the stabilizer chain to GAP; we use the local
+    Schreier–Sims walk (same one as :func:`permutations.group_order`).
+    """
+
+    n: int
+    father: list[int] = field(default_factory=list)
+    gens: list[Perm] = field(default_factory=list)
+    _seen: set[Perm] = field(default_factory=set)
+    dirty: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.father:
+            self.father = [-1] * self.n
+
+    def add_gen(self, g: Perm) -> None:
+        """Record `g` as a known automorphism; defer ``father`` rebuild."""
+        if g in self._seen:
+            return
+        self._seen.add(g)
+        self.gens.append(g)
+        self.dirty = True
+
+    def _rebuild_father(self) -> None:
+        """Walk a Schreier–Sims chain on points 0..n-1, fill ``father``.
+
+        At each base point ``i`` (in increasing order), if the residual
+        group acts non-trivially on ``i``: set ``father[j] = i`` for every
+        ``j ≠ i`` in the orbit of ``i``. Then recurse on the stabiliser
+        (Schreier generators). Same procedure as Sage's GAP-driven walk,
+        only with our hand-rolled Schreier–Sims.
+        """
+        self.father = [-1] * self.n
+        if not self.gens:
+            self.dirty = False
+            return
+        gens: list[Perm] = list(self.gens)
+        id_p = identity(self.n)
+        for base in range(self.n):
+            if not gens:
+                break
+            orbit, transversal = orbit_and_transversal(gens, base, self.n)
+            if len(orbit) == 1:
+                continue
+            for j in orbit:
+                if j != base:
+                    self.father[j] = base
+            new_gens: set[Perm] = set()
+            for p in orbit:
+                t_p = transversal[p]
+                for g in gens:
+                    q = g[p]
+                    t_q_inv = inverse(transversal[q])
+                    sg = compose(t_q_inv, compose(g, t_p))
+                    if sg != id_p:
+                        new_gens.add(sg)
+            if not new_gens:
+                break
+            gens = list(new_gens)
+        self.dirty = False
+
+    def has_empty_intersection(self, partition: list[list[int]]) -> bool:
+        """Lemma 5.9 topological-sort test.
+
+        ``partition`` is interpreted as the ordered cell list of a
+        Young-subgroup coset: position ``k`` in the flattened cell
+        sequence corresponds to column ``flatten[k]``. Returns ``True``
+        iff some arc ``(i → j)`` in `B` has its target ``j`` placed
+        **before** its source ``i`` in a strictly earlier cell — i.e.
+        no topological sort of `B` exists in the coset, so the subtree
+        cannot contain a canonical representative.
+        """
+        if self.dirty:
+            self._rebuild_father()
+        if not self.gens:
+            return False
+
+        pos = [0] * self.n
+        cell_of = [0] * self.n
+        k = 0
+        for ci, cell in enumerate(partition):
+            for col in cell:
+                pos[col] = k
+                cell_of[col] = ci
+                k += 1
+
+        for j in range(self.n):
+            i = self.father[j]
+            if i == -1:
+                continue
+            if cell_of[j] < cell_of[i]:
+                return True
+        return False
+
+
+def canon_info_feulner(C: Code, *, use_clb: bool = True) -> CanonInfo:
     """Compute :class:`CanonInfo` via column-side partition refinement.
 
     Same contract as :func:`doubly_even.canon.nauty.canon_info`: returns
     canonical column order, automorphism generators, exact `|Aut(C)|`,
     and a column-orbit assignment.
+
+    ``use_clb`` (default ``True``): apply Jerrum's complete labelled
+    branching + Lemma 5.9 topological-sort pruning (Feulner §5.2). The
+    pre-CLB orbit-rep filter is kept available behind ``use_clb=False``
+    as a regression-only fallback.
     """
     n = C.n
     rref, _ = C.rref_basis()
@@ -177,7 +311,7 @@ def canon_info_feulner(C: Code) -> CanonInfo:
         return _sn_canon_info(n)
 
     refiners = _invariant_refiners(rref, k)
-    state = _SearchState(n=n, k=k)
+    state = _SearchState(n=n, k=k, use_clb=use_clb)
     partial = _PartialKey(k=k, work=list(rref))
     _search(
         _initial_partition(rref, n), rref, refiners, state, path=(), partial=partial
@@ -639,8 +773,24 @@ def _search(
     the best's prefix. Target cell for individualisation is the
     **smallest** non-trivial cell (Phase B heuristic; Feulner/nauty
     default — smaller branching factor at each level).
+
+    CLB pruning (Feulner §5.2, Lemma 5.9) is applied at two points: just
+    after partition refinement, and again after singleton absorption (the
+    partition order has shifted, so re-test). Either check fires only
+    when ``state.best_key is not None`` — before the first leaf, all
+    leaves are still candidates and we have no automorphisms to act on.
     """
     P = _refine(P, refiners)
+
+    # CLB topological-sort prune (Feulner §5.2 / Sage's _cut_by_known_automs,
+    # call site #1 — top of every backtrack node, after refinement).
+    if (
+        state.use_clb
+        and state.best_key is not None
+        and state.clb.has_empty_intersection(P)
+    ):
+        state.clb_prune_fires += 1
+        return
 
     # Absorb every singleton not yet in the key, in the order they appear
     # in the refined partition. Check the prefix prune after each
@@ -662,6 +812,13 @@ def _search(
                             if a > b:
                                 state.prune_fires += 1
                                 return
+
+    # Note: Sage's `_cut_by_known_automs` runs *twice* per node — once at the
+    # top of `_backtrack`, once inside `_one_refinement` after each refinement
+    # step changes the partition. Our `_refine()` is a single-shot
+    # equitable-refinement call, so `P` is unchanged between the top-of-node
+    # check above and here. A second check on the same partition would never
+    # fire, so we skip it.
 
     if all(len(cell) == 1 for cell in P):
         state.leaves_visited += 1
@@ -746,6 +903,60 @@ def _orbits_on_subset(gens: list[Perm], subset: list[int]) -> dict[int, int]:
                 union(c, j)
 
     return {c: find(c) for c in subset}
+
+
+def canon_info_feulner_with_counters(
+    C: Code, *, use_clb: bool = True
+) -> tuple[CanonInfo, dict[str, int]]:
+    """Wrapper around :func:`canon_info_feulner` that also returns the
+    Phase-A diagnostic counters (leaves visited, prefix-prune fires, CLB
+    topological-sort prune fires).
+
+    Used by the Golay regression script and any other A/B harness that
+    wants to confirm CLB is actually pruning. Not on the hot path —
+    pure-Python only; the Rust kernel exposes its own counters.
+    """
+    n = C.n
+    rref, _ = C.rref_basis()
+    k = len(rref)
+    if n == 0:
+        return CanonInfo((), (), 1, ()), {
+            "leaves_visited": 0,
+            "prune_fires": 0,
+            "clb_prune_fires": 0,
+        }
+    if k == 0 or k == n:
+        return _sn_canon_info(n), {
+            "leaves_visited": 0,
+            "prune_fires": 0,
+            "clb_prune_fires": 0,
+        }
+
+    refiners = _invariant_refiners(rref, k)
+    state = _SearchState(n=n, k=k, use_clb=use_clb)
+    partial = _PartialKey(k=k, work=list(rref))
+    _search(
+        _initial_partition(rref, n), rref, refiners, state, path=(), partial=partial
+    )
+
+    aut_gens = tuple(state.aut_gens)
+    aut_order = group_order(aut_gens, n) if aut_gens else 1
+    assert state.best_key is not None
+    transporter = state.key_to_pi[state.best_key]
+    column_orbits = _column_orbits(aut_gens, n)
+
+    info = CanonInfo(
+        canonical_column_order=transporter,
+        aut_generators=aut_gens,
+        aut_order=aut_order,
+        column_orbits=column_orbits,
+    )
+    counters = {
+        "leaves_visited": state.leaves_visited,
+        "prune_fires": state.prune_fires,
+        "clb_prune_fires": state.clb_prune_fires,
+    }
+    return info, counters
 
 
 def _column_orbits(aut_gens: tuple[Perm, ...], n: int) -> tuple[int, ...]:

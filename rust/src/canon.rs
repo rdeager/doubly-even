@@ -99,6 +99,52 @@ thread_local! {
     static LEFT_VERTEX_COUNT: RefCell<u32> = const { RefCell::new(0) };
 }
 
+// E1/E2 measurement substrate. Off by default. See Cargo feature
+// `nauty_hist` doc + research plan
+// `any-speed-improvement-to-tender-wave`.
+#[cfg(feature = "nauty_hist")]
+#[derive(Clone, Copy)]
+pub struct NautyCallRecord {
+    pub elapsed_ns: u64,
+    pub numnodes: u64,
+    pub tctotal: u64,
+    pub maxlevel: i32,
+    pub numgenerators: i32,
+    pub left_vertices: u32,
+    pub right_vertices: u32,
+    /// Code rank `k = rref.len()`. With this and `left_vertices` we can
+    /// reconstruct the Q_D-vs-fallback bucketing: `qd_path` iff
+    /// `left_vertices < (1 << rank)` (the low-weight subset is strictly
+    /// smaller than the full codeword set) or `qd_path` is `true` and
+    /// `left_vertices == (1 << rank) - 1` only in the degenerate
+    /// rank-0 → fallback case.
+    pub rank: u32,
+    /// `true` if this record came from `canon_info_qd_native` (Q_D
+    /// low-weight path); `false` if from `canon_info_native` — either
+    /// because Q_D bailed (`collect_low_weight_codewords` returned
+    /// `None`) or because the dispatch in `enumerate::canon_info`
+    /// chose the full-bipartite path directly.
+    pub qd_path: bool,
+}
+
+#[cfg(feature = "nauty_hist")]
+static NAUTY_HIST: std::sync::Mutex<Vec<NautyCallRecord>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(feature = "nauty_hist")]
+#[inline]
+fn nauty_hist_push(rec: NautyCallRecord) {
+    if let Ok(mut h) = NAUTY_HIST.lock() {
+        h.push(rec);
+    }
+}
+
+#[cfg(feature = "nauty_hist")]
+pub fn nauty_hist_drain() -> Vec<NautyCallRecord> {
+    let mut h = NAUTY_HIST.lock().expect("nauty hist mutex poisoned");
+    std::mem::take(&mut *h)
+}
+
 extern "C" fn auto_callback(
     _count: c_int,
     perm: *mut c_int,
@@ -301,6 +347,9 @@ pub fn canon_info_native(rref: &[BinVec], n: u32) -> NativeCanonInfo {
     AUT_BUFFER.with(|cell| cell.borrow_mut().clear());
     LEFT_VERTEX_COUNT.with(|cell| *cell.borrow_mut() = l as u32);
 
+    #[cfg(feature = "nauty_hist")]
+    let nauty_t0 = std::time::Instant::now();
+
     unsafe {
         sparsenauty(
             &mut sg,
@@ -311,6 +360,22 @@ pub fn canon_info_native(rref: &[BinVec], n: u32) -> NativeCanonInfo {
             &mut stats,
             &mut canon_sg,
         );
+    }
+
+    #[cfg(feature = "nauty_hist")]
+    {
+        let elapsed_ns = nauty_t0.elapsed().as_nanos() as u64;
+        nauty_hist_push(NautyCallRecord {
+            elapsed_ns,
+            numnodes: stats.numnodes as u64,
+            tctotal: stats.tctotal as u64,
+            maxlevel: stats.maxlevel as i32,
+            numgenerators: stats.numgenerators as i32,
+            left_vertices: l as u32,
+            right_vertices: r as u32,
+            rank: rref.len() as u32,
+            qd_path: false,
+        });
     }
 
     // `lab` now holds the canonical-form vertex order: `lab[new_index] =
@@ -598,6 +663,9 @@ pub fn canon_info_qd_native(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> 
     AUT_BUFFER.with(|cell| cell.borrow_mut().clear());
     LEFT_VERTEX_COUNT.with(|cell| *cell.borrow_mut() = l as u32);
 
+    #[cfg(feature = "nauty_hist")]
+    let nauty_t0 = std::time::Instant::now();
+
     unsafe {
         sparsenauty(
             &mut sg,
@@ -608,6 +676,22 @@ pub fn canon_info_qd_native(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> 
             &mut stats,
             &mut canon_sg,
         );
+    }
+
+    #[cfg(feature = "nauty_hist")]
+    {
+        let elapsed_ns = nauty_t0.elapsed().as_nanos() as u64;
+        nauty_hist_push(NautyCallRecord {
+            elapsed_ns,
+            numnodes: stats.numnodes as u64,
+            tctotal: stats.tctotal as u64,
+            maxlevel: stats.maxlevel as i32,
+            numgenerators: stats.numgenerators as i32,
+            left_vertices: l as u32,
+            right_vertices: r as u32,
+            rank: rref.len() as u32,
+            qd_path: true,
+        });
     }
 
     // Restrict canonical labelling to columns and invert into old→new form.

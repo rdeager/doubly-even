@@ -17,6 +17,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::feulner_clb::LabelledBranching;
 use crate::types::BinVec;
 
 /// Output of [`canon_info_feulner`], mirroring `canon.feulner.CanonInfo`.
@@ -28,6 +29,8 @@ pub struct FeulnerCanonInfo {
     pub column_orbits: Vec<u32>,
     pub leaves: u64,
     pub prunes: u64,
+    /// Number of CLB topological-sort prunes (Feulner §5.2, Lemma 5.9).
+    pub clb_prunes: u64,
 }
 
 // ----------------------------------------------------- permutation utilities
@@ -676,6 +679,8 @@ struct SearchState {
     seen_gens: HashSet<Perm>,
     leaves: u64,
     prunes: u64,
+    clb_prunes: u64,
+    clb: LabelledBranching,
 }
 
 impl SearchState {
@@ -688,13 +693,18 @@ impl SearchState {
             seen_gens: HashSet::new(),
             leaves: 0,
             prunes: 0,
+            clb_prunes: 0,
+            clb: LabelledBranching::new(n),
         }
     }
 
     /// Push an aut generator only if it hasn't already been collected.
+    /// Mirrors the Python `push_aut`: also informs the CLB so Lemma 5.9
+    /// can use the new generator immediately.
     fn push_aut(&mut self, g: Perm) {
         if self.seen_gens.insert(g.clone()) {
-            self.aut_gens.push(g);
+            self.aut_gens.push(g.clone());
+            self.clb.add_gen(g);
         }
     }
 }
@@ -707,6 +717,15 @@ fn search(
     partial: &mut PartialKey,
 ) {
     let p = refine(p, refiners);
+
+    // CLB topological-sort prune (Feulner §5.2 / Sage's
+    // `_cut_by_known_automs`, call site #1 — top of every backtrack
+    // node, after refinement). Only meaningful once we have a candidate
+    // canonical leaf (so before then, `best_key` is `None` and we skip).
+    if state.best_key.is_some() && state.clb.has_empty_intersection(&p) {
+        state.clb_prunes += 1;
+        return;
+    }
 
     // Absorb every singleton not yet in the key, in cell order. Mutates
     // `partial` in place; `log` records every row mutation so we can
@@ -738,6 +757,14 @@ fn search(
             }
         }
     }
+
+    // Note: Sage's `_cut_by_known_automs` is called *twice* per node — once
+    // at the top of `_backtrack`, once inside `_one_refinement` after each
+    // refinement step changes the partition. Our `refine()` is a single-shot
+    // equitable-refinement call (we don't iterate; the result is already
+    // fully equitable), so `p` is unchanged between the top-of-node check
+    // above and here. A second check on the same partition would never fire,
+    // so we skip it.
 
     if p.iter().all(|c| c.len() == 1) {
         state.leaves += 1;
@@ -827,6 +854,7 @@ fn sn_canon_info(n: u32) -> FeulnerCanonInfo {
         column_orbits: vec![0u32; n as usize],
         leaves: 0,
         prunes: 0,
+        clb_prunes: 0,
     }
 }
 
@@ -845,6 +873,7 @@ pub fn canon_info_feulner(rref: &[BinVec], n: u32) -> FeulnerCanonInfo {
             column_orbits: Vec::new(),
             leaves: 0,
             prunes: 0,
+            clb_prunes: 0,
         };
     }
     let k = rref.len();
@@ -876,6 +905,7 @@ pub fn canon_info_feulner(rref: &[BinVec], n: u32) -> FeulnerCanonInfo {
         column_orbits,
         leaves: state.leaves,
         prunes: state.prunes,
+        clb_prunes: state.clb_prunes,
     }
 }
 

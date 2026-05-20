@@ -243,38 +243,46 @@ def write_json(label: str, results: list[PerNResult]) -> Path:
     return out_path
 
 
+MAIN_HEADER = f"{'N':>4} {'seconds':>10} {'classes':>8}   per-k (k:count)"
+STATS_HEADER = (
+    f"{'N':>4} {'calls':>8} {'us/call':>8} "
+    f"{'nodes/call':>11} {'tc/call':>9} "
+    f"{'lvl/call':>9} {'gen/call':>9}"
+)
+
+
+def format_main_row(r: PerNResult) -> str:
+    per_k = ", ".join(
+        f"{pk.k}:{pk.classes}" for pk in sorted(r.per_k.values(), key=lambda x: x.k)
+    )
+    return f"{r.N:>4} {r.seconds:>10.3f} {r.classes:>8}   {per_k}"
+
+
+def format_stats_row(r: PerNResult) -> str:
+    ks = r.kernel_stats
+    calls = max(ks.get("canon_calls", 0), 1)
+    us = ks.get("nauty_ns", 0) / 1_000.0 / calls
+    nodes = ks.get("nauty_numnodes_sum", 0) / calls
+    tc = ks.get("nauty_tctotal_sum", 0) / calls
+    lvl = ks.get("nauty_maxlevel_sum", 0) / calls
+    gen = ks.get("nauty_generators_sum", 0) / calls
+    return (
+        f"{r.N:>4} {calls:>8} {us:>8.2f} "
+        f"{nodes:>11.2f} {tc:>9.2f} "
+        f"{lvl:>9.2f} {gen:>9.2f}"
+    )
+
+
 def format_table(results: list[PerNResult]) -> str:
-    lines = []
-    lines.append(f"{'N':>4} {'seconds':>10} {'classes':>8}   per-k (k:count)")
+    lines = [MAIN_HEADER]
     for r in results:
-        per_k = ", ".join(
-            f"{pk.k}:{pk.classes}" for pk in sorted(r.per_k.values(), key=lambda x: x.k)
-        )
-        lines.append(f"{r.N:>4} {r.seconds:>10.3f} {r.classes:>8}   {per_k}")
-    # Nauty Q6 decomposition table (only when kernel stats present).
-    have_stats = any(r.kernel_stats for r in results)
-    if have_stats:
+        lines.append(format_main_row(r))
+    if any(r.kernel_stats for r in results):
         lines.append("")
-        lines.append(
-            f"{'N':>4} {'calls':>8} {'us/call':>8} "
-            f"{'nodes/call':>11} {'tc/call':>9} "
-            f"{'lvl/call':>9} {'gen/call':>9}"
-        )
+        lines.append(STATS_HEADER)
         for r in results:
-            ks = r.kernel_stats
-            if not ks:
-                continue
-            calls = max(ks.get("canon_calls", 0), 1)
-            us = ks.get("nauty_ns", 0) / 1_000.0 / calls
-            nodes = ks.get("nauty_numnodes_sum", 0) / calls
-            tc = ks.get("nauty_tctotal_sum", 0) / calls
-            lvl = ks.get("nauty_maxlevel_sum", 0) / calls
-            gen = ks.get("nauty_generators_sum", 0) / calls
-            lines.append(
-                f"{r.N:>4} {calls:>8} {us:>8.2f} "
-                f"{nodes:>11.2f} {tc:>9.2f} "
-                f"{lvl:>9.2f} {gen:>9.2f}"
-            )
+            if r.kernel_stats:
+                lines.append(format_stats_row(r))
     return "\n".join(lines)
 
 
@@ -315,11 +323,22 @@ def main() -> int:
         profiler.dump_stats(str(prof_path))
         results = [result]
         print(f"cProfile output: {prof_path}")
+        print(format_table(results), flush=True)
     else:
         Ns = [int(s.strip()) for s in args.N.split(",") if s.strip()]
-        results = [run_one(N) for N in Ns]
+        results = []
+        print(MAIN_HEADER, flush=True)
+        for N in Ns:
+            r = run_one(N)
+            results.append(r)
+            print(format_main_row(r), flush=True)
+        if any(r.kernel_stats for r in results):
+            print()
+            print(STATS_HEADER, flush=True)
+            for r in results:
+                if r.kernel_stats:
+                    print(format_stats_row(r), flush=True)
 
-    print(format_table(results))
     out_path = write_json(args.label, results)
     print(f"\nWrote {out_path}")
 

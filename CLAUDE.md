@@ -36,9 +36,13 @@ canon/       canonical labels + Aut(C); active backend is the Rust kernel
   matrix_group.py Schreier-Sims on GL(L, F_2) — phase-(b) scaffolding,
                   reachable via witt orbit path but not in active dispatch
   feulner.py     Python oracle for the Rust Feulner column-side
-                  canonicaliser (rust/src/feulner.rs); D9 — 6× slower
-                  than nauty per call, kept as diff oracle / verifier
-                  substrate, not active default
+                  canonicaliser (rust/src/feulner.rs); D9 — still slower
+                  than nauty per call (~18 ms structural floor on Golay
+                  vs nauty Q_D's 0.82 ms), kept as diff oracle / verifier
+                  substrate, not active default. Includes Feulner §5.2
+                  CLB + Lemma 5.9 (`_LabelledBranching`) as of 2026-05-20
+                  — faithful port of Sage's `LabelledBranching`. See
+                  `project_feulner_clb_implemented.md` in user memory.
   paired_iso.py  Python prototype + reconstruction algebra for the
                   Leon §10(i) paired-iso prefilter (D12, dormant)
 
@@ -62,7 +66,11 @@ rust/        Rust kernel (doubly_even_kernel), built with maturin
   src/canon.rs       Q_D-graph low-weight-incidence canonicaliser (D10)
                       + native sparsenauty path; default dispatch.
   src/feulner.rs     Feulner column-side canonicaliser (D9, ~1000 LOC,
-                      reference / diff oracle).
+                      reference / diff oracle). Now also calls into
+                      `feulner_clb` for §5.2 aut-based pruning.
+  src/feulner_clb.rs Jerrum complete labelled branching (CLB) + Lemma 5.9
+                      topological-sort test (Feulner §5.2). Mirrors
+                      Sage's `LabelledBranching`. 2026-05-20.
   src/enumerate.rs   Native enumerate_doubly_even recursion (D11) +
                       paired-iso prefilter dispatch (D12, gated).
   src/paired_iso.rs  Leon §10(i) paired-iso witness search (D12).
