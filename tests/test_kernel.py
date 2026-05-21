@@ -137,6 +137,43 @@ def test_kernel_orbit_min_table_matches_python(N: int):
 # -------------------------------------------------- top-level cross-check
 
 
+def _is_young_subgroup_parent(C: Code) -> bool:
+    """``C = ⟨(1)^{4ℓ}(0)^{N-4ℓ}⟩`` — the rank-1 nodes that hit the kernel's
+    closed-form k=2 fast-path. Each emitted rep is then a different in-orbit
+    representative than ``singular_reps_q ∘ lift`` picks."""
+    if C.rank != 1:
+        return False
+    rref_rows, _ = C.rref_basis()
+    v = rref_rows[0]
+    w = v.bit_count()
+    return w >= 4 and w % 4 == 0 and v == (1 << w) - 1
+
+
+def _orbit_signature(w: int, C: Code, gens: tuple[tuple[int, ...], ...]) -> int:
+    """Min over the Aut(C)-orbit of ``w + C`` of coset reps reduced mod C."""
+    from doubly_even.spec.vectors import apply_permutation
+    rref_rows, pivots = C.rref_basis()
+
+    def reduce_mod_c(x: int) -> int:
+        for row, p in zip(rref_rows, pivots):
+            if (x >> p) & 1:
+                x ^= row
+        return x
+
+    seen = {reduce_mod_c(w)}
+    queue = list(seen)
+    while queue:
+        nxt = []
+        for x in queue:
+            for g in gens:
+                y = reduce_mod_c(apply_permutation(x, list(g)))
+                if y not in seen:
+                    seen.add(y)
+                    nxt.append(y)
+        queue = nxt
+    return min(seen)
+
+
 @pytest.mark.parametrize("N", [4, 6, 8, 10, 12])
 def test_kernel_doubly_even_candidates_q_matches_python(N: int):
     for C, aut_gens in _iter_parents(N):
@@ -150,9 +187,20 @@ def test_kernel_doubly_even_candidates_q_matches_python(N: int):
             [list(g) for g in aut_gens],
         )
         py_out = doubly_even_candidates_Q(C, aut_gens)
-        assert list(rust_out) == list(py_out), (
-            f"N={N}, k={C.rank}: doubly_even_candidates_q output mismatch"
-        )
+        if _is_young_subgroup_parent(C):
+            # The kernel's k=2 fast-path emits a different in-orbit
+            # representative than the V_basis lift; compare via the
+            # Aut(C)-orbit signature (min mod-C rep in each orbit).
+            rust_sig = sorted(_orbit_signature(w, C, aut_gens) for w in rust_out)
+            py_sig = sorted(_orbit_signature(w, C, aut_gens) for w in py_out)
+            assert rust_sig == py_sig, (
+                f"N={N}, k={C.rank}: kernel fast-path covers different orbits "
+                f"than production python pipeline"
+            )
+        else:
+            assert list(rust_out) == list(py_out), (
+                f"N={N}, k={C.rank}: doubly_even_candidates_q output mismatch"
+            )
 
 
 # ---------------------------------------------- end-to-end mass formula
@@ -185,3 +233,20 @@ def test_kernel_n4_minimal_smoke():
         list(C.dual().basis), [list(g) for g in aut_gens],
     )
     assert rust_out == [0b1111]
+
+
+@pytest.mark.parametrize("N", [4, 8, 12, 16, 20, 24])
+def test_kernel_rank0_shortcut_matches_closed_form(N: int):
+    """Rank-0 shortcut: Aut(zero) = S_N → candidates are ``(1<<4ℓ)-1`` for
+    ℓ = 1, ..., ⌊N/4⌋. Verifies the closed-form path agrees with the
+    Python oracle (which still runs the full Q_C orbit-min pipeline)."""
+    C = Code.zero(N)
+    aut_gens = cached_canon_info(C).aut_generators
+    rust_out = doubly_even_kernel.doubly_even_candidates_q(
+        N, list(C.rref_basis()[0]), list(C.rref_basis()[1]),
+        list(C.dual().basis), [list(g) for g in aut_gens],
+    )
+    expected = [(1 << w) - 1 for w in range(4, N + 1, 4)]
+    assert list(rust_out) == expected
+    py_out = doubly_even_candidates_Q(C, aut_gens)
+    assert list(rust_out) == list(py_out)
