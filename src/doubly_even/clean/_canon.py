@@ -103,17 +103,18 @@ def canon_info(C: Code) -> CanonInfo:
         return CanonInfo.trivial_sn(C.n)
     k = C.rank
     bail = (1 << k) // 2
+    cw_by_w = C.codewords_by_weight()
     accum: list[int] = []
     for w in range(4, C.n + 1, 4):
-        stratum = C.codewords_of_weight(w)
+        stratum = cw_by_w.get(w, [])
         if not stratum:
             continue
         accum.extend(stratum)
         if len(accum) > bail:
-            return _nauty_canon(C.n, C.codewords()[1:])  # fall back to full graph
+            break
         if len(rref_gf2(list(accum), C.n)[0]) == k:
             return _nauty_canon(C.n, accum)
-    return _nauty_canon(C.n, C.codewords()[1:])
+    return _nauty_canon(C.n, [c for ws in cw_by_w.values() for c in ws if c != 0])
 
 
 def _nauty_canon(n: int, codewords: list[int]) -> CanonInfo:

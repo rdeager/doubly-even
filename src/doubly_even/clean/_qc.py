@@ -53,23 +53,6 @@ def aut_image_on_Q(aut_generators, C, V_basis, pivots_V):
     return out
 
 
-def _sigma_Q_table(sigma_Q):
-    """``T[u] = σ_Q · u`` for all ``u ∈ [0, 2^L)``, built via Gray code."""
-    L = len(sigma_Q)
-    size = 1 << L
-    table = [0] * size
-    if L == 0:
-        return table
-    val = 0
-    u = 0
-    for i in range(1, size):
-        flip = (i & -i).bit_length() - 1
-        u ^= 1 << flip
-        val ^= sigma_Q[flip]
-        table[u] = val
-    return table
-
-
 def _singular_reps_Q(V_basis):
     """Q-coords ``u ∈ [1, 2^L)`` whose lift has ``wt ≡ 0 (mod 4)``."""
     L = len(V_basis)
@@ -88,10 +71,25 @@ def _singular_reps_Q(V_basis):
 
 
 def _aut_orbit_minima_Q(reps_Q, sigma_Qs):
-    """One Q-coord per ⟨σ_Qs⟩-orbit, taking the min in sorted iteration order."""
+    """One Q-coord per ⟨σ_Qs⟩-orbit, taking the min in sorted iteration order.
+
+    Builds all ``num_gens`` per-generator lookup tables ``T_j[u] = σ_Q_j · u``
+    in a single fused Gray walk (shared index walk, per-generator running val).
+    """
     if not sigma_Qs:
         return sorted(reps_Q)
-    tables = [_sigma_Q_table(s) for s in sigma_Qs]
+    L = len(sigma_Qs[0])
+    size = 1 << L
+    tables = [[0] * size for _ in sigma_Qs]
+    if L > 0:
+        vals = [0] * len(sigma_Qs)
+        u = 0
+        for i in range(1, size):
+            flip = (i & -i).bit_length() - 1
+            u ^= 1 << flip
+            for j, s in enumerate(sigma_Qs):
+                vals[j] ^= s[flip]
+                tables[j][u] = vals[j]
     seen: set[int] = set()
     minima: list[int] = []
     for v in sorted(reps_Q):
@@ -126,8 +124,17 @@ def _lift(u_Q, V_basis):
 
 def qc_candidates(C: Code, aut_generators: Iterable) -> list[int]:
     """Sorted ``F_2^N`` reps of Aut(C)-orbits of doubly-even 1-dim extensions of C."""
+    if C.rank == 0:
+        # Aut(zero code) = S_N: weight is a complete invariant, so the only
+        # canonical doubly-even k=1 extensions are the all-ones-on-first-4ℓ
+        # vectors for ℓ = 1, ..., ⌊N/4⌋. Skip the 2^N Q-walk + S_N orbit BFS.
+        return [(1 << w) - 1 for w in range(4, C.n + 1, 4)]
     V_basis, pivots_V = Q_basis(C)
     sigma_Qs = aut_image_on_Q(aut_generators, C, V_basis, pivots_V)
+    # σ_Q with s[i] == (1 << i) for all i acts as identity on Q_C — skip
+    # (mirrors rust/src/orbit.rs:148).
+    sigma_Qs = [s for s in sigma_Qs
+                if any(s[i] != (1 << i) for i in range(len(s)))]
     reps_Q = _singular_reps_Q(V_basis)
     orbit_min = _aut_orbit_minima_Q(reps_Q, sigma_Qs)
     return sorted(_lift(u, V_basis) for u in orbit_min)

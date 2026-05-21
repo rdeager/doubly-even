@@ -86,8 +86,16 @@ class Code:
             out[i] = out[i ^ (1 << flip)] ^ rows[flip]
         return out
 
-    def codewords_of_weight(self, w: int) -> list[BinVec]:
-        return [c for c in self.codewords() if c.bit_count() == w]
+    def codewords_by_weight(self) -> dict[int, list[BinVec]]:
+        """All ``2^k`` codewords bucketed by weight in one Gray-code walk."""
+        rows, _ = self.rref()
+        out: dict[int, list[BinVec]] = {0: [0]}
+        c = 0
+        for i in range(1, 1 << len(rows)):
+            flip = (i & -i).bit_length() - 1
+            c ^= rows[flip]
+            out.setdefault(c.bit_count(), []).append(c)
+        return out
 
     def __contains__(self, v: BinVec) -> bool:
         rref, pivots = self.rref()

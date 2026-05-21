@@ -37,21 +37,35 @@ def canonical_parent(D: Code, info_D: CanonInfo) -> Code:
 
 
 def _subspace_in_orbit(C, target, aut_generators, n):
-    """BFS on RREF keys: does some ``g`` send subspace ``C`` to ``target``?"""
+    """BFS on RREF keys: does some ``g`` send subspace ``C`` to ``target``?
+
+    Hot-loop ``apply_perm`` is inlined as a set-bit iteration: per σ we
+    precompute ``targets[i] = 1 << σ[i]`` and walk only the set bits of each
+    basis vector (one ``v &= v - 1`` per iteration). For doubly-even codes
+    with low-weight bases this is ~2× faster than the ``_spec.apply_perm``
+    scan over all ``n`` positions, without numpy overhead at the (Q ≈ 1)
+    frontier sizes typical here.
+    """
     target_key = target.rref()[0]
     start_key = C.rref()[0]
     if start_key == target_key:
         return True
-    sigma_lists = [list(g) for g in aut_generators]
-    if not sigma_lists:
+    sigma_targets = [[1 << j for j in g] for g in aut_generators]
+    if not sigma_targets:
         return False
     seen = {start_key}
     queue = [start_key]
     while queue:
         next_q: list = []
         for basis in queue:
-            for sigma in sigma_lists:
-                new_basis = [apply_perm(b, sigma) for b in basis]
+            for targets in sigma_targets:
+                new_basis = []
+                for b in basis:
+                    out = 0
+                    while b:
+                        out |= targets[(b & -b).bit_length() - 1]
+                        b &= b - 1
+                    new_basis.append(out)
                 key = tuple(rref_gf2(new_basis, n)[0])
                 if key == target_key:
                     return True
