@@ -378,6 +378,45 @@ post-V4 docs suggested. Pure env-var change, no recompile. V4's
 per-call thread-local scratch + mimalloc cut SMT contention enough
 that oversubscribed P-cores now pay back the latency cost.
 
+## GCP quickstart (cloud port, validated 2026-05-21)
+
+The kernel ports to Google Cloud Emerald Rapids with **zero per-IPC
+penalty** — per-thread wall is 1.65× slower than the 13700K, which
+is purely the clock ratio. Validated on `c4-standard-24` (Intel
+Xeon Platinum 8581C in us-east4): N=26 at t=24 d=5 in 285 s, all
+DFGHILM cells match. 86 % nauty utilisation at N=26 confirms the
+parallel kernel saturates cloud silicon cleanly. Full writeup:
+`markdown/notes/gcp-shakedown-2026-05-21.md`. Refined
+c4-288-metal estimates: `markdown/architecture/06-scaling-frontier.md`
+§"GCP Emerald Rapids validation 2026-05-21".
+
+Two scripts in tree (nproc-aware, work unchanged on c4-24 / c4-48 /
+c4-288-metal):
+
+```sh
+# On the GCP VM, fresh Ubuntu 24.04, one-liner bootstrap:
+curl -fsSL https://raw.githubusercontent.com/<gh-user>/doubly-even/main/scripts/gcp-setup.sh \
+  | bash -s -- --repo https://github.com/<gh-user>/doubly-even
+# (~10 min: apt → rustup → uv → clone → uv sync → maturin --release --features parallel → smoke pytest)
+
+# Then run the three-stage bench (Run A seq, Run B t=nproc/2 d=4, Run C t=nproc d=5):
+cd ~/doubly-even
+scripts/gcp-bench.sh shakedown-c4-24
+```
+
+**Gotchas**:
+- `kernel_build_info()` returns `"baseline"` even with `--features
+  parallel` (it only distinguishes verifier vs not). To verify
+  parallel is in: check `inspect.signature(k.enumerate_doubly_even)`
+  contains `num_threads`.
+- Fresh GCP projects cap at **24 global vCPUs**; first quota
+  request for more is denied with a 48-h cooldown for billing
+  history. Plan ahead.
+- On c4-288-metal, set `DOUBLY_EVEN_CANON_CACHE_CAP=200000` (not
+  the local 500K) — 288 workers × 500K × 5 KB = 720 GB would eat
+  the 2160 GB ceiling without enough headroom for output Vec +
+  scratch. 200K leaves ~1.8 TB free.
+
 ## Useful commands
 
 ```sh
