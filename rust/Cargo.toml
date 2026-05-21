@@ -57,7 +57,6 @@ parallel_profiling = ["parallel"]
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }
 fixedbitset = "0.5"
-nauty-Traces-sys = { version = "0.11", default-features = false, features = ["bundled", "tls", "popcnt"] }
 crossbeam-channel = { version = "0.5", optional = true }
 # Bounded LRU for the per-worker canon cache. At N ≥ 26 the canon
 # cache grows unbounded without this — N=26 with 20 workers hit the
@@ -71,6 +70,20 @@ lru = "0.12"
 # mimalloc's per-thread arenas eliminate the lock contention and keep
 # freelists hot in L1d.
 mimalloc = { version = "0.1", default-features = false }
+
+# `nauty-Traces-sys 0.11` is target-conditional: its `build.rs:205` calls
+# `is_x86_feature_detected!("popcnt")` unconditionally, which the Rust
+# compiler refuses on non-x86 targets. On aarch64 we drop the `popcnt`
+# feature; nauty's C source then uses `__builtin_popcountl`, which
+# compiles to the universal aarch64 `CNT` instruction (single-cycle on
+# Neoverse V2). Zero performance impact — confirmed during the 2026-05-21
+# c4a-standard-72 N=28 deploy: per-call cost 37.7 µs at N=28 matches the
+# x86_64 model 1:1 modulo per-thread clock ratio.
+[target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))'.dependencies]
+nauty-Traces-sys = { version = "0.11", default-features = false, features = ["bundled", "tls", "popcnt"] }
+
+[target.'cfg(not(any(target_arch = "x86", target_arch = "x86_64")))'.dependencies]
+nauty-Traces-sys = { version = "0.11", default-features = false, features = ["bundled", "tls"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["plotters", "cargo_bench_support"] }
