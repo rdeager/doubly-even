@@ -102,8 +102,8 @@ fi
 log "Step 7/9 — build & install kernel (parallel feature)"
 scripts/install-kernel.sh parallel
 
-log "Step 8/9 — smoke pytest (n_12 or n_14)"
-.venv/bin/python -m pytest -x -q -k "n_12 or n_14"
+log "Step 8/9 — smoke pytest (n12 or n14)"
+.venv/bin/python -m pytest -x -q -k "n12 or n14"
 
 log "Step 9/9 — READY"
 GIT_SHA=$(git rev-parse --short HEAD)
