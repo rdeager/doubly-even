@@ -146,6 +146,16 @@ impl GlobalMassTracker {
         let m = self.mass.lock().expect("global mass tracker poisoned");
         m[k] >= self.quota[k]
     }
+
+    /// Snapshot of the per-k mass totals. Called after all workers have
+    /// joined; used by the streaming drivers as the in-Rust correctness
+    /// gate (`mass[k] == quota[k]` for `k < max_k` must hold, mirroring
+    /// the Python-side `sigma_brute` / `gaborit_sigma` assertion the
+    /// in-memory path runs post-collection).
+    pub(crate) fn snapshot(&self) -> Vec<u128> {
+        let m = self.mass.lock().expect("global mass tracker poisoned");
+        m.clone()
+    }
 }
 
 pub(crate) struct WorkerState {
@@ -392,6 +402,14 @@ impl WorkerState {
         writer: BinaryWriter<std::fs::File>,
     ) {
         self.output_writer = Some(writer);
+    }
+
+    /// Snapshot of `mass_at_k` (cumulative `Σ N!/|Aut|` per rank). Used
+    /// by the sequential streaming driver as the input to the in-Rust
+    /// mass-formula assertion (the parallel driver uses
+    /// `GlobalMassTracker::snapshot` instead — same role, cross-worker).
+    pub(crate) fn mass_snapshot(&self) -> Vec<u128> {
+        self.mass_at_k.clone()
     }
 
     /// Compute the canonical-form RREF of `rref` given its canonical column
@@ -1137,10 +1155,50 @@ pub fn enumerate_doubly_even_parallel(
     combined
 }
 
+/// Assert `mass[k] == quota[k]` for `k = 0..=max_k`. The streaming
+/// kernel's only correctness signal — without the in-memory
+/// `Vec<EnumeratedRaw>`, Python can't recompute the mass formula
+/// without reading the binary stream back, and we want to catch any
+/// kernel-side miscount before paying the egress cost.
+///
+/// Panics with a per-k diff on any mismatch (excess or shortfall).
+fn assert_mass_matches_quota(mass: &[u128], quota: &[u128], max_k: u32) {
+    let limit = ((max_k as usize) + 1).min(mass.len()).min(quota.len());
+    let mut diffs: Vec<String> = Vec::new();
+    for k in 0..limit {
+        if mass[k] != quota[k] {
+            let line = if mass[k] > quota[k] {
+                format!("  k={k}: mass={}, quota={}, excess=+{}", mass[k], quota[k], mass[k] - quota[k])
+            } else {
+                format!("  k={k}: mass={}, quota={}, shortfall=-{}", mass[k], quota[k], quota[k] - mass[k])
+            };
+            diffs.push(line);
+        }
+    }
+    if !diffs.is_empty() {
+        panic!(
+            "streaming kernel mass-formula assertion failed (max_k={max_k}):\n{}",
+            diffs.join("\n")
+        );
+    }
+}
+
+/// Output of the streaming drivers. The `mass` field is the per-k
+/// `Σ N!/|Aut|` snapshot — already validated against `quota` in the
+/// driver, but returned so the Python caller can also surface it in
+/// `stats.json` for human-readable post-run inspection.
+pub struct StreamingResult {
+    pub stats: Vec<u128>,
+    pub per_k_stats: Vec<Vec<u64>>,
+    pub mass: Vec<u128>,
+}
+
 /// Streaming sequential driver. Mirrors [`enumerate_doubly_even`] but
 /// writes each emitted class to `output_dir/out.w000.bin` in the binary
-/// format defined in [`crate::streaming`]. The returned tuple drops the
-/// `Vec<EnumeratedRaw>` (always empty in streaming mode).
+/// format defined in [`crate::streaming`]. After traversal completes,
+/// asserts the in-Rust mass formula `mass[k] == quota[k]` for every k
+/// — replaces the Python-side `sigma_brute` / `gaborit_sigma` check
+/// that the in-memory path runs post-collection.
 ///
 /// The output file is truncated if it exists. The caller is responsible
 /// for ensuring `output_dir` exists and is writable.
@@ -1150,19 +1208,22 @@ pub fn enumerate_doubly_even_streaming(
     quota: Vec<u128>,
     factorial_n: u128,
     output_dir: &std::path::Path,
-) -> (Vec<u128>, Vec<Vec<u64>>) {
+) -> StreamingResult {
     let path = output_dir.join("out.w000.bin");
     let writer = BinaryWriter::create(&path, n, 0)
         .expect("failed to create streaming output file");
+    let quota_for_assert = quota.clone();
     let mut state = WorkerState::new(n, max_k, quota, factorial_n);
     state.install_output_writer(writer);
     let zero_rref: Vec<BinVec> = Vec::new();
     let zero_pivots: Vec<u32> = Vec::new();
     let info = state.canon_info(&zero_rref);
     state.traverse(zero_rref, zero_pivots, info);
-    let (_empty, stats, per_k) = state.finalize();
+    let mass = state.mass_snapshot();
+    let (_empty, stats, per_k_stats) = state.finalize();
     debug_assert!(_empty.is_empty(), "streaming mode must produce empty in-memory output");
-    (stats, per_k)
+    assert_mass_matches_quota(&mass, &quota_for_assert, max_k);
+    StreamingResult { stats, per_k_stats, mass }
 }
 
 /// Streaming parallel driver. Mirrors [`enumerate_doubly_even_parallel`] but
@@ -1181,7 +1242,7 @@ pub fn enumerate_doubly_even_parallel_streaming(
     factorial_n: u128,
     num_threads: usize,
     output_dir: &std::path::Path,
-) -> (Vec<u128>, Vec<Vec<u64>>) {
+) -> StreamingResult {
     use crossbeam_channel::{bounded, unbounded};
 
     let frontier_depth: u32 = std::env::var("DOUBLY_EVEN_FRONTIER_DEPTH")
@@ -1198,6 +1259,7 @@ pub fn enumerate_doubly_even_parallel_streaming(
     let (task_tx, task_rx) = bounded::<SeedFrontier>(cap);
     let (result_tx, result_rx) = unbounded::<(Vec<u128>, Vec<Vec<u64>>)>();
 
+    let quota_for_assert = quota.clone();
     let global_mass = std::sync::Arc::new(GlobalMassTracker::new(quota.clone()));
 
     let mut handles = Vec::with_capacity(num_threads);
@@ -1259,7 +1321,13 @@ pub fn enumerate_doubly_even_parallel_streaming(
         h.join().expect("worker thread panicked");
     }
 
-    (combined_stats, combined_per_k)
+    let mass = global_mass.snapshot();
+    assert_mass_matches_quota(&mass, &quota_for_assert, max_k);
+    StreamingResult {
+        stats: combined_stats,
+        per_k_stats: combined_per_k,
+        mass,
+    }
 }
 
 /// In-place merge of stats vectors (no `Vec<EnumeratedRaw>` to splice).

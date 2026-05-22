@@ -104,18 +104,30 @@ fn check_streaming_matches_sequential(n: u32, max_k: u32, quota: &[u128], fact: 
 
     // Sequential streaming.
     let tmp_seq = scratch_dir(&format!("streaming_seq_n{n}_k{max_k}"));
-    enumerate_doubly_even_streaming(n, max_k, quota.to_vec(), fact, &tmp_seq);
+    let res_seq = enumerate_doubly_even_streaming(n, max_k, quota.to_vec(), fact, &tmp_seq);
     let seq_rows = parse_all_streams(&tmp_seq);
     assert_eq!(
         seq_rows, reference,
         "N={n}: sequential streaming output diverged from reference"
     );
+    // Mass-formula gate is also checked inside the kernel — this just
+    // confirms the snapshot is surfaced to the caller for stats.json.
+    assert_eq!(
+        res_seq.mass.len(),
+        quota.len(),
+        "mass snapshot length mismatch"
+    );
+    for k in 0..=(max_k as usize) {
+        assert_eq!(res_seq.mass[k], quota[k], "seq mass[k={k}] vs quota mismatch");
+    }
     fs::remove_dir_all(&tmp_seq).ok();
 
     // Parallel streaming at several thread counts.
     for &nt in &[2usize, 4, 8] {
         let tmp_par = scratch_dir(&format!("streaming_par_n{n}_k{max_k}_t{nt}"));
-        enumerate_doubly_even_parallel_streaming(n, max_k, quota.to_vec(), fact, nt, &tmp_par);
+        let res_par = enumerate_doubly_even_parallel_streaming(
+            n, max_k, quota.to_vec(), fact, nt, &tmp_par,
+        );
         let par_rows = parse_all_streams(&tmp_par);
         assert_eq!(
             par_rows.len(),
@@ -126,6 +138,12 @@ fn check_streaming_matches_sequential(n: u32, max_k: u32, quota: &[u128], fact: 
             par_rows, reference,
             "N={n} threads={nt}: streaming output diverged from reference"
         );
+        for k in 0..=(max_k as usize) {
+            assert_eq!(
+                res_par.mass[k], quota[k],
+                "par mass[k={k}] threads={nt} vs quota mismatch"
+            );
+        }
         fs::remove_dir_all(&tmp_par).ok();
     }
 }
