@@ -248,6 +248,94 @@ fn py_enumerate_doubly_even(
     Ok((result, stats, per_k))
 }
 
+/// Streaming variant of [`py_enumerate_doubly_even`] for the N >= 28
+/// frontier. Writes one binary file per worker under `output_dir`
+/// (format: `crate::streaming`). Returns a dict with the validated
+/// `mass[k]` snapshot + flat stats vector + per-k stats matrix.
+///
+/// The kernel runs `assert mass[k] == quota[k]` for every `k = 0..=max_k`
+/// before returning; any mismatch raises (via panic surfaced through
+/// pyo3 as `PanicException`).
+///
+/// `num_threads` semantics mirror `py_enumerate_doubly_even`:
+/// `None`/`0`/`1` → sequential; `>= 2` → parallel (requires
+/// `--features parallel`).
+#[pyfunction]
+#[pyo3(name = "enumerate_doubly_even_streaming",
+       signature = (n, max_k, quota, factorial_n, output_dir, num_threads=None))]
+fn py_enumerate_doubly_even_streaming(
+    py: Python<'_>,
+    n: u32,
+    max_k: u32,
+    quota: Vec<u128>,
+    factorial_n: u128,
+    output_dir: std::path::PathBuf,
+    num_threads: Option<u32>,
+) -> PyResult<pyo3::Py<pyo3::types::PyDict>> {
+    use pyo3::types::PyDict;
+    if n > types::MAX_N {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "n = {n} exceeds MAX_N = {}; the u64 kernel supports N up to 64",
+            types::MAX_N,
+        )));
+    }
+    if !output_dir.is_dir() {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "output_dir does not exist or is not a directory: {output_dir:?}"
+        )));
+    }
+    let nt = num_threads.unwrap_or(0);
+    let result = if nt >= 2 {
+        #[cfg(feature = "parallel")]
+        {
+            py.allow_threads(|| {
+                enumerate::enumerate_doubly_even_parallel_streaming(
+                    n,
+                    max_k,
+                    quota,
+                    factorial_n,
+                    nt as usize,
+                    &output_dir,
+                )
+            })
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            let _ = py;
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "num_threads >= 2 requires the kernel to be built with \
+                 --features parallel (D13 outer-DFS parallelism)",
+            ));
+        }
+    } else {
+        py.allow_threads(|| {
+            enumerate::enumerate_doubly_even_streaming(
+                n,
+                max_k,
+                quota,
+                factorial_n,
+                &output_dir,
+            )
+        })
+    };
+
+    let dict = PyDict::new(py);
+    // mass[k] as decimal strings so Python receives unbounded ints
+    // without u128 -> int conversion losing precision at N >= 21.
+    let mass_strs: Vec<String> = result.mass.iter().map(|m| m.to_string()).collect();
+    dict.set_item("mass", mass_strs)?;
+    // stats vector: same 26-field layout as the in-memory entry. Convert
+    // to decimal strings for the same precision reason (some fields are
+    // cumulative ns — easily > 2^53 at N = 26).
+    let stats_strs: Vec<String> = result.stats.iter().map(|s| s.to_string()).collect();
+    dict.set_item("stats", stats_strs)?;
+    dict.set_item("per_k_stats", result.per_k_stats)?;
+    dict.set_item("n", n)?;
+    dict.set_item("max_k", max_k)?;
+    dict.set_item("num_threads", nt)?;
+    Ok(dict.into())
+}
+
 /// Build identifier — `"verifier"` when compiled with the
 /// `equivalence_verifier` feature, otherwise `"baseline"`. Used by the
 /// Python A/B harness to confirm which kernel is loaded.
@@ -267,6 +355,7 @@ fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_canon_info_qd_native, m)?)?;
     m.add_function(wrap_pyfunction!(py_subspace_in_orbit, m)?)?;
     m.add_function(wrap_pyfunction!(py_enumerate_doubly_even, m)?)?;
+    m.add_function(wrap_pyfunction!(py_enumerate_doubly_even_streaming, m)?)?;
     m.add_function(wrap_pyfunction!(py_kernel_build_info, m)?)?;
 
     // Dormant wrappers (debug submodule, Feulner, invariants, audit features).
