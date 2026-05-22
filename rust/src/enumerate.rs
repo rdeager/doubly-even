@@ -54,6 +54,7 @@ use crate::experimental::paired_iso::PairedIsoCachedCf;
 use crate::permutations::{
     aut_order_exact, compute_column_orbits, dual_basis, perm_compose, perm_inverse,
 };
+use crate::streaming::BinaryWriter;
 use crate::subspace_orbit::subspace_in_orbit;
 use crate::types::BinVec;
 
@@ -289,6 +290,13 @@ pub(crate) struct WorkerState {
     pub stats_nauty_maxlevel_sum: u64,
     pub stats_nauty_generators_sum: u64,
     pub(crate) output: Vec<EnumeratedRaw>,
+    /// Streaming output sink. When `Some`, every emit writes
+    /// `(k, aut_order, basis)` to the per-worker binary file and skips
+    /// the per-class clones (`canonical_column_order`, `aut_generators`,
+    /// `column_orbits`) that the in-memory `EnumeratedRaw` would carry.
+    /// `None` is the legacy in-memory path used by the small-N test
+    /// suite and bench harness. Set via [`Self::install_output_writer`].
+    pub(crate) output_writer: Option<BinaryWriter<std::fs::File>>,
 }
 
 /// Sorted weight enumerator of the code with the given RREF basis.
@@ -370,7 +378,20 @@ impl WorkerState {
             stats_nauty_maxlevel_sum: 0,
             stats_nauty_generators_sum: 0,
             output: Vec::new(),
+            output_writer: None,
         }
+    }
+
+    /// Attach a per-worker binary streaming sink. After this, every
+    /// emit writes the compact `(k, aut_order, basis)` triple to the
+    /// sink instead of pushing an `EnumeratedRaw` into `self.output`.
+    /// The streaming and in-memory paths are mutually exclusive —
+    /// callers wire either one or the other.
+    pub(crate) fn install_output_writer(
+        &mut self,
+        writer: BinaryWriter<std::fs::File>,
+    ) {
+        self.output_writer = Some(writer);
     }
 
     /// Compute the canonical-form RREF of `rref` given its canonical column
@@ -680,15 +701,22 @@ impl WorkerState {
 
     pub(crate) fn traverse(&mut self, rref: Vec<BinVec>, pivots: Vec<u32>, info: Rc<CachedInfo>) {
         let k = rref.len() as u32;
-        // Emit. Cloning Vec fields directly into the output row (instead of
-        // through Rc) avoids retaining the Rc beyond emission.
-        self.output.push(EnumeratedRaw {
-            rref: rref.clone(),
-            canonical_column_order: info.canonical_column_order.clone(),
-            aut_generators: info.aut_generators.clone(),
-            aut_order: info.aut_order,
-            column_orbits: info.column_orbits.clone(),
-        });
+        // Emit. Streaming path skips the per-class clones of
+        // `canonical_column_order`, `aut_generators`, `column_orbits` —
+        // the merge script reconstructs everything it needs from rref +
+        // aut_order. In-memory path keeps the legacy shape.
+        if let Some(w) = self.output_writer.as_mut() {
+            w.write_class(info.aut_order, &rref)
+                .expect("BinaryWriter::write_class failed");
+        } else {
+            self.output.push(EnumeratedRaw {
+                rref: rref.clone(),
+                canonical_column_order: info.canonical_column_order.clone(),
+                aut_generators: info.aut_generators.clone(),
+                aut_order: info.aut_order,
+                column_orbits: info.column_orbits.clone(),
+            });
+        }
         // Update mass.
         let mass_contribution = self.factorial_n / info.aut_order;
         self.mass_at_k[k as usize] = self.mass_at_k[k as usize]
@@ -783,13 +811,18 @@ impl WorkerState {
                 .expect("worker pool closed before seeder finished");
             return;
         }
-        self.output.push(EnumeratedRaw {
-            rref: rref.clone(),
-            canonical_column_order: info.canonical_column_order.clone(),
-            aut_generators: info.aut_generators.clone(),
-            aut_order: info.aut_order,
-            column_orbits: info.column_orbits.clone(),
-        });
+        if let Some(w) = self.output_writer.as_mut() {
+            w.write_class(info.aut_order, &rref)
+                .expect("BinaryWriter::write_class failed (seeder)");
+        } else {
+            self.output.push(EnumeratedRaw {
+                rref: rref.clone(),
+                canonical_column_order: info.canonical_column_order.clone(),
+                aut_generators: info.aut_generators.clone(),
+                aut_order: info.aut_order,
+                column_orbits: info.column_orbits.clone(),
+            });
+        }
         let mass_contribution = self.factorial_n / info.aut_order;
         self.mass_at_k[k as usize] = self.mass_at_k[k as usize]
             .checked_add(mass_contribution)
@@ -831,7 +864,14 @@ impl WorkerState {
     /// Consume this WorkerState and produce the `(output, stats, per_k_stats)`
     /// tuple used by both the sequential and parallel drivers. Stats layout
     /// is documented on [`enumerate_doubly_even`].
-    pub(crate) fn finalize(self) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
+    ///
+    /// When `output_writer` is set (streaming mode), `output` is empty and
+    /// the writer is explicitly flushed here so any disk-write failure
+    /// surfaces as a panic rather than being swallowed by `BufWriter::Drop`.
+    pub(crate) fn finalize(mut self) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
+        if let Some(mut w) = self.output_writer.take() {
+            w.flush().expect("BinaryWriter final flush failed");
+        }
         let stats: Vec<u128> = vec![
             self.stats_canon_calls as u128,
             self.stats_primary_hits as u128,
@@ -1095,6 +1135,157 @@ pub fn enumerate_doubly_even_parallel(
     }
 
     combined
+}
+
+/// Streaming sequential driver. Mirrors [`enumerate_doubly_even`] but
+/// writes each emitted class to `output_dir/out.w000.bin` in the binary
+/// format defined in [`crate::streaming`]. The returned tuple drops the
+/// `Vec<EnumeratedRaw>` (always empty in streaming mode).
+///
+/// The output file is truncated if it exists. The caller is responsible
+/// for ensuring `output_dir` exists and is writable.
+pub fn enumerate_doubly_even_streaming(
+    n: u32,
+    max_k: u32,
+    quota: Vec<u128>,
+    factorial_n: u128,
+    output_dir: &std::path::Path,
+) -> (Vec<u128>, Vec<Vec<u64>>) {
+    let path = output_dir.join("out.w000.bin");
+    let writer = BinaryWriter::create(&path, n, 0)
+        .expect("failed to create streaming output file");
+    let mut state = WorkerState::new(n, max_k, quota, factorial_n);
+    state.install_output_writer(writer);
+    let zero_rref: Vec<BinVec> = Vec::new();
+    let zero_pivots: Vec<u32> = Vec::new();
+    let info = state.canon_info(&zero_rref);
+    state.traverse(zero_rref, zero_pivots, info);
+    let (_empty, stats, per_k) = state.finalize();
+    debug_assert!(_empty.is_empty(), "streaming mode must produce empty in-memory output");
+    (stats, per_k)
+}
+
+/// Streaming parallel driver. Mirrors [`enumerate_doubly_even_parallel`] but
+/// hands each worker (and the seeder) its own [`BinaryWriter`] over a file
+/// `output_dir/out.w{:03}.bin`. The seeder uses `worker_id = num_threads`,
+/// so the merge script can glob `out.w*.bin` and pick up everything.
+///
+/// Falls back to [`enumerate_doubly_even_streaming`] when `num_threads <= 1`
+/// or `max_k <= frontier_depth` (same conditions as the in-memory parallel
+/// driver).
+#[cfg(feature = "parallel")]
+pub fn enumerate_doubly_even_parallel_streaming(
+    n: u32,
+    max_k: u32,
+    quota: Vec<u128>,
+    factorial_n: u128,
+    num_threads: usize,
+    output_dir: &std::path::Path,
+) -> (Vec<u128>, Vec<Vec<u64>>) {
+    use crossbeam_channel::{bounded, unbounded};
+
+    let frontier_depth: u32 = std::env::var("DOUBLY_EVEN_FRONTIER_DEPTH")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|&d| d >= 2)
+        .unwrap_or(4);
+
+    if num_threads <= 1 || max_k <= frontier_depth {
+        return enumerate_doubly_even_streaming(n, max_k, quota, factorial_n, output_dir);
+    }
+
+    let cap = (num_threads * 4).max(8);
+    let (task_tx, task_rx) = bounded::<SeedFrontier>(cap);
+    let (result_tx, result_rx) = unbounded::<(Vec<u128>, Vec<Vec<u64>>)>();
+
+    let global_mass = std::sync::Arc::new(GlobalMassTracker::new(quota.clone()));
+
+    let mut handles = Vec::with_capacity(num_threads);
+    for worker_id in 0..num_threads {
+        let task_rx = task_rx.clone();
+        let result_tx = result_tx.clone();
+        let mk = max_k;
+        let nn = n;
+        let fact = factorial_n;
+        let gm = std::sync::Arc::clone(&global_mass);
+        let path = output_dir.join(format!("out.w{:03}.bin", worker_id));
+        handles.push(std::thread::spawn(move || {
+            let writer = BinaryWriter::create(&path, nn, worker_id as u32)
+                .expect("failed to create per-worker streaming file");
+            let inf_quota = vec![u128::MAX; (mk + 1) as usize];
+            let mut worker = WorkerState::new(nn, mk, inf_quota, fact);
+            worker.install_global_mass(gm);
+            worker.install_output_writer(writer);
+            while let Ok(seed) = task_rx.recv() {
+                worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
+            }
+            let (_empty, stats, per_k) = worker.finalize();
+            let _ = result_tx.send((stats, per_k));
+        }));
+    }
+    drop(task_rx);
+    drop(result_tx);
+
+    // Seeder gets worker_id = num_threads so the merge glob is uniform.
+    let seeder_id = num_threads;
+    let seeder_path = output_dir.join(format!("out.w{:03}.bin", seeder_id));
+    let seeder_writer = BinaryWriter::create(&seeder_path, n, seeder_id as u32)
+        .expect("failed to create seeder streaming file");
+    let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n);
+    seed_state.install_global_mass(std::sync::Arc::clone(&global_mass));
+    seed_state.install_output_writer(seeder_writer);
+    {
+        let zero_rref: Vec<BinVec> = Vec::new();
+        let zero_pivots: Vec<u32> = Vec::new();
+        let zero_info = seed_state.canon_info(&zero_rref);
+        seed_state.traverse_seed(
+            zero_rref,
+            zero_pivots,
+            zero_info,
+            frontier_depth,
+            &task_tx,
+        );
+    }
+    drop(task_tx);
+
+    let (_empty, mut combined_stats, mut combined_per_k) = seed_state.finalize();
+    for _ in 0..num_threads {
+        let (stats, per_k) = result_rx
+            .recv()
+            .expect("worker thread hung up before sending result");
+        merge_stats_only(&mut combined_stats, &mut combined_per_k, stats, per_k);
+    }
+    for h in handles {
+        h.join().expect("worker thread panicked");
+    }
+
+    (combined_stats, combined_per_k)
+}
+
+/// In-place merge of stats vectors (no `Vec<EnumeratedRaw>` to splice).
+/// Used by the streaming parallel driver.
+#[cfg(feature = "parallel")]
+fn merge_stats_only(
+    a_stats: &mut Vec<u128>,
+    a_per_k: &mut Vec<Vec<u64>>,
+    b_stats: Vec<u128>,
+    b_per_k: Vec<Vec<u64>>,
+) {
+    debug_assert_eq!(a_stats.len(), b_stats.len(), "stats vector length mismatch");
+    for (i, (x, y)) in a_stats.iter_mut().zip(b_stats.iter()).enumerate() {
+        if i == STATS_MAX_BUCKET_SIZE_IDX {
+            *x = (*x).max(*y);
+        } else {
+            *x = x.checked_add(*y).expect("stats merge overflow");
+        }
+    }
+    debug_assert_eq!(a_per_k.len(), b_per_k.len(), "per_k rows count mismatch");
+    for (row_a, row_b) in a_per_k.iter_mut().zip(b_per_k.iter()) {
+        debug_assert_eq!(row_a.len(), row_b.len(), "per_k row length mismatch");
+        for (xa, yb) in row_a.iter_mut().zip(row_b.iter()) {
+            *xa = xa.checked_add(*yb).expect("per_k merge overflow");
+        }
+    }
 }
 
 /// Index of `stats_max_bucket_size` inside the flat stats vector — `.max()`
