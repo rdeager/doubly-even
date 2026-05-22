@@ -534,6 +534,7 @@ impl WorkerState {
             native.grpsize2,
             &native.aut_generators,
             self.n,
+            self.factorial_n,
         );
         self.stats_nauty_ns += nauty_t0.elapsed().as_nanos();
         self.stats_nauty_numnodes += native.numnodes;
