@@ -27,6 +27,7 @@ pub mod orbit;
 pub mod permutations;
 pub mod qd_graph;
 pub mod quotient;
+pub mod streaming;
 pub mod subspace_orbit;
 pub mod types;
 
