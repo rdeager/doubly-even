@@ -8,11 +8,11 @@ Gaborit's mass formula.
 The current release reproduces the [DFGHILM Appendix
 B](docs/references.md#dfghilm-2011--the-algorithmic-spec) Table 3 cells
 through `N = 28` — 21,505,546 equivalence classes at `N = 28`, in
-61 minutes on a single GCP `c4a-standard-72` VM (~$3 of compute). It
-also adds a mass-certified `N = 29` enumeration: **239,465,540
-equivalence classes** in **12.3 hours** on the same VM (~$35), the
-first publicly reproducible enumeration at this length. The per-rank
-certificate is at [`docs/results/n29.json`](docs/results/n29.json).
+61 minutes on a single GCP `c4a-standard-72` VM. It also adds a
+mass-certified `N = 29` enumeration: **239,465,540 equivalence
+classes** in **12.3 hours** on the same VM, the first publicly
+reproducible enumeration at this length. The per-rank certificate is
+at [`docs/results/n29.json`](docs/results/n29.json).
 
 ## Highlights
 
@@ -234,9 +234,9 @@ implementation.
 
 - `N ≤ 26` is reproducible on a 13700K desktop in seconds to minutes
   (or on `c4a-standard-72` in under a minute).
-- `N = 28` is reproducible on GCP `c4a-standard-72` in 61 minutes (~$3).
-- `N = 29` is complete: 239,465,540 classes in 12.3 hr on the same VM
-  (~$35), mass-formula certified at every rank
+- `N = 28` is reproducible on GCP `c4a-standard-72` in 61 minutes.
+- `N = 29` is complete: 239,465,540 classes in 12.3 hr on the same VM,
+  mass-formula certified at every rank
   ([`docs/results/n29.json`](docs/results/n29.json)).
 - `N ≥ 30` requires either a much bigger single machine
   (`c4-standard-288-metal` or similar) or a small cluster. The per-node
