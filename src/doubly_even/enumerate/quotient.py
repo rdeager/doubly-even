@@ -28,6 +28,33 @@ weight check at the lift step rather than encoding ``q`` in
 ``Q``-coordinates. Lifting is one XOR per set bit and runs only on
 the orbit-min survivor list, so the cost is negligible.
 
+Comparison to Sage ``binary_code.pyx``. A 2026-05-23 audit of
+``sage.coding.databases.self_orthogonal_binary_codes`` (the
+``binary_code.pyx`` enumeration, Miller 2007) found four shared
+techniques: quotient-space coordinates (``binary_code.pyx:4017``),
+Gray-code walk through the orthogonal complement
+(``binary_code.pyx:4123-4133``), weight-mod-4 filter on the lift
+(``binary_code.pyx:4016``), and a visited-set bitmap to skip
+already-processed cosets (``binary_code.pyx:4001, 4018``). Sage is
+not running the naive baseline; the framing of this module as "an
+optimization of DFGHILM B.3" is correct but undersells how much
+design space Sage already covers.
+
+What is specifically novel in this module relative to Sage is the
+combination of (a) precomputed ``σ_Q ∈ End(Q_C)`` action tables
+built incrementally in Gray-code order at one XOR per entry per
+generator (``_sigma_Q_table``), and (b) a single global ``O(2^L)``
+sweep that decomposes all orbits at once via those tables
+(``aut_orbit_minima_Q``). This replaces Sage's per-candidate orbit
+BFS through generators (``binary_code.pyx:4109-4121``), trading
+Sage's per-hop ``O(N)`` ``permute_word_by_wp`` cost for an
+``O(1)`` table lookup — at the price of ``|gens| × 2^L`` memory
+per active code. At large ``L`` (Engine A regime,
+``L >= 22``) this memory blow-up makes the Sage design preferable;
+see ``/workspace/markdown/architecture/06-scaling-frontier.md``
+§ "Engine A architectural pivot". Full prior-art audit at
+``/workspace/markdown/notes/qc-sage-audit-2026-05-23.md``.
+
 The output type of :func:`doubly_even_candidates_Q` matches the
 existing ``doubly_even_candidates``: a sorted ``list[int]`` of
 ``F_2^N`` vectors. ``filters.doubly_even_candidates`` delegates here.
