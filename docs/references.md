@@ -82,10 +82,24 @@ practically):
 |----|-----------:|------------------:|-----------------------:|
 | 22 |   363.85 s |            6.64 s |                0.691 s |
 
-Sage's `BinaryCodeClassifier.generate_children` is Cython, holds the
-GIL, and uses Python-object refcounting through its partition-stack
-and orbit machinery. Parallelising it would require multi-week Cython
-surgery; nobody has done it.
+Sage's enumeration in `sage/coding/binary_code.pyx` (Miller 2007,
+NICE-based partition refinement) is **column-augmentation**: it adds
+one column at a time to an existing code, the dual of our row-by-row
+DFGHILM B.4 recursion. Inside its candidate loop it has competent
+prefiltering: quotient-space coordinates (`binary_code.pyx:4017`),
+a Gray-code walk over the orthogonal complement
+(`binary_code.pyx:4123–4133`), a weight-mod-4 filter on the lift
+(`binary_code.pyx:4016`), and a visited-set bitmap to skip
+already-processed cosets (`binary_code.pyx:4001, 4018`) — the
+shared design space we exploit too. The mechanism difference at the
+orbit-rep selection step is what we improve over (see
+[`algorithm.md` §1](algorithm.md#1-quotient-space-orbit-min-prefilter)
+and the [2026-05-23 prior-art audit](../../markdown/notes/qc-sage-audit-2026-05-23.md)).
+
+Sage is also inherently single-threaded as shipped: the hot loop is
+Cython that holds the GIL and uses Python-object refcounting through
+its partition-stack machinery. Parallelising it would require
+multi-week Cython surgery; nobody has done it.
 
 The full ratio breakdown is in
 [`performance.md`](performance.md#sage-comparison).

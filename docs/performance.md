@@ -112,6 +112,22 @@ single-threaded:
 |----|-------------:|------------------:|-----------------------:|--------------:|
 | 22 |    363.85 s  |            6.64 s |             **0.691 s** | **~525×**    |
 
+The 525× is not "Sage runs the naive canon-everything baseline" — a
+2026-05-23 prior-art audit (see
+[`algorithm.md` §1](algorithm.md#1-quotient-space-orbit-min-prefilter))
+confirmed that Sage's `binary_code.pyx` already has the quotient-space
+prefilter, the Gray-walked lift, the weight-mod-4 filter, and a
+visited-set bitmap to skip processed cosets. The honest decomposition
+of the wall-time gap is a stack of compounding wins, approximately:
+~6× from D6's precomputed `σ_Q` action tables + global single-sweep
+orbit decomposition (O(1) table lookup vs Sage's O(N) per-candidate
+word-permutation hop, `binary_code.pyx:4109–4121`); ~10–20× from the
+Rust kernel + native sparsenauty replacing per-candidate Python
+canonicalisation under the GIL; ~5–9× from the outer-DFS worker
+parallelism with pipelined seeder (`DOUBLY_EVEN_THREADS=20`, V3 +
+V4); ~2× from the Q_D low-weight-incidence canonicaliser handing
+nauty smaller graphs at high `k`. No single mythical lever.
+
 Sage is inherently single-threaded as shipped:
 `sage.coding.binary_code.BinaryCodeClassifier.generate_children` is
 Cython, holds the GIL, uses Python-object refcounting for partition

@@ -118,7 +118,14 @@ delivered a measurable wall-time reduction; they compose to
 - **Quotient-space orbit-min prefilter** — work in the
   `(N − 2k)`-dimensional quotient `C⊥/C` (Gray-code walk over
   `2^(N − 2k)` reps) instead of the full `2^(N − k)` BFS of B.3.
-  The dominant Python-side win.
+  The dominant Python-side win. The quotient-space framing, Gray-walk,
+  and weight-mod-4 filter overlap with Sage's `binary_code.pyx`; the
+  specifically novel sub-technique is precomputed `σ_Q` action tables
+  (Gray-code-built, one XOR per entry) plus a single global
+  `O(2^L)` sweep that decomposes all orbits at once — not present in
+  Sage, DFGHILM B, or Bouyukliev–Bouyuklieva 2019. See
+  [`docs/algorithm.md` §1](docs/algorithm.md#1-quotient-space-orbit-min-prefilter)
+  for the prior-art comparison.
 - **Low-weight-incidence canonicaliser** — feed nauty a sparse
   bipartite graph on `|C_low| + N` vertices (the lowest-weight
   codewords needed to span `C`, plus the `N` columns) instead of the

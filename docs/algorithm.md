@@ -77,6 +77,26 @@ Python baseline at `N = 20` it took the wall from 235 s to 13.8 s. It
 remains the dominant Python-side accelerator over a literal reading
 of B.3.
 
+**Comparison with Sage.** A 2026-05-23 audit of Sage's
+`self_orthogonal_binary_codes` (the implementation at
+`sage/coding/binary_code.pyx`, Miller 2007) confirmed that Sage's
+enumerator already uses the quotient-space coordinates
+(`binary_code.pyx:4017`), a Gray-code walk through the orthogonal
+complement (`binary_code.pyx:4123–4133`), a weight-mod-4 filter on
+the lift (`binary_code.pyx:4016`), and a visited-set bitmap to skip
+already-processed cosets (`binary_code.pyx:4001, 4018`). What is
+specifically novel in our D6 is the combination of (a) precomputed
+`σ_Q ∈ End(Q_C)` action tables built incrementally in Gray-code
+order at one XOR per entry per generator, and (b) a single global
+O(2^L) sweep that decomposes all orbits at once via these tables —
+replacing the per-candidate orbit-BFS through generators that Sage
+runs at `binary_code.pyx:4109–4121`. That trades O(N) word-permutation
+cost per orbit hop for an O(1) table lookup, at the price of
+`|gens| × 2^L` memory per active code. Not present in DFGHILM B,
+Bouyukliev–Bouyuklieva 2019, Sage `codecan` (Feulner port — operates
+in full `F_q^n`), or Sage `binary_code.pyx`. Full audit at
+[`/workspace/markdown/notes/qc-sage-audit-2026-05-23.md`](../../markdown/notes/qc-sage-audit-2026-05-23.md).
+
 Code: `src/doubly_even/enumerate/quotient.py` (Python spec), wrapped by
 the Rust kernel via `rust/src/candidates.rs`.
 
