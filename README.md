@@ -181,6 +181,27 @@ much faster than the class count. Any future >2× algorithmic
 improvement has to reduce the *number* of canon calls, not the cost
 per call — that's already inside sparsenauty's C floor.
 
+### `N = 29` per-rank class counts
+
+The new ground from the 2026-05-23 c4a-72 run. Every row is
+mass-formula certified (`Σ N!/|Aut(C_i)| == σ(29, k)`) — DFGHILM
+publishes no `N = 29` cells, so the Gaborit oracle is the
+load-bearing check. Full integer-precision mass values + σ values
++ audit recipe in [`docs/results/n29.json`](docs/results/n29.json).
+
+|  `k` | classes      |   `k` | classes      |
+|----:|-------------:|------:|-------------:|
+|   0 |            1 |     7 |    8,084,014 |
+|   1 |            7 |     8 |   57,432,707 |
+|   2 |           39 |     9 |**116,908,496** ← peak |
+|   3 |          287 |    10 |   51,474,285 |
+|   4 |        2,693 |    11 |    4,837,471 |
+|   5 |       34,233 |    12 |      133,563 |
+|   6 |      555,804 |    13 |        1,940 |
+|     |              | **total** | **239,465,540** |
+
+(`σ(29, 14) = 0` — no `[29, 14]` doubly-even codes exist.)
+
 Full table and tuning knobs in
 [`docs/performance.md`](docs/performance.md).
 
