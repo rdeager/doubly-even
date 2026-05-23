@@ -1,41 +1,31 @@
 # doubly-even
 
-Enumerate doubly even binary linear codes `[N, k]` up to permutation
-equivalence — one canonical representative and `|Aut(C)|` per class,
-mass-formula-verified at every step.
+`doubly-even` enumerates doubly even binary linear codes `[N, k]` up to
+coordinate permutation. It emits one canonical representative per
+equivalence class together with `|Aut(C)|`, and checks each rank against
+Gaborit's mass formula.
 
-To our knowledge this is the first reproducible open-source enumerator
-matching [Doran–Faux–Gates–Hübsch–Iga–Landweber–Miller (DFGHILM)
-Appendix B](docs/references.md#dfghilm-2011--the-algorithmic-spec)
-Table 3 through `N = 28` — the 21,505,546 equivalence classes at
-`N = 28` reproduced in 61 minutes on a single GCP `c4a-standard-72` VM
-(~$3 of on-demand compute) — and the first publicly reproducible
-enumeration at `N = 29` (**239,465,540 equivalence classes** in
-**12.3 hr** on the same VM, ~$35; mass-formula certified at every
-rank, see [`docs/results/n29.json`](docs/results/n29.json)).
+The current release reproduces the [DFGHILM Appendix
+B](docs/references.md#dfghilm-2011--the-algorithmic-spec) Table 3 cells
+through `N = 28` — 21,505,546 equivalence classes at `N = 28`, in
+61 minutes on a single GCP `c4a-standard-72` VM (~$3 of compute). It
+also adds a mass-certified `N = 29` enumeration: **239,465,540
+equivalence classes** in **12.3 hours** on the same VM (~$35), the
+first publicly reproducible enumeration at this length. The per-rank
+certificate is at [`docs/results/n29.json`](docs/results/n29.json).
 
-## Prior work
+## Highlights
 
-The algorithm is DFGHILM Appendix B (2011); the canonicaliser is
-`sparsenauty` (McKay–Piperno 2014); the mass formula is Gaborit (1996);
-the canonical-augmentation framework is McKay (1998). Bouyukliev and
-Bouyuklieva's [arXiv:1907.10363](https://arxiv.org/abs/1907.10363)
-(2019) is an independent column-by-column canonical-augmentation engine
-with `[N, k, ≥ d]` validation counts at `N = 31, 32`. Sage's
-`self_orthogonal_binary_codes` is the prior open-source bar
-(single-threaded Cython; we run ~525× faster at `N = 22`).
-[Robert L. Miller](https://rlmiller.org/de_codes/) — one of the
-DFGHILM authors — maintains an independent reference enumeration
-(no-zero-column convention) that cross-checks our `N = 28` result.
+- Reproduces DFGHILM Table 3 cell-for-cell through `N = 28`.
+- First publicly reproducible `N = 29` enumeration, mass-formula
+  certified at every rank `k = 0..13`.
+- Emits one canonical representative and `|Aut(C)|` per class.
+- Parallel Rust kernel with a streaming-output path for long runs.
+- Cross-checked against Gaborit's mass formula, DFGHILM Table 3, Sage
+  `self_orthogonal_binary_codes`, and Robert L. Miller's independent
+  no-zero-column enumeration.
 
-Detailed credits and validation oracles in
-[`docs/references.md`](docs/references.md). DFGHILM's original
-enumeration ran on the OSU Glenn supercomputer in 2011; sixteen years
-of hardware and the algorithmic improvements documented in
-[`docs/algorithm.md`](docs/algorithm.md) put their `N ≤ 28` results
-within reach of a desktop or a single cloud VM.
-
-## Doubly even codes
+## What is being enumerated
 
 A **binary linear code** of length `N` is a subspace `C ⊆ F₂^N`; its
 codewords are 0/1 strings of length `N` that form a vector space under
@@ -48,169 +38,28 @@ bitwise XOR. The code is
 - **Type II** if it is doubly even *and* self-dual (forces `8 | N`).
 
 Two codes are *equivalent* if one is obtained from the other by
-permuting the `N` coordinate positions. The classification problem
-solved by this package is: list one representative per equivalence
-class of doubly even `[N, k]` codes, together with its automorphism
-group `Aut(C) ≤ S_N`.
+permuting the `N` coordinate positions. This package enumerates one
+representative of each equivalence class of doubly even `[N, k]` codes
+together with its coordinate-permutation automorphism group
+`Aut(C) ≤ S_N`. The mass check at each rank is
 
-Type II codes are classical — they contain the extended Hamming
-`[8, 4]`, the binary Golay `[24, 12]`, and the second-order
-Reed–Muller codes `RM(2, m)`. The Gaborit mass formula gives a
-closed-form labelled count
+    Σ_C N! / |Aut(C)| = σ(N, k),
 
-    σ(N, k) = (number of doubly even [N, k] codes, not modded out)
+where `σ(N, k)` is Gaborit's labelled count (a closed form). The
+classical examples — the extended Hamming `[8, 4]`, the binary Golay
+`[24, 12]`, and the second-order Reed–Muller codes `RM(2, m)` — all
+live inside this universe.
 
-which doubles as a stopping certificate: enumeration is complete iff
-`Σ_{C in classes} N! / |Aut(C)| = σ(N, k)`.
+The motivation is supersymmetric representation theory: DFGHILM §2 and
+§5 prove that
 
-## Adinkras and supersymmetry
-
-The motivation is one-dimensional `N`-extended worldline
-supersymmetry: a quantum-mechanical toy model where time is the only
-spacetime coordinate but there are `N` real supercharges
-`Q_1, …, Q_N` satisfying
-
-    {Q_I, Q_J} = 2 δ_{IJ} ∂_t,    [Q_I, ∂_t] = 0.
-
-An **Adinkra** (Faux–Gates; developed by DFGHILM) is a graph encoding
-a multiplet: vertices are component fields (bosons / fermions on the
-two halves of a bipartition), edges of color `I ∈ {1, …, N}` record
-`Q_I φ_a = ± ψ_i`, plus a dashing for signs and heights for
-engineering dimension. Forget the signs and the heights and you are
-left with the **chromotopology** — a bipartite multigraph whose edges
-are colored by the `N` supercharges. DFGHILM §2 and §5 prove:
-
-> chromotopologies on `2^{k+1}` vertices, up to color-preserving
-> graph isomorphism ≡ doubly even codes `[N, k]`, up to column
-> permutation.
+> chromotopologies on `2^{k+1}` vertices, up to color-preserving graph
+> isomorphism, are in bijection with doubly even codes `[N, k]`, up to
+> column permutation.
 
 So enumerating Adinkra chromotopologies is exactly enumerating doubly
-even codes. The relevant target is `N ≤ 32`; the labelled count
-grows to `σ(32, 10) ≈ 1.6 × 10⁴⁷` with on the order of `10¹²`
-equivalence classes. Enumeration to `N = 32` is a real computational
-problem.
-
-## What this package does
-
-DFGHILM Appendix B, end-to-end:
-
-- **B.1** — Gaborit mass formula `σ(N, k)`, used as both stopping
-  certificate and running consistency check.
-- **B.2** — Bipartite-graph encoding `G(C)` (codewords × columns)
-  fed to `sparsenauty` for canonical label + `Aut(C)`.
-- **B.3** — Doubly-even linear-algebra optimisations (Corollary B.1
-  inner-product check + dual-coset reps).
-- **B.4** — Canonical augmentation (McKay 1998): the recursion is on
-  *augmentations* `(parent, child)`, with a canonical-parent function
-  `p` that uniquely picks one ancestry per equivalence class.
-
-Validated against four independent oracles:
-
-1. Gaborit mass formula, on every emitted class.
-2. DFGHILM Table 3, cell-for-cell through `N = 28`.
-3. Sage `self_orthogonal_binary_codes`, through `N = 22`.
-4. [rlmiller.org/de_codes](https://rlmiller.org/de_codes/),
-   no-zero-column convention, at `N = 28`.
-
-## The algorithmic levers
-
-Five accelerations on top of DFGHILM Appendix B carry the load. Each
-delivered a measurable wall-time reduction; they compose to
-~220× over the pure-Python baseline and ~525× over Sage at `N = 22`.
-
-- **Quotient-space orbit-min prefilter** — work in the
-  `(N − 2k)`-dimensional quotient `C⊥/C` (Gray-code walk over
-  `2^(N − 2k)` reps) instead of the full `2^(N − k)` BFS of B.3.
-  The dominant Python-side win. The quotient-space framing, Gray-walk,
-  and weight-mod-4 filter overlap with Sage's `binary_code.pyx`; the
-  specifically novel sub-technique is precomputed `σ_Q` action tables
-  (Gray-code-built, one XOR per entry) plus a single global
-  `O(2^L)` sweep that decomposes all orbits at once — not present in
-  Sage, DFGHILM B, or Bouyukliev–Bouyuklieva 2019. See
-  [`docs/algorithm.md` §1](docs/algorithm.md#1-quotient-space-orbit-min-prefilter)
-  for the prior-art comparison.
-- **Low-weight-incidence canonicaliser** — feed nauty a sparse
-  bipartite graph on `|C_low| + N` vertices (the lowest-weight
-  codewords needed to span `C`, plus the `N` columns) instead of the
-  full `2^k + N` graph. `1.91×` at `N = 22`, `≥ 2.5×` at `N = 24`.
-- **Native Rust kernel** — the whole DFS in Rust (canonical-parent,
-  is-canonical-augmentation, canon-info LRU, mass quota), no
-  Python↔Rust crossings. `1.32×` at `N = 22`.
-- **Outer-DFS worker parallelism with pipelined seeder** — DFGHILM
-  B.4's producer-consumer model: seeder pushes seeds into a bounded
-  channel as the DFS discovers them, workers consume in parallel,
-  per-worker canon caches, shared atomic mass-tracker for per-rank
-  early termination. `9.6×` at `N = 22`, `~12×` at `N = 24`,
-  `~11.2×` at `N = 26`.
-- **Mass-formula early stop** — closed-form `σ(N, k)` plus monotone
-  quota check skips the rest of a rank as soon as
-  `Σ N!/|Aut| = σ(N, k+1)`. Modest `4–11%` in isolation, but
-  conceptually clean.
-
-Detailed writeup with ablation table in
-[`docs/algorithm.md`](docs/algorithm.md). The remaining ~90% of
-`N = 22` wall is inside `sparsenauty`'s C code — the algorithmic
-floor at this graph shape.
-
-## Performance
-
-Mean of 3 runs on a 13700K (8 P-cores × SMT2 + 8 E-cores =
-24 logical / 16 physical), parallel Rust kernel:
-
-| `N` | sequential | parallel best          | classes  |
-|----:|-----------:|-----------------------:|---------:|
-|  20 |    0.97 s  | 0.22 s (t=16, d=4)     |    1,211 |
-|  22 |    6.64 s  | **0.691 s** (t=20, d=4)|    5,118 |
-|  24 |   ~107 s   | **8.90 s** (t=24, d=5) |   37,496 |
-|  26 |       —    | **170 s** (t=24, d=5)  |  494,272 |
-|  28 |       —    | **3669 s** (61.2 min) (t=72, d=5, GCP c4a-72) | 21,505,546 |
-|  29 |       —    | **44 356 s** (12.3 hr) (t=72, d=5, GCP c4a-72) | 239,465,540 |
-
-Sage `self_orthogonal_binary_codes` at `N = 22` runs in 363.85 s
-single-threaded (Cython, GIL-bound). End-to-end ratio:
-`0.691 / 363.85 ≈ 525×`.
-
-At `N = 29` the kernel made **87.2 billion canon calls** at a mean
-**29.5 µs/call** — equal to **~364 canon calls per emitted
-equivalence class**. The calls-per-class ratio is the dominant
-scaling factor at this point: it grew from 15.6 at `N = 22` to 33.7
-at `N = 24` to 91.2 at `N = 26` to 249 at `N = 28`. Per-call cost is
-*dropping* with `N` (the canonicaliser exploits more structure in
-larger codes), but the canonical-augmentation candidate count grows
-much faster than the class count. Any future >2× algorithmic
-improvement has to reduce the *number* of canon calls, not the cost
-per call — that's already inside sparsenauty's C floor.
-
-### `N = 29` per-rank class counts
-
-The new ground from the 2026-05-23 c4a-72 run. Every row is
-mass-formula certified (`Σ N!/|Aut(C_i)| == σ(29, k)`) — DFGHILM
-publishes no `N = 29` cells, so the Gaborit oracle is the
-load-bearing check. Full integer-precision mass values + σ values
-+ audit recipe in [`docs/results/n29.json`](docs/results/n29.json).
-
-|     `k` | classes              |
-|--------:|---------------------:|
-|       0 |                    1 |
-|       1 |                    7 |
-|       2 |                   39 |
-|       3 |                  287 |
-|       4 |                2,693 |
-|       5 |               34,233 |
-|       6 |              555,804 |
-|       7 |            8,084,014 |
-|       8 |           57,432,707 |
-|       9 |          116,908,496 |
-|      10 |           51,474,285 |
-|      11 |            4,837,471 |
-|      12 |              133,563 |
-|      13 |                1,940 |
-| **total** |    **239,465,540** |
-
-(`σ(29, 14) = 0` — no `[29, 14]` doubly-even codes exist.)
-
-Full table and tuning knobs in
-[`docs/performance.md`](docs/performance.md).
+even codes. The relevant target is `N ≤ 32`, with on the order of
+`10¹²` equivalence classes at the top.
 
 ## Quick start
 
@@ -239,16 +88,119 @@ for ec in enumerate_doubly_even(8):
 ```
 
 Each yielded `EnumeratedCode` carries a canonical representative and
-`|Aut(C)|`. Full reproducibility recipe (including the N=28 cloud
-run) in [`docs/reproducing.md`](docs/reproducing.md).
+`|Aut(C)|`. The full reproducibility recipe (including the `N = 28`
+cloud run) is in [`docs/reproducing.md`](docs/reproducing.md).
+
+## Performance
+
+Single platform for reproducibility: **GCP `c4a-standard-72`** (Axion /
+Arm Neoverse V2, aarch64, 72 physical cores, 288 GB), parallel Rust
+kernel at `t=72 d=5`. All wall times below are kernel-only:
+
+| `N` | wall                        | classes       |
+|----:|----------------------------:|--------------:|
+|  20 |                     0.21 s  |         1,211 |
+|  22 |                     0.87 s  |         5,118 |
+|  24 |                     5.34 s  |        37,496 |
+|  26 |                     53.5 s  |       494,272 |
+|  27 |             374 s (6.2 min) |     2,673,492 |
+|  28 |    **3669 s (61.2 min)**    |  **21,505,546** |
+|  29 |    **44 356 s (12.3 hr)**   | **239,465,540** |
+
+`N ≤ 26` uses `CANON_CACHE_CAP=500 000`; the `N = 28` run used
+`CAP=300 000`; the `N = 29` run used `CAP=200 000` to stay inside the
+288 GB ceiling. The `N = 28` result was measured 2026-05-21 in a
+dedicated run; `N ≤ 27` and `N = 29` come from the 2026-05-22/23 sweep.
+
+At `N = 29` the kernel made 87.2 billion canonicalisation calls at a
+mean of 29.5 µs/call — about 364 calls per emitted equivalence class.
+The scaling bottleneck at this length is the number of calls, not the
+per-call cost. The 13700K desktop measurements (`N = 22` in 0.69 s,
+`N = 26` in 170 s) and the cross-platform Sage comparison (~525× at
+`N = 22`) live in [`docs/performance.md`](docs/performance.md).
+
+### `N = 29` per-rank class counts
+
+Every row mass-formula certified (`Σ N!/|Aut(C_i)| == σ(29, k)`). Full
+integer-precision mass values, σ values, and the audit recipe are in
+[`docs/results/n29.json`](docs/results/n29.json).
+
+|     `k` | classes              |
+|--------:|---------------------:|
+|       0 |                    1 |
+|       1 |                    7 |
+|       2 |                   39 |
+|       3 |                  287 |
+|       4 |                2,693 |
+|       5 |               34,233 |
+|       6 |              555,804 |
+|       7 |            8,084,014 |
+|       8 |           57,432,707 |
+|       9 |          116,908,496 |
+|      10 |           51,474,285 |
+|      11 |            4,837,471 |
+|      12 |              133,563 |
+|      13 |                1,940 |
+| **total** |    **239,465,540** |
+
+(`σ(29, 14) = 0` — no `[29, 14]` doubly-even codes exist.)
+
+## Validation
+
+Four independent checks back every emitted class:
+
+1. **Gaborit mass formula** — every emitted class, every rank, every `N`.
+2. **DFGHILM Table 3** — cell-for-cell through `N = 28`.
+3. **Sage `self_orthogonal_binary_codes`** — through `N = 22`.
+4. **[rlmiller.org/de_codes](https://rlmiller.org/de_codes/)** —
+   Robert L. Miller's no-zero-column enumeration, at `N = 28`.
+
+## Algorithm sketch
+
+The enumerator implements DFGHILM Appendix B end-to-end: Gaborit's mass
+formula, a bipartite-graph encoding fed to `sparsenauty`, the
+doubly-even linear-algebra optimisations of Corollary B.1, and McKay
+1998 canonical augmentation. The production kernel adds five
+engineering changes on top of that recipe. The per-lever multipliers
+below are 13700K desktop measurements (the development platform used
+for ablation); the cumulative effect is roughly 220× over the
+pure-Python baseline at `N = 22` and ~525× faster than Sage
+`self_orthogonal_binary_codes`.
+
+- **Quotient-space orbit-min prefilter** — work in the
+  `(N − 2k)`-dimensional quotient `C⊥/C` (Gray-code walk over
+  `2^(N − 2k)` reps) instead of the full `2^(N − k)` BFS of B.3. The
+  dominant Python-side win. Uses precomputed `σ_Q` action tables plus
+  a single global `O(2^L)` sweep that decomposes all orbits at once.
+- **Low-weight-incidence canonicaliser** — feed nauty a sparse
+  bipartite graph on `|C_low| + N` vertices (the lowest-weight
+  codewords needed to span `C`, plus the `N` columns) instead of the
+  full `2^k + N` graph. `1.91×` at `N = 22`, `≥ 2.5×` at `N = 24`.
+- **Native Rust kernel** — the whole DFS in Rust (canonical-parent,
+  is-canonical-augmentation, canon-info LRU, mass quota), no
+  Python ↔ Rust crossings. `1.32×` at `N = 22`.
+- **Outer-DFS worker parallelism with pipelined seeder** — DFGHILM
+  B.4's producer-consumer model: the seeder pushes seeds into a
+  bounded channel as the DFS discovers them, workers consume in
+  parallel, each with its own canon cache, and share an atomic
+  mass-tracker for per-rank early termination. `9.6×` at `N = 22`,
+  `~12×` at `N = 24`, `~11.2×` at `N = 26`.
+- **Mass-formula early stop** — the closed-form `σ(N, k)` plus a
+  monotone quota check skips the rest of a rank as soon as
+  `Σ N!/|Aut| = σ(N, k+1)`. `4–11%` in isolation.
+
+The cumulative ablation table and per-lever writeup are in
+[`docs/algorithm.md`](docs/algorithm.md). About 90 % of the `N = 22`
+parallel wall is inside `sparsenauty`'s C code, which is the per-call
+floor at this graph shape.
 
 ## Long-running jobs (local or cloud)
 
-For `N ≥ 26` the in-memory Vec output approach used by `bench.py`
-becomes memory-heavy and (at `N ≥ 29`) infeasible. The streaming
+For `N ≥ 26` the in-memory `Vec` output approach used by `bench.py`
+becomes memory-heavy, and at `N ≥ 29` it is infeasible. The streaming
 output path writes per-worker binary files to a local directory and
-runs the mass-formula gate in-Rust, with peak RSS dominated by canon
-caches:
+runs the mass-formula gate in-Rust; peak RSS is dominated by the
+per-worker canon caches.
 
 ```sh
 # Long-running kernel (locally or in a cloud VM):
@@ -262,61 +214,42 @@ uv run python scripts/stream_progress.py --N 26 \
     --output-dir /tmp/n26-out --interval 30
 ```
 
-The sidecar prints a per-`k` mass-vs-σ table at the configured
-interval and exits when the kernel finishes. It's equally useful for a
-30-minute local `N = 24` run and a multi-hour cloud `N = 28` run — the
-output directory is the only thing that changes.
+The sidecar prints a per-`k` mass-vs-σ table at the configured interval
+and exits when the kernel finishes. The same recipe applies to a
+30-minute local `N = 24` run and a multi-hour cloud `N = 28` run; only
+the output directory changes.
 
-On a developer-class Apple Silicon laptop (M5 / M5 Pro, 64 GB unified
-memory, ARM64) the streaming path is expected to handle `N = 27` in
-under half an hour and `N = 28` overnight at
-`CANON_CACHE_CAP ≈ 200000`; per-thread throughput on M5 P-cores is
-competitive with the 13700K and 64 GB of unified memory fits the
-per-worker LRU comfortably. **We have not run on Apple Silicon
-ourselves** — these are extrapolations from the 13700K (16 physical)
-and c4a-72 (72 Neoverse V2) measurements, not measurements. The same
-target-conditional `Cargo.toml` patch used on `c4a` (popcnt feature
-disabled on aarch64) is already on `main` and is the only build
-adjustment required.
+On Apple Silicon (e.g. M5 / M5 Pro, 64 GB unified memory) the same
+streaming path should comfortably handle `N = 27` and `N = 28`
+overnight at `CANON_CACHE_CAP ≈ 200 000`. This is an extrapolation
+from the 13700K and c4a-72 measurements, not a measurement.
 
-For multi-node / >256-core deployment hints, see
-[`docs/cluster-deployment.md`](docs/cluster-deployment.md) — we
-haven't tested the kernel above 72 single-NUMA cores, so this doc is
-a code-pointer design sketch rather than a working cluster
+For multi-node or `>256`-core deployment hints, see
+[`docs/cluster-deployment.md`](docs/cluster-deployment.md). The kernel
+has only been tested up to 72 single-NUMA cores, so that doc is a
+code-pointer design sketch rather than a working cluster
 implementation.
 
 ## Status
 
-- Phases 0–3, Milestones 4–5, all D-series optimisation sprints
-  complete.
-- `N ≤ 26` reproducible on a 13700K desktop in seconds-to-minutes;
-  on an M5 / M5 Pro MacBook with 64 GB RAM (prediction, not measured)
-  expect a similar ladder with per-thread throughput competitive with
-  the 13700K.
-- `N = 27` ~20 min on a 16-core desktop or M5-class laptop
-  (predicted from cloud measurement: 6.2 min on c4a-72 with 72
-  threads, scaled to laptop core count and per-thread throughput).
-- `N = 28` reproducible on GCP `c4a-standard-72` in 61 minutes (~$3);
-  predicted to fit overnight on a 64 GB M5 Pro using the streaming
-  output path.
-- **`N = 29` complete** — 239,465,540 equivalence classes in 12.3 hr
-  on `c4a-standard-72` (~$35 of compute); the first publicly
-  reproducible enumeration at this length. Mass-formula certified
-  at every rank `k = 0..13`. Full per-`k` table and certificate in
-  [`docs/results/n29.json`](docs/results/n29.json). At current
-  per-thread throughput, `N = 29` is past single-laptop wall
-  budgets — the c4a-72 / cloud-VM target.
+- `N ≤ 26` is reproducible on a 13700K desktop in seconds to minutes
+  (or on `c4a-standard-72` in under a minute).
+- `N = 28` is reproducible on GCP `c4a-standard-72` in 61 minutes (~$3).
+- `N = 29` is complete: 239,465,540 classes in 12.3 hr on the same VM
+  (~$35), mass-formula certified at every rank
+  ([`docs/results/n29.json`](docs/results/n29.json)).
 - `N ≥ 30` requires either a much bigger single machine
-  (`c4-standard-288-metal` or similar) or a small cluster. The
-  per-node streaming-output path is shipped; the cross-node
-  coordinator is not.
-- `N ≤ 22` is exhausted at the pure-algorithmic level with this
-  canonicaliser — sparsenauty per-call cost is the floor at this
-  graph shape.
+  (`c4-standard-288-metal` or similar) or a small cluster. The per-node
+  streaming-output path is shipped; the cross-node coordinator is not.
+
+At `N ≤ 22` the wall-time frontier is exhausted at the algorithmic
+level with this canonicaliser. Roughly 90 % of the parallel wall sits
+inside `sparsenauty`'s C code, which is the per-call floor at this
+graph shape.
 
 ## Project layout
 
-Three Python layers (depend only on the layer above), plus the Rust
+Three Python layers (depend only on the layer above) plus the Rust
 kernel:
 
 - `src/doubly_even/spec/` — executable specification: `Code`,
@@ -330,28 +263,46 @@ kernel:
   `nauty-Traces-sys`; the producer-consumer parallel kernel via
   `crossbeam-channel`.
 
-Dormant / experimental / audit-substrate code is quarantined under
+Dormant and experimental audit-substrate code is quarantined under
 `*/experimental/` subpackages — indexed in
 [`EXPERIMENTAL.md`](EXPERIMENTAL.md).
 
+## Prior work
+
+This package follows several foundational works:
+
+- **Algorithm** — DFGHILM Appendix B (2011), with Gaborit's mass
+  formula (1996) and McKay's canonical-augmentation framework (1998).
+- **Canonicaliser** — `sparsenauty` (McKay–Piperno 2014), via the
+  `nauty-Traces-sys` Rust binding.
+- **Independent enumerations** — Bouyukliev–Bouyuklieva 2019
+  ([arXiv:1907.10363](https://arxiv.org/abs/1907.10363)) is an
+  independent column-by-column canonical-augmentation engine with
+  `[N, k, ≥ d]` validation counts at `N = 31, 32`. Robert L. Miller —
+  one of the DFGHILM authors — maintains an independent
+  [no-zero-column reference enumeration](https://rlmiller.org/de_codes/)
+  that cross-checks our `N = 28` result.
+
+Full credits and the validation hierarchy are in
+[`docs/references.md`](docs/references.md). Sage's
+`self_orthogonal_binary_codes` is the prior open-source bar
+(single-threaded Cython); the parallel Rust kernel here runs ~525×
+faster at `N = 22`.
+
 ## Opt-in branches
 
-Two branches carry small, low-risk improvements that are not on
-`main` so users can choose:
+Two small wins are kept on branches rather than `main` so users can
+choose:
 
 - **[`feature/dfs-order-by-aut`](https://github.com/rdeager/doubly-even/tree/feature/dfs-order-by-aut)**
-  — sort sibling children by `|Aut(D)|` descending in the DFS.
-  Measured wins on the 13700K: `-12 %` at `N = 24`, `-10 %` at
-  `N = 25`, `-8 %` at `N = 26`. Regresses at `N ≤ 22` (small-N
-  shape; mass-stop has less room to bite when |Aut| is already
-  large). Enabled via `DOUBLY_EVEN_DFS_ORDER=aut_desc` (or the
-  branch's default), reverted with `DOUBLY_EVEN_DFS_ORDER=off`.
+  sorts sibling children by `|Aut(D)|` descending in the DFS. Measured:
+  `-12 %` at `N = 24`, `-10 %` at `N = 25`, `-8 %` at `N = 26`;
+  regresses at `N ≤ 22`. Toggle: `DOUBLY_EVEN_DFS_ORDER=aut_desc` (or
+  `=off`).
 - **[`feature/dfs-speedup-bliss-pq`](https://github.com/rdeager/doubly-even/tree/feature/dfs-speedup-bliss-pq)**
-  — `feature/dfs-order-by-aut` plus a cross-worker priority-queue
-  pull at the depth-5 seeder frontier. Additional `-2 %` at
-  `N = 24, 26` on top of `aut_desc`. Toggled via
-  `DOUBLY_EVEN_SEED_ORDER=fifo` (the priority pull is the default on
-  the branch).
+  adds a cross-worker priority-queue pull at the depth-5 seeder
+  frontier on top of `aut_desc`. Additional `-2 %` at `N = 24, 26`.
+  Toggle: `DOUBLY_EVEN_SEED_ORDER=fifo` reverts to the default.
 
 Each branch can be checked out and measured directly:
 `git checkout feature/dfs-order-by-aut && maturin build --release …`.
