@@ -10,9 +10,9 @@ Usage::
         uv run python scripts/run_streaming.py --N 24 \\
         --output-dir /tmp/n24-stream
 
-    # c4d-standard-384-metal N=29:
-    DOUBLY_EVEN_THREADS=384 DOUBLY_EVEN_FRONTIER_DEPTH=5 \\
-        DOUBLY_EVEN_CANON_CACHE_CAP=500000 \\
+    # GCP c4a-standard-72 (Axion ARM) N=29:
+    DOUBLY_EVEN_THREADS=72 DOUBLY_EVEN_FRONTIER_DEPTH=5 \\
+        DOUBLY_EVEN_CANON_CACHE_CAP=300000 \\
         uv run python scripts/run_streaming.py --N 29 \\
         --output-dir /mnt/scratch/n29
 

@@ -176,23 +176,46 @@ Three independent checks the test suite relies on:
     whole subtree (~1.5 ms each). Code kept; could ~2× if we add
     low-|Aut|-first tree ordering.
 
-## Performance state (post-D10/D11/D12 sprint)
+## Public docs
+
+Landing docs for GitHub readers are under `/workspace/src/docs/`:
+- `algorithm.md` — the >5× lever writeup with cumulative ablation table.
+- `performance.md` — measured walls; N=28 cloud row; tuning knobs.
+- `reproducing.md` — clean-checkout-to-cloud-run recipe.
+- `cluster-deployment.md` — honest multi-node sketch (untested at scale).
+- `references.md` — credits (DFGHILM, RL Miller, Bouyukliev,
+  Gaborit, McKay, McKay-Piperno, Sage).
+
+Public docs **never use internal session labels (D5/D6/D10/D11/D13/V3/V4/V5)**.
+Those labels stay only in `/workspace/markdown/architecture/*.md` and in
+the section below.
+
+## Performance state (post-D13-V5 + N = 28 cloud)
 
 See `/workspace/markdown/architecture/04-optimisations.md` for the
 per-lever write-up and `architecture/05-retrospective.md` for the
-sign-off retrospective.
+sign-off retrospective. The descriptive-name version of this is in
+`/workspace/src/docs/algorithm.md`.
 
-Headline (post-D13-V4 mass-stop + memory work, 2026-05-22, 13700K):
+Headline (post-D13-V5, post-N=28 cloud, 2026-05-22, 13700K):
 **~220× cumulative at `N = 22`** since the pre-kernel D6 baseline
 (152 s → 0.691 s parallel-20t); **> 880×** since the pre-Q_C original
 baseline. Parallel kernel: `N = 20` in 0.22 s; **`N = 22` in 0.691 s**
-(20 threads, depth=4, mean of 3); **`N = 24` in 9.13 s** (22 threads,
-depth=5); **`N = 26` in 184.8 s** (20 threads, depth=5, cap=500K —
-down from 218 s pre-V4). Sequential at `N = 22` is **6.64 s** post-V4
-(was 7.01 s on dev box, 6.87 s on 13700K pre-V4). We beat Sage's
-`self_orthogonal_binary_codes` by **~525× end-to-end at `N = 22`**
-(Sage 363.85 s, single-threaded; parallelising Sage would be weeks of
-Cython surgery).
+(20 threads, depth=4, mean of 3); **`N = 24` in 8.90 s** (24 threads,
+depth=5); **`N = 26` in 169.8 s** (24 threads, depth=5, cap=500K).
+**N = 28 in 61 min on GCP c4a-standard-72** (72 threads, depth=5,
+cap=300K, ~$3 of compute, 21,505,546 classes, all DFGHILM Table 3
+cells agree). Sequential at `N = 22` is **6.64 s** post-V4. We beat
+Sage's `self_orthogonal_binary_codes` by **~525× end-to-end at
+`N = 22`** (Sage 363.85 s, single-threaded).
+
+**Unmerged opt-in branches** (documented in the public README):
+- `feature/dfs-order-by-aut` (1 commit): aut_desc DFS child-ordering;
+  -12 % N=24, -10 % N=25, -8 % N=26, regresses at N≤22. Off-switch
+  `DOUBLY_EVEN_DFS_ORDER=off`.
+- `feature/dfs-speedup-bliss-pq` (2 commits on top of aut_desc): L2'
+  cross-worker priority queue at depth-5 seeder frontier; -2 % N=24/26
+  additional on top of aut_desc. Off-switch `DOUBLY_EVEN_SEED_ORDER=fifo`.
 
 Scaling forecast for `N ≥ 28` lives at
 `/workspace/markdown/architecture/06-scaling-frontier.md`: N=28

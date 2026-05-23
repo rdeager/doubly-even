@@ -85,7 +85,8 @@ To pull results back to your local machine (run on your local box, not here):
 
   gcloud compute scp --recurse \
     <vm-name>:~/doubly-even/scripts/bench-results \
-    ./gcp-shake-results --zone=us-east4-a
+    ./gcp-shake-results --zone=<your-zone>
 
-Then paste any of the three JSON filenames + contents into chat.
+Substitute <vm-name> and <your-zone> with the values you used at
+`gcloud compute instances create` time.
 EOF
