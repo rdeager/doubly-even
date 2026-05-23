@@ -152,29 +152,41 @@ Two mitigations, neither implemented:
   ~3 % — below the engineering threshold; it was not shipped. On
   symmetric NUMA hardware the win is likely larger.
 
-## Hardware cost ladder for `N = 29` (forward-looking)
+## Hardware cost ladder for `N = 29`
 
-Forecasts based on the measured `N = 22 → 28` per-call cost +
+The `c4a-standard-72` row is now measured (2026-05-23). Other rows
+remain forecasts based on the measured `N = 22 → 29` per-call cost +
 class-count trends. **Per-call cost continues to drop with `N`**
-(see [`performance.md`](performance.md#the-surprise-per-call-cost-drops-with-n)),
-so the wall multiplier per 2-step is converging toward the
-class-count ratio rather than exceeding it.
+(see [`performance.md`](performance.md#the-scaling-story-per-call-cost-drops-calls-per-class-explodes))
+— at `N = 29` it landed at 29.5 µs/call. The dominant scaling
+factor is *calls per emitted class*: 249 at `N = 28`, 364 at `N = 29`,
+growing ~2.6× per 2-step.
 
-| platform                                    | phys cores | RAM     | $/hr (≈) | N=29 wall (est) | N=29 cost (est) |
-|---------------------------------------------|-----------:|--------:|---------:|----------------:|----------------:|
-| GCP `c4a-standard-72` (Axion ARM)           |         72 |  288 GB |   $2.81  |       ~7.5 hr   |          ~$21   |
-| AWS `c8g.metal-24xl` (Graviton4)            |         96 |  192 GB |   $3.83  |       ~6 hr     |          ~$23   |
-| GCP `c4a-highmem-96-metal` (Preview)        |         96 |  768 GB |   ~$4    |       ~5.5 hr   |          ~$25   |
-| GCP `c4-standard-192` (Granite Rapids)      |   96 + SMT |  720 GB |   ~$8    |       ~5 hr     |          ~$40   |
-| GCP `c4-standard-288-metal`                 |  192 + SMT | 2.16 TB |  $14.23  |       ~3.5 hr   |          ~$50   |
-| AWS `r8g.metal-48xl` (Graviton4)            |        192 |  1.5 TB |   ~$11   |       ~3.5 hr   |          ~$39   |
+| platform                                    | phys cores | RAM     | $/hr (≈) | N=29 wall                  | N=29 cost            |
+|---------------------------------------------|-----------:|--------:|---------:|----------------------------|----------------------|
+| GCP `c4a-standard-72` (Axion ARM)           |         72 |  288 GB |   $2.81  | **12.3 hr (measured)**     | **~$35 (measured)**  |
+| AWS `c8g.metal-24xl` (Graviton4)            |         96 |  192 GB |   $3.83  |       ~9 hr (forecast)     |     ~$35 (forecast)  |
+| GCP `c4a-highmem-96-metal` (Preview)        |         96 |  768 GB |   ~$4    |       ~9 hr (forecast)     |     ~$36 (forecast)  |
+| GCP `c4-standard-192` (Granite Rapids)      |   96 + SMT |  720 GB |   ~$8    |       ~8 hr (forecast)     |     ~$64 (forecast)  |
+| GCP `c4-standard-288-metal`                 |  192 + SMT | 2.16 TB |  $14.23  |       ~5.5 hr (forecast)   |     ~$78 (forecast)  |
+| AWS `r8g.metal-48xl` (Graviton4)            |        192 |  1.5 TB |   ~$11   |       ~5.5 hr (forecast)   |     ~$60 (forecast)  |
 
-The cost-cheapest path is `c4a-standard-72` (the platform that
-delivered our N=28 result); the wall-cheapest is
-`c4-standard-288-metal` or AWS `r8g.metal-48xl`. The streaming
-output path is **required** on every option — N=29's per-class
-output × class count would exceed 192 GB on the smaller-RAM
-configurations.
+The measured 12.3 hr on `c4a-standard-72` is heavier than the
+pre-run forecast (~7.5 hr) — the slack came from two effects we did
+not fully account for: (a) the `DOUBLY_EVEN_CANON_CACHE_CAP` had to
+drop from 500 K to 200 K to fit the 288 GB ceiling at 72 workers,
+which likely costs ~5–10 % wall to canon-cache thrash, and (b) the
+calls-per-class growth from `N = 26` (91) to `N = 29` (364) was
+faster than the 2026-05-21 forecast accounted for. The other rows
+in the table have been revised proportionally; treat them as
+order-of-magnitude estimates, not promises.
+
+The streaming output path is **required** on every option — N=29's
+per-class output × class count would exceed 192 GB on the
+smaller-RAM configurations. The cost-cheapest path remains
+`c4a-standard-72` (the platform that delivered both our N=28 and
+N=29 results); the wall-cheapest is `c4-standard-288-metal` or AWS
+`r8g.metal-48xl`.
 
 `N = 30` is past single-VM viability for output (estimated 2–6 TB
 written). Two paths to consider, neither implemented:

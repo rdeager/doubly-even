@@ -1,0 +1,42 @@
+{
+  "N": 29,
+  "total_classes": 239465540,
+  "mass_formula_ok": true,
+  "dfghilm_table3_ok": true,
+  "_dfghilm_table3_note": "DFGHILM Table 3 has no published cells for N=29; the boolean is degenerate-True because the cross-check loop has no entries to fail. The mass-formula certificate (mass_formula_ok) is the load-bearing oracle at this length.",
+  "per_k": {
+    "0":  {"classes": 1,           "mass": 1,                                              "gaborit_sigma": 1},
+    "1":  {"classes": 7,           "mass": 134209535,                                      "gaborit_sigma": 134209535},
+    "2":  {"classes": 39,          "mass": 1500924953148075,                               "gaborit_sigma": 1500924953148075},
+    "3":  {"classes": 287,         "mass": 1798227953449795246275,                         "gaborit_sigma": 1798227953449795246275},
+    "4":  {"classes": 2693,        "mass": 251287611025390597345911795,                    "gaborit_sigma": 251287611025390597345911795},
+    "5":  {"classes": 34233,       "mass": 4245747369833030971769514529875,                "gaborit_sigma": 4245747369833030971769514529875},
+    "6":  {"classes": 555804,      "mass": 8815991145789015024952841955961875,             "gaborit_sigma": 8815991145789015024952841955961875},
+    "7":  {"classes": 8084014,     "mass": 2265709724467776861412880382682201875,          "gaborit_sigma": 2265709724467776861412880382682201875},
+    "8":  {"classes": 57432707,    "mass": 72209501689214206089029328902189233875,         "gaborit_sigma": 72209501689214206089029328902189233875},
+    "9":  {"classes": 116908496,   "mass": 284740011553359344949890602226832301875,        "gaborit_sigma": 284740011553359344949890602226832301875},
+    "10": {"classes": 51474285,    "mass": 137777424945173876588656743012983371875,        "gaborit_sigma": 137777424945173876588656743012983371875},
+    "11": {"classes": 4837471,     "mass": 8009532764277328438715267424789946875,          "gaborit_sigma": 8009532764277328438715267424789946875},
+    "12": {"classes": 133563,      "mass": 52810106138092275420100664339274375,            "gaborit_sigma": 52810106138092275420100664339274375},
+    "13": {"classes": 1940,        "mass": 32236665937060356134843526028125,               "gaborit_sigma": 32236665937060356134843526028125}
+  },
+  "run_metadata": {
+    "git_sha": "5a1341468c98d2e58e39a37c9dc3ac62b7d25f46",
+    "timestamp_utc": "20260523T065959Z",
+    "platform": "Linux-6.17.0-1016-gcp-aarch64-with-glibc2.39",
+    "machine": "GCP c4a-standard-72 (Axion / Arm Neoverse V2, us-east4-a)",
+    "memory_gib": 282.61,
+    "python_version": "3.12.3",
+    "build_info": "baseline",
+    "num_threads": 72,
+    "frontier_depth": 5,
+    "canon_cache_cap": 200000,
+    "kernel_wall_seconds": 44356.20,
+    "wall_hours": 12.32,
+    "canon_calls": 87205911575,
+    "nauty_seconds": 2569622.95,
+    "us_per_call_mean": 29.47,
+    "nauty_utilisation": 0.805
+  },
+  "schema_note": "Per-k 'mass' and 'gaborit_sigma' are exact Python ints serialised as JSON integers. Both equal Σ N!/|Aut(C)| over emitted classes at rank k; equality at every k is the Gaborit mass-formula certificate. The `kernel_wall_seconds` is end-to-end kernel wall time excluding Python startup."
+}

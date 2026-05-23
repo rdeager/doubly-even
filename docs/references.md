@@ -162,20 +162,36 @@ is a useful sanity check for future work.
 DFGHILM's 2011 enumeration ran on the [OSU Glenn
 supercomputer](https://www.osc.edu/supercomputing/computing/glenn). The
 `N = 28` row in the published Table 3 was not independently reproduced
-from a public implementation until 2026-05-21.
+from a public implementation until 2026-05-21. There is no published
+table at `N = 29`; our 2026-05-23 enumeration is the first publicly
+reproducible result at that length, mass-formula certified (see
+[`docs/results/n29.json`](results/n29.json)).
 
 We reproduce DFGHILM Table 3 with:
 
 - A single 13700K desktop (cumulative ~525× faster than Sage at
-  `N = 22`) for `N ≤ 26`.
-- A single GCP `c4a-standard-72` cloud VM (~$3 of on-demand compute)
-  for `N = 28`.
+  `N = 22`) for `N ≤ 26` in seconds-to-minutes; `N = 27` in tens of
+  minutes.
+- A single GCP `c4a-standard-72` cloud VM (~$3 of on-demand compute,
+  72 Neoverse V2 cores) for `N = 28` in 61 min and (~$35) for
+  `N = 29` in 12.3 hr.
+- An Apple Silicon M5 / M5 Pro MacBook with 64 GB of unified memory
+  is *predicted* (not measured) to handle the same workload up to
+  `N = 28` overnight: per-thread throughput on M5 P-cores is
+  competitive with the 13700K, the unified memory comfortably fits
+  the per-worker LRU at `CANON_CACHE_CAP ≈ 200 000`, and the same
+  target-conditional `Cargo.toml` patch used on the c4a-72 ARM
+  build is already on `main`. Total throughput on a 14-core M5 Pro
+  is still well below the 72-core c4a-72, so `N = 29` remains a
+  cloud-scale problem.
 
 The hardware gap between 2011 and 2026, combined with the algorithmic
 levers documented in [`algorithm.md`](algorithm.md), is large enough
-that DFGHILM's Table 3 is now reachable from a laptop in hours and from
-a cloud VM in an hour. The `N = 30` and `N = 32` frontiers remain hard;
-see [`cluster-deployment.md`](cluster-deployment.md) for the honest
+that DFGHILM's Table 3 is now reachable from a developer laptop in
+seconds-to-hours for `N ≤ 28` and from a cloud VM in an hour for
+`N = 28` (12 hr for the new `N = 29` cell). The `N = 30` and `N = 32`
+frontiers remain hard; see
+[`cluster-deployment.md`](cluster-deployment.md) for the honest
 sketch of what would push them further.
 
 ## Other background

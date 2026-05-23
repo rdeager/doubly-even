@@ -25,14 +25,18 @@ from `N = 24` is ~30 min.
 | platform                  | cores               | RAM    | N      | wall      | notes |
 |---------------------------|---------------------|--------|--------|-----------|-------|
 | GCP `c4-standard-24` (Emerald Rapids 8581C, x86_64) | 12 phys + SMT | 90 GB  | 26 | 285 s     | per-thread 1.65× slower than 13700K = pure clock ratio |
-| GCP `c4a-standard-72` (Axion / Neoverse V2, aarch64) | 72 phys (no SMT) | 288 GB | 28 | **3669 s (61.2 min)** | first reproducible N=28 enumeration; ~$3 of compute |
-| GCP `c4a-standard-72` (Axion, aarch64) | 72 phys | 288 GB | 29 | *in flight at publication time* | placeholder — to be updated |
+| GCP `c4a-standard-72` (Axion / Neoverse V2, aarch64) | 72 phys (no SMT) | 288 GB | 28 | **3669 s (61.2 min)** | first reproducible N=28 enumeration; ~$3 of compute; `CAP=300K` |
+| GCP `c4a-standard-72` (Axion, aarch64) | 72 phys | 288 GB | 29 | **44 356 s (12.3 hr)** | **first publicly reproducible N=29 enumeration**; mass-formula certified; ~$35 of compute; `CAP=200K` (cgroup-tight) |
 
 The Emerald-Rapids cross-port has zero per-IPC penalty; the Axion
 port needs a one-line `Cargo.toml` patch to disable the x86-only
 `popcnt` feature of `nauty-Traces-sys` (see the
 [`reproducing.md`](reproducing.md) ARM section), after which builds
-work unchanged.
+work unchanged. At `N = 29` on c4a-72 the per-worker LRU times 72
+workers grew tighter against the 288 GB headroom, so we ran with
+`DOUBLY_EVEN_CANON_CACHE_CAP = 200000` rather than the 300 K used at
+`N = 28` — this likely costs ~5–10 % wall to canon-cache thrash but
+fits comfortably.
 
 ## The `N = 28` cloud run (first reproducible result)
 
@@ -66,41 +70,140 @@ k=12:       7,402     k=13:         151
 
 (Heaviest at `k = 9`; no `[28, 14]` half-rank doubly-even codes exist.)
 
-## `N = 29` status (placeholder)
+## The `N = 29` result (first publicly reproducible)
 
-The `N = 29` enumeration started 2026-05-22 on `c4a-standard-72` with
-the streaming output path (per-worker binary files, no in-memory `Vec`).
-At session time it was ~53 % through by mass with an ETA of ~3.8 h
-remaining. **This section will be updated with the final wall, class
-count, and per-k cells once the run lands.**
+DFGHILM Table 3 stops at `N = 28`. Our `N = 29` enumeration is new
+ground — verified at every emitted class by the Gaborit mass-formula
+oracle (`Σ N!/|Aut(C_i)| == σ(N, k)`), but with no published
+table to cross-check class counts cell-by-cell.
+
+Run on a single GCP `c4a-standard-72` VM, 2026-05-23, in 12.32 hr of
+wall (~$35 of on-demand compute), git SHA
+[`5a13414`](https://github.com/rdeager/doubly-even/commit/5a1341468c98d2e58e39a37c9dc3ac62b7d25f46):
+
+- **total equivalence classes:** 239,465,540
+- **canon calls:** 87,205,911,575
+- **per-call cost:** 29.5 µs (continuing the dropping trend)
+- **nauty utilisation:** 80.5 % of wall × threads (in nauty C code)
+- **mass-formula certificate:** `mass == σ(29, k)` exactly at every
+  `k = 0..13`
+
+Per-rank breakdown:
+
+| `k`  | classes      | `mass` = `σ(29, k)`                                             |
+|----:|-------------:|----------------------------------------------------------------:|
+|   0 |            1 | 1                                                               |
+|   1 |            7 | 134,209,535                                                     |
+|   2 |           39 | 1,500,924,953,148,075                                           |
+|   3 |          287 | 1,798,227,953,449,795,246,275                                   |
+|   4 |        2,693 | 251,287,611,025,390,597,345,911,795                             |
+|   5 |       34,233 | 4,245,747,369,833,030,971,769,514,529,875                       |
+|   6 |      555,804 | 8,815,991,145,789,015,024,952,841,955,961,875                   |
+|   7 |    8,084,014 | 2,265,709,724,467,776,861,412,880,382,682,201,875               |
+|   8 |   57,432,707 | 72,209,501,689,214,206,089,029,328,902,189,233,875              |
+|   9 |**116,908,496** | 284,740,011,553,359,344,949,890,602,226,832,301,875           |
+|  10 |   51,474,285 | 137,777,424,945,173,876,588,656,743,012,983,371,875             |
+|  11 |    4,837,471 | 8,009,532,764,277,328,438,715,267,424,789,946,875               |
+|  12 |      133,563 | 52,810,106,138,092,275,420,100,664,339,274,375                  |
+|  13 |        1,940 | 32,236,665,937,060,356,134,843,526,028,125                      |
+
+Heaviest at `k = 9` (~117 M classes); no `[29, 14]` doubly-even codes
+exist (`σ(29, 14) = 0`).
+
+The full machine-readable certificate, with integer `mass` and
+`gaborit_sigma` values per `k` and a one-second offline audit recipe,
+is at [`docs/results/n29.json`](results/n29.json). The complete
+per-class binary stream (5.2 GB compressed, ~21 GB uncompressed) and
+the JSONL extracts for the heaviest ranks are
+[available on request](results/README.md#on-request).
 
 The reproducible recipe is in [`reproducing.md`](reproducing.md);
 the streaming output path is described under
 [long-running jobs](../README.md#long-running-jobs-local-or-cloud)
 in the README.
 
-## The surprise: per-call cost drops with N
+## The scaling story: per-call cost drops, calls-per-class explodes
 
 A reasonable a-priori prediction is that nauty's per-call cost grows
 with `N` (the bipartite graph has more vertices). Empirically the
-opposite holds:
+opposite holds — *but* the total number of canon calls grows much
+faster than the class count, and that growth is the dominant scaling
+factor:
 
-| N  | µs/call | nauty `nodes/call` | `maxlevel` | gen/call |
-|----|--------:|-------------------:|-----------:|---------:|
-| 22 |   80.43 |               67.5 |       9.25 |    10.62 |
-| 24 |   77.96 |               49.4 |       7.64 |     8.67 |
-| 26 |   58.84 |               28.6 |       5.60 |     5.89 |
-| 28 |   37.68 |               13.9 |       3.80 |     3.47 |
+| N  | classes      | canon calls         | calls/class | µs/call | nauty `nodes/call` | `maxlevel` | gen/call |
+|---:|-------------:|--------------------:|------------:|--------:|-------------------:|-----------:|---------:|
+| 22 |        5,118 |              80,011 |      **15.6** |   80.43 |               67.5 |       9.25 |    10.62 |
+| 24 |       37,496 |           1,264,155 |      **33.7** |   77.96 |               49.4 |       7.64 |     8.67 |
+| 26 |      494,272 |          45,085,645 |      **91.2** |   58.84 |               28.6 |       5.60 |     5.89 |
+| 28 |   21,505,546 |       5,358,750,799 |      **249**  |   37.68 |               13.9 |       3.80 |     3.47 |
+| 29 |  239,465,540 |      87,205,911,575 |      **364**  |   29.47 |                  — |          — |        — |
 
-Every metric of nauty's internal search tree shrinks monotonically. The
-larger codes have more exploitable internal structure — the low-weight-
-incidence refinement discretises faster, so per-call cost drops by ~2×
-across `N = 22 → 28`.
+Two trends pulling in opposite directions:
 
-The implication for forecasting: the dominant wall-time multiplier per
-2-step is `(call-count ratio) × (per-call cost ratio)`. Across
-`N = 26 → 28` this was `118.9× × 0.64× = 76×` (expected) and `66×`
-(measured); the ~10 % gap is end-of-run tail imbalance.
+- **Per-call cost is dropping** ~2.7× across `N = 22 → 29` (80 → 29 µs).
+  Every metric of nauty's internal search tree (`nodes/call`,
+  `maxlevel`, generators emitted) shrinks monotonically — larger codes
+  have more exploitable internal structure, so the low-weight-incidence
+  refinement discretises faster.
+- **Calls per emitted class is exploding**: 15.6 at `N = 22`,
+  growing by ~2.6× per 2-step to 249 at `N = 28` and 364 at `N = 29`.
+  This is the canonical-augmentation tax — most candidates fail the
+  is-canonical-augmentation test and the candidate set per
+  augmentation step grows with `N`.
+
+Net for wall-time forecasting: the dominant multiplier per 2-step is
+`(class-count ratio) × (calls/class ratio) × (per-call cost ratio)`.
+Across `N = 26 → 28` this was `43.5× × 2.73× × 0.64× = 76×` (expected)
+and `66×` (measured); the ~10 % gap is end-of-run tail imbalance.
+
+**Implication for the next algorithmic improvement.** Per-call cost is
+already inside sparsenauty's C code — there is no >5 % headroom left
+at this graph shape (the audit summarised in
+[`algorithm.md` §"What we did not beat"](algorithm.md#what-we-did-not-beat)
+walks through every closed line). The leverage point is calls per
+class, not microseconds per call. A successful next lever would have
+to reject candidate codes *before* canonicalising them — and every
+cheap rejector we have measured (paired-iso, cubic tensor, T11) costs
+more per probe than the canon call it would replace. The honest
+framing: at `N = 29` and beyond, total wall is being driven by the
+combinatorial growth of canonical-augmentation work, not by
+canonicaliser speed.
+
+## Full `c4a-standard-72` sweep — DFGHILM Table 3 reproduction
+
+Single machine, single configuration, ten enumerations on
+`c4a-standard-72` over 2026-05-22 → 2026-05-23. Each row's total
+class count was checked cell-by-cell against the corresponding row
+of DFGHILM Table 3 (where it exists) and against the
+Gaborit mass formula at every rank. All checks passed:
+
+| `N`  | wall      | total classes      | check                    |
+|----:|----------:|-------------------:|--------------------------|
+|  16 |   0.02 s  |                146 | DFGHILM Table 3 ✓        |
+|  20 |   0.21 s  |              1,211 | DFGHILM Table 3 ✓        |
+|  21 |   0.36 s  |              2,078 | DFGHILM Table 3 ✓        |
+|  22 |   0.87 s  |              5,118 | DFGHILM Table 3 ✓        |
+|  23 |   1.81 s  |             11,783 | DFGHILM Table 3 ✓        |
+|  24 |   5.34 s  |             37,496 | DFGHILM Table 3 ✓        |
+|  25 |  11.74 s  |            113,223 | DFGHILM Table 3 ✓        |
+|  26 |  53.51 s  |            494,272 | DFGHILM Table 3 ✓        |
+|  27 |   374.0 s |          2,673,492 | DFGHILM Table 3 ✓        |
+|  29 |  12.32 hr |        239,465,540 | mass-formula certificate (DFGHILM has no `N = 29` cells) |
+
+Configuration: `DOUBLY_EVEN_THREADS=72 DOUBLY_EVEN_FRONTIER_DEPTH=5
+DOUBLY_EVEN_CANON_CACHE_CAP=500000` for `N ≤ 27`, `CAP=200000` for
+`N = 29` (cgroup-tight RAM headroom). `N = 28` is documented
+separately above — the c4a-72 N=28 run on 2026-05-21 was used for
+the original DFGHILM Table 3 reproduction milestone and predates
+this sweep; its `CAP=300000` and class counts match.
+
+The corresponding per-`k` cells for `N ≤ 28` are in DFGHILM Table 3;
+the `N = 29` per-`k` breakdown is in
+[the `N = 29` section above](#the-n--29-result-first-publicly-reproducible)
+and in [`docs/results/n29.json`](results/n29.json). Cross-checks
+against [Robert L. Miller's `de_codes` site](https://rlmiller.org/de_codes/)
+(no-zero-column convention) are documented at `N = 28`
+in [`references.md`](references.md#robert-l-millers-de_codes-site).
 
 ## Sage comparison
 

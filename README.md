@@ -9,7 +9,10 @@ matching [Doran–Faux–Gates–Hübsch–Iga–Landweber–Miller (DFGHILM)
 Appendix B](docs/references.md#dfghilm-2011--the-algorithmic-spec)
 Table 3 through `N = 28` — the 21,505,546 equivalence classes at
 `N = 28` reproduced in 61 minutes on a single GCP `c4a-standard-72` VM
-(~$3 of on-demand compute).
+(~$3 of on-demand compute) — and the first publicly reproducible
+enumeration at `N = 29` (**239,465,540 equivalence classes** in
+**12.3 hr** on the same VM, ~$35; mass-formula certified at every
+rank, see [`docs/results/n29.json`](docs/results/n29.json)).
 
 ## Prior work
 
@@ -160,11 +163,23 @@ Mean of 3 runs on a 13700K (8 P-cores × SMT2 + 8 E-cores =
 |  22 |    6.64 s  | **0.691 s** (t=20, d=4)|    5,118 |
 |  24 |   ~107 s   | **8.90 s** (t=24, d=5) |   37,496 |
 |  26 |       —    | **170 s** (t=24, d=5)  |  494,272 |
-|  28 |       —    | **3669 s** (t=72, d=5, GCP c4a-72) | 21,505,546 |
+|  28 |       —    | **3669 s** (61.2 min) (t=72, d=5, GCP c4a-72) | 21,505,546 |
+|  29 |       —    | **44 356 s** (12.3 hr) (t=72, d=5, GCP c4a-72) | 239,465,540 |
 
 Sage `self_orthogonal_binary_codes` at `N = 22` runs in 363.85 s
 single-threaded (Cython, GIL-bound). End-to-end ratio:
 `0.691 / 363.85 ≈ 525×`.
+
+At `N = 29` the kernel made **87.2 billion canon calls** at a mean
+**29.5 µs/call** — equal to **~364 canon calls per emitted
+equivalence class**. The calls-per-class ratio is the dominant
+scaling factor at this point: it grew from 15.6 at `N = 22` to 33.7
+at `N = 24` to 91.2 at `N = 26` to 249 at `N = 28`. Per-call cost is
+*dropping* with `N` (the canonicaliser exploits more structure in
+larger codes), but the canonical-augmentation candidate count grows
+much faster than the class count. Any future >2× algorithmic
+improvement has to reduce the *number* of canon calls, not the cost
+per call — that's already inside sparsenauty's C floor.
 
 Full table and tuning knobs in
 [`docs/performance.md`](docs/performance.md).
@@ -224,6 +239,18 @@ interval and exits when the kernel finishes. It's equally useful for a
 30-minute local `N = 24` run and a multi-hour cloud `N = 28` run — the
 output directory is the only thing that changes.
 
+On a developer-class Apple Silicon laptop (M5 / M5 Pro, 64 GB unified
+memory, ARM64) the streaming path is expected to handle `N = 27` in
+under half an hour and `N = 28` overnight at
+`CANON_CACHE_CAP ≈ 200000`; per-thread throughput on M5 P-cores is
+competitive with the 13700K and 64 GB of unified memory fits the
+per-worker LRU comfortably. **We have not run on Apple Silicon
+ourselves** — these are extrapolations from the 13700K (16 physical)
+and c4a-72 (72 Neoverse V2) measurements, not measurements. The same
+target-conditional `Cargo.toml` patch used on `c4a` (popcnt feature
+disabled on aarch64) is already on `main` and is the only build
+adjustment required.
+
 For multi-node / >256-core deployment hints, see
 [`docs/cluster-deployment.md`](docs/cluster-deployment.md) — we
 haven't tested the kernel above 72 single-NUMA cores, so this doc is
@@ -235,9 +262,22 @@ implementation.
 - Phases 0–3, Milestones 4–5, all D-series optimisation sprints
   complete.
 - `N ≤ 26` reproducible on a 13700K desktop in seconds-to-minutes;
-  `N = 28` reproducible on GCP `c4a-standard-72` in 61 minutes (~$3).
-- `N = 29` in flight at publication time; this README will be updated
-  with the final wall and class count once the run lands.
+  on an M5 / M5 Pro MacBook with 64 GB RAM (prediction, not measured)
+  expect a similar ladder with per-thread throughput competitive with
+  the 13700K.
+- `N = 27` ~20 min on a 16-core desktop or M5-class laptop
+  (predicted from cloud measurement: 6.2 min on c4a-72 with 72
+  threads, scaled to laptop core count and per-thread throughput).
+- `N = 28` reproducible on GCP `c4a-standard-72` in 61 minutes (~$3);
+  predicted to fit overnight on a 64 GB M5 Pro using the streaming
+  output path.
+- **`N = 29` complete** — 239,465,540 equivalence classes in 12.3 hr
+  on `c4a-standard-72` (~$35 of compute); the first publicly
+  reproducible enumeration at this length. Mass-formula certified
+  at every rank `k = 0..13`. Full per-`k` table and certificate in
+  [`docs/results/n29.json`](docs/results/n29.json). At current
+  per-thread throughput, `N = 29` is past single-laptop wall
+  budgets — the c4a-72 / cloud-VM target.
 - `N ≥ 30` requires either a much bigger single machine
   (`c4-standard-288-metal` or similar) or a small cluster. The
   per-node streaming-output path is shipped; the cross-node
@@ -297,4 +337,8 @@ same terms.
 ## Citation
 
 If you use this in academic work, please cite DFGHILM (the algorithmic
-spec) and this repository. A `CITATION.cff` will land in a follow-up.
+spec) and this repository. See [`CITATION.cff`](CITATION.cff) for the
+machine-readable citation pinned to the `N = 29` build SHA, including
+references to DFGHILM 2011, Gaborit 1996, McKay–Piperno 2014, and
+McKay 1998. The `N = 29` result certificate is at
+[`docs/results/n29.json`](docs/results/n29.json).

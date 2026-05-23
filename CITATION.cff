@@ -1,0 +1,95 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software in academic work, please cite both this
+  repository and the underlying algorithmic spec (DFGHILM 2011 and
+  Gaborit 1996). The first reproducible-from-source enumeration of
+  doubly even [29, k] binary linear codes (239,465,540 classes,
+  mass-formula certified) was computed with this software on
+  2026-05-23 — see docs/results/n29.json.
+title: "doubly-even — enumerator of doubly even binary linear codes [N, k]"
+type: software
+authors:
+  - given-names: Robert
+    family-names: Eager
+repository-code: "https://github.com/rdeager/doubly-even"
+url: "https://github.com/rdeager/doubly-even"
+license: MIT
+version: "0.1.0+n29"
+commit: 5a1341468c98d2e58e39a37c9dc3ac62b7d25f46
+date-released: 2026-05-23
+keywords:
+  - doubly-even codes
+  - binary linear codes
+  - canonical augmentation
+  - graph isomorphism
+  - nauty
+  - sparsenauty
+  - DFGHILM
+  - Adinkra
+  - chromotopology
+  - supersymmetry
+references:
+  - type: article
+    title: "Codes and Supersymmetry in One Dimension"
+    authors:
+      - given-names: "C. F."
+        family-names: Doran
+      - given-names: "M. G."
+        family-names: Faux
+      - given-names: "S. J."
+        family-names: "Gates Jr."
+      - given-names: "T."
+        family-names: Hübsch
+      - given-names: "K. M."
+        family-names: Iga
+      - given-names: "G. D."
+        family-names: Landweber
+      - given-names: "Robert L."
+        family-names: Miller
+    journal: "Advances in Theoretical and Mathematical Physics"
+    volume: 15
+    issue: 6
+    year: 2011
+    start: 1909
+    end: 1970
+    identifiers:
+      - type: other
+        value: "arXiv:1108.4124"
+        description: "Appendix B is the algorithmic spec this package implements end-to-end."
+  - type: article
+    title: "Mass formulas for self-dual codes over Z4 and Fq + uFq rings"
+    authors:
+      - given-names: "Philippe"
+        family-names: Gaborit
+    journal: "IEEE Transactions on Information Theory"
+    volume: 42
+    issue: 4
+    year: 1996
+    start: 1222
+    end: 1228
+    doi: 10.1109/18.508848
+    description: "Closed-form σ(N, k); the mass-formula certificate used as both stopping condition and correctness oracle."
+  - type: article
+    title: "Practical graph isomorphism, II"
+    authors:
+      - given-names: "Brendan"
+        family-names: McKay
+      - given-names: "Adolfo"
+        family-names: Piperno
+    journal: "Journal of Symbolic Computation"
+    volume: 60
+    year: 2014
+    start: 94
+    end: 112
+    description: "nauty / sparsenauty — the canonicaliser the kernel calls into via nauty-Traces-sys."
+  - type: article
+    title: "Isomorph-free exhaustive generation"
+    authors:
+      - given-names: "Brendan"
+        family-names: McKay
+    journal: "Journal of Algorithms"
+    volume: 26
+    year: 1998
+    start: 306
+    end: 324
+    description: "Canonical-augmentation framework; DFGHILM Appendix B.4 applies this to doubly-even codes."

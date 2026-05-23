@@ -42,17 +42,25 @@ The enumerator implements DFGHILM Appendix B end-to-end:
   that property uniquely picks one ancestry per equivalence class, so
   every class is emitted exactly once.
 
-Three independent oracles verify correctness:
+Validation hierarchy, by how far each oracle reaches:
 
-1. The Gaborit mass formula, on every emitted class.
-2. DFGHILM Table 3, cell-for-cell through `N = 26`, plus the `N = 28`
-   cell from a cloud run.
-3. Sage's `self_orthogonal_binary_codes`, through `N = 22`.
+1. **Gaborit mass formula** — fires on every emitted class at every
+   `N`, including the new `N = 29` result. This is the load-bearing
+   correctness oracle: `Σ N!/|Aut(C_i)| == σ(N, k)` exactly at every
+   rank. Mismatch is a fatal kernel panic.
+2. **DFGHILM Table 3** — cell-by-cell through `N = 26` in the
+   default suite + bench script, plus the `N = 28` cells from the
+   c4a-72 cloud run. **No published cells at `N = 29`**, so this
+   oracle is silent there.
+3. **Sage `self_orthogonal_binary_codes`** — cross-checked through
+   `N = 22` (Sage becomes impractical beyond that).
+4. **rlmiller.org/de_codes** — Robert L. Miller's independent
+   enumeration (no-zero-column convention) provides a fourth check
+   at `N = 28` via the bridge `total(N) = no_zero_cols(N) + total(N-1)`.
 
-Robert L. Miller's independent enumeration at
-[rlmiller.org/de_codes](https://rlmiller.org/de_codes/) (a
-no-zero-column convention) provides a fourth check at `N = 28`; the
-DFGHILM↔Miller bridge is `total(N) = no_zero_cols(N) + total(N-1)`.
+For `N = 29` specifically, only oracle 1 fires (and does, at every
+rank `k = 0..13`). The certificate is at
+[`docs/results/n29.json`](results/n29.json).
 
 ## The levers
 
@@ -242,6 +250,15 @@ across Rust enumerate overhead (`apply_permutation`, `row_reduce`,
 the orbit BFS in `subspace_in_orbit`, mass-accumulator bookkeeping); no
 individual slice is > 2 % of wall.
 
+A second framing matters more for the `N ≥ 26` frontier: at `N = 29`
+the kernel makes ~**364 canon calls per emitted class** (15.6 at
+`N = 22`, growing ~2.6× per 2-step — see
+[`performance.md`](performance.md#the-scaling-story-per-call-cost-drops-calls-per-class-explodes)).
+Per-call cost is *dropping* with `N`, but the canonical-augmentation
+candidate count is exploding faster than the class count. A real >2×
+lever at `N = 29` would have to cut the number of canon calls per
+class, not the cost per call.
+
 Three classes of further improvement were investigated and closed during
 the 2026-05-15 → 2026-05-23 optimisation sprint:
 
@@ -273,12 +290,18 @@ current pipeline cannot reach).
 - **Gaborit mass formula** is checked on every step:
   `Σ N!/|Aut(C_i)| == σ(N, k)`. The closed-form is in
   `src/doubly_even/spec/mass.py`; the running sum is in the Rust kernel.
-  Mismatch is a fatal `PanicException`.
+  Mismatch is a fatal `PanicException`. This is the universal oracle —
+  it fires for every `N`, every `k`, every emitted class, and is the
+  only oracle that fires at `N = 29` (no published table exists).
 - **DFGHILM Table 3** counts are hardcoded in
   `tests/test_augment.py::DFGHILM_TABLE_3` and matched cell-for-cell
   through `N = 16` in the default suite, `N = 18` with `--run-slow`,
   and `N = 20, 22` through `scripts/bench.py` (which re-runs the
-  Table-3 check after each timed enumeration).
+  Table-3 check after each timed enumeration). For `N = 24, 26, 28`
+  cell-by-cell agreement is verified by `scripts/merge_stream.py` on
+  the cloud-run output; the `dfghilm_table3_ok` flag in
+  [`docs/results/n29.json`](results/n29.json) is degenerate-True at
+  `N = 29` because the cross-check has no published cells to fail.
 - **Sage `self_orthogonal_binary_codes`** agrees with our class counts
   through `N = 22` (where Sage starts becoming impractical). The
   comparison data is in
