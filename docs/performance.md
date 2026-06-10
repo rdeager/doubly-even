@@ -4,25 +4,31 @@ Single home for the measured wall-time numbers and tuning knobs. The
 algorithmic *why* lives in [`algorithm.md`](algorithm.md); this doc is
 tables.
 
-## Headline (coset-spectrum parent rule, parallel kernel, mean of 3 runs)
+## Headline (split-frame φ + pooled seeder, parallel kernel, mean of 3 runs)
 
 Measured 2026-06-10 on a 13700K-equivalent dev container (its
 same-session legacy controls reproduce the 13700K records within 1–10 %,
 e.g. `N = 26` 168.3 s vs the recorded 169.8 s). Each run starts from a
-cold canon cache; all DFGHILM Table 3 cells verified per run.
+cold canon cache; all DFGHILM Table 3 cells verified per run. The
+"split-frame" column is the same-session gain over the plain
+coset-spectrum rule (see [`algorithm.md`](algorithm.md) lever 7);
+`d = 4` is now the best frontier depth at every benched `N`.
 
-| N  | classes  | sequential | parallel best           | vs legacy rule (same session) |
-|----|---------:|-----------:|-------------------------|------------------------------:|
-| 18 |      341 |    0.030 s | —                       |  4.7× (seq)  |
-| 20 |    1,211 |    0.151 s | 0.053 s (t=16, d=4)     |  6.0× (seq)  |
-| 22 |    5,118 |    0.848 s | **0.237 s** (t=24, d=4) |  7.6× (seq), 2.9× (par) |
-| 24 |   37,496 |     9.40 s | **2.60 s** (t=24, d=5)  | 10.3× (seq), 3.1× (par) |
-| 26 |  494,272 |     —      | **26.4 s** (t=24, d=5)  |  6.5× (par)  |
+| N  | classes  | sequential | parallel best           | vs plain coset-spectrum | vs legacy rule |
+|----|---------:|-----------:|-------------------------|------------------------:|---------------:|
+| 18 |      341 |    0.029 s | —                       | 1.0× (seq) |  4.8× (seq)  |
+| 20 |    1,211 |    0.145 s | 0.051 s (t=16, d=4)     | 1.04× (seq) |  6.2× (seq)  |
+| 22 |    5,118 |    0.788 s | **0.245 s** (t=24, d=4) | 1.07× (seq) |  8.2× (seq), 2.8× (par) |
+| 24 |   37,496 |     7.80 s | **1.67 s** (t=24, d=4)  | 1.20× (seq), 1.56× (par) | 12.4× (seq), 4.8× (par) |
+| 26 |  494,272 |    126.6 s | **13.2 s** (t=24, d=4)  | 1.64× (seq), 1.62× (par) | 12.7× (par)  |
 
-The legacy σ-based parent rule remains available as
-`DOUBLY_EVEN_PARENT_RULE=legacy`; its 13700K record numbers (kept for
-history and for older cross-references): `N = 22` 6.64 s seq / 0.691 s
-t=20 d=4; `N = 24` 8.90 s t=24 d=5; `N = 26` 169.8 s t=24 d=5.
+The plain coset-spectrum numbers (2026-06-10, same container, kept for
+cross-reference): `N = 22` 0.848 s seq / 0.237 s par; `N = 24` 9.40 s
+seq / 2.60 s par; `N = 26` 207.1 s seq / 21.4 s par (t=24 d=4). The
+legacy σ-based parent rule remains available as
+`DOUBLY_EVEN_PARENT_RULE=legacy`; its 13700K record numbers: `N = 22`
+6.64 s seq / 0.691 s t=20 d=4; `N = 24` 8.90 s t=24 d=5; `N = 26`
+169.8 s t=24 d=5.
 
 ## Cloud runs
 
@@ -253,22 +259,29 @@ no effect when unset; defaults are the recommended values for `N ≤ 22`.
 | env var                              | default       | description |
 |--------------------------------------|---------------|-------------|
 | `DOUBLY_EVEN_THREADS`                | unset (seq)   | `≥ 2` enables the parallel path; recommended `logical_cores − 2` at `N ≤ 22`, `logical_cores` at `N ≥ 24` |
-| `DOUBLY_EVEN_FRONTIER_DEPTH`         | 4             | DFS depth at which the seeder yields seeds to the worker pool; raise to 5 for `N ≥ 24` |
+| `DOUBLY_EVEN_FRONTIER_DEPTH`         | 4             | DFS depth at which the seeder yields seeds to the worker pool; `4` is the measured best at every benched `N` since the split-frame lever (the older "raise to 5 for `N ≥ 24`" guidance is obsolete) |
 | `DOUBLY_EVEN_CANON_CACHE_CAP`        | 1,000,000     | per-worker LRU size (entries); load-bearing at `N ≥ 26` to keep the per-worker × N-workers footprint under host memory |
 | `DOUBLY_EVEN_NO_MASS_STOP`           | unset         | set to `1` to disable mass-stop pruning (ablation only) |
 | `DOUBLY_EVEN_PARENT_RULE`            | `coset-spectrum` | parent-selection rule: `coset-spectrum` (default), `legacy` (σ-based rule, kill-switch / A-B control), `audit` (legacy behaviour + φ instrumentation) |
 | `DOUBLY_EVEN_PHI_MAX_RANK`           | 13            | child-rank cap for the coset-spectrum cascade; above it the kernel uses the legacy rule per rank (only relevant at `N ≥ 30`) |
+| `DOUBLY_EVEN_SEEDER_THREADS`         | = THREADS     | seeder helper-pool size for pooled σ_Q candidate generation; `0`/`1` disables the pool entirely |
+| `DOUBLY_EVEN_SEEDER_PAR_MIN_L`       | 22            | minimum quotient dimension for pooled σ_Q stages; the default pools only the large early calls where the worker pool is still idle — lowering it measurably loses to helper-vs-worker contention |
 
-Recommended config table (after the 2026-05-23 thread-count recalibration):
+Recommended config table (after the 2026-06-10 split-frame re-tune —
+`d = 4` everywhere; the seeder-pool knobs are best left at defaults):
 
 | host                            | N    | THREADS | FRONTIER_DEPTH | CANON_CACHE_CAP |
 |---------------------------------|------|--------:|---------------:|----------------:|
 | 13700K (24 logical / 16 phys)   | ≤22  |      20 |              4 |       1,000,000 |
-| 13700K                          |   24 |      24 |              5 |       1,000,000 |
-| 13700K                          |   26 |      24 |              5 |         500,000 |
-| 13700K (N=28 — cgroup-tight)    |   28 |      20 |              5 |         200,000 |
-| c4-standard-24 (Intel, 12 phys) |   26 |      24 |              5 |         500,000 |
-| c4a-standard-72 (Axion, 72 phys)|   28 |      72 |              5 |         300,000 |
+| 13700K                          |   24 |      24 |              4 |       1,000,000 |
+| 13700K                          |   26 |      24 |              4 |         500,000 |
+| 13700K (N=28 — cgroup-tight)    |   28 |      20 |              4 |         200,000 |
+| c4-standard-24 (Intel, 12 phys) |   26 |      24 |              4 |         500,000 |
+| c4a-standard-72 (Axion, 72 phys)|   28 |      72 |              4 |         300,000 |
+
+(The cloud rows above were *measured* at `d = 5` pre-split-frame; the
+`d = 4` recommendation extrapolates the 13700K re-tune and should be
+spot-checked in the first post-split-frame cloud shakedown.)
 
 At `N = 28` on the 13700K, the per-worker canon caches `× 22 threads`
 exceeded the 52 GiB cgroup limit on the dev host; the local run OOM'd
@@ -287,5 +300,5 @@ uv pip install --force-reinstall rust/target/wheels/doubly_even_kernel-*.whl
 DOUBLY_EVEN_THREADS=20 uv run python scripts/bench.py --label local-22 --N 22
 ```
 
-This should produce `N=22 wall ≈ 0.69 s` and 5,118 classes (mass-formula
+This should produce `N=22 wall ≈ 0.25 s` and 5,118 classes (mass-formula
 verified in-Rust) on a 16-physical-core machine.

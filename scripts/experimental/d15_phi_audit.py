@@ -68,6 +68,8 @@ PER_K_ROWS = [
     "candidates_q_ns",
     "nauty_ns",
     "phi_sampled_calls",
+    # D16 per-rank ctx-build ns (always-on; a SUBSET of `phi_ns`).
+    "phi_ctx_ns",
 ]
 
 

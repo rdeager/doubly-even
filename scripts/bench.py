@@ -99,12 +99,19 @@ KERNEL_STATS_LAYOUT: tuple[str, ...] = (
     "cq_singular_ns",             # 36 — σ_Q sub-phase: singular_reps_q
     "cq_orbitmin_ns",             # 37 — σ_Q sub-phase: orbit-min BFS
     "cq_lift_sort_ns",            # 38 — σ_Q sub-phase: lift + sort
-    "phi_frame_gray_ns",          # 39 — φ sampled: frame + Gray sweep
-    "phi_sort_ns",                # 40 — φ sampled: counting sort
-    "phi_first_stratum_ns",       # 41 — φ sampled: first-stratum argmin
+    "phi_vhalf_ns",               # 39 — φ sampled: v-half weights+hist
+    #                                    (pre-D16: frame + Gray sweep)
+    "phi_members_ns",             # 40 — φ sampled: stratum-1 member
+    #                                    collection (pre-D16: counting sort)
+    "phi_first_stratum_ns",       # 41 — φ sampled: first-stratum decision
     "phi_wht_ns",                 # 42 — φ sampled: later-stratum WHT
     "phi_direct_ns",              # 43 — φ sampled: direct parity
     "phi_sampled_calls",          # 44 — φ sampling weights (1-in-64)
+    "phi_ctx_ns",                 # 45 — D16: per-parent ctx builds
+    #                                    (always-on; SUBSET of phi_ns)
+    "phi_ctx_builds",             # 46 — D16: # of φ-tested parents
+    "phi_s1_fastpath",            # 47 — D16: stratum-1 fast-path cascades
+    "phi_killer_rejects",         # 48 — D16: DOUBLY_EVEN_PHI_KILLER rejects
 )
 
 # Row names of the kernel's `per_k_stats` matrix, in fixed order — kept in
@@ -133,6 +140,7 @@ PER_K_STATS_ROWS: tuple[str, ...] = (
     "candidates_q_ns",        # 15 — per-rank σ_Q candidate-generation ns
     "nauty_ns",               # 16 — per-rank canon-dispatch ns (child rank!)
     "phi_sampled_calls",      # 17 — per-rank φ sampling weights (phase_timers)
+    "phi_ctx_ns",             # 18 — D16: per-rank ctx-build ns (SUBSET of row 14)
 )
 
 
@@ -157,6 +165,7 @@ def assert_per_k_timing_consistency(
         ("phi_ns", "phi_ns"),
         ("candidates_q_ns", "candidates_q_ns"),
         ("nauty_ns", "nauty_ns"),
+        ("phi_ctx_ns", "phi_ctx_ns"),
     ):
         row_sum = sum(per_k_stats[row])
         agg = kernel_stats[agg_name]

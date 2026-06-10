@@ -1,9 +1,17 @@
 //! End-to-end φ-cascade replay across child ranks (post-D15 profile,
 //! plan `last-session-we-had-sequential-fiddle.md` Phase 3).
 //!
-//! Clone of `parent_rule::phi_cascade_with` (filters, counting sort,
-//! Gray sweep — kept in copy-sync by hand) driven by synthetic frames,
-//! k+1 = 8..16. Two modes:
+//! **STALE since D16 (2026-06-10)**: this clones the PRE-D16
+//! full-frame cascade (Gray sweep + sort + full-size WHT per
+//! candidate). The production cascade now shares the C-half per
+//! parent and decides ~99 % of first strata via the amax O(1) bound
+//! (`parent_rule.rs::PhiParentCtx`), so these numbers bound only the
+//! historical kernel. Kept as the record behind the 08-doc §4
+//! L1-cliff analysis; re-sync before reusing for new conclusions.
+//!
+//! Clone of pre-D16 `parent_rule::phi_cascade_with` (filters, counting
+//! sort, Gray sweep — was kept in copy-sync by hand) driven by
+//! synthetic frames, k+1 = 8..16. Two modes:
 //!
 //!   hot  — back-to-back cascades, PhiScratch L1/L2-resident (matches
 //!          production bursts of candidates against one parent).

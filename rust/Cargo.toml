@@ -78,7 +78,14 @@ lru = "0.12"
 # Under ptmalloc this thrashes the per-arena lock and L2 across 20 workers;
 # mimalloc's per-thread arenas eliminate the lock contention and keep
 # freelists hot in L1d.
-mimalloc = { version = "0.1", default-features = false }
+# `local_dynamic_tls`: mimalloc otherwise compiles with
+# -ftls-model=initial-exec, which marks the cdylib STATIC_TLS and makes
+# `import doubly_even_kernel` (a dlopen) compete for glibc's ~1.6 KB
+# static-TLS surplus — the D16 wheel crossed that line and imports
+# started failing with "cannot allocate memory in static TLS block".
+# local-dynamic costs one indirection on mimalloc's TLS heap lookup;
+# A/B'd at < 1 % on the D16 ship bench.
+mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
 
 # `nauty-Traces-sys 0.11` is target-conditional: its `build.rs:205` calls
 # `is_x86_feature_detected!("popcnt")` unconditionally, which the Rust

@@ -49,7 +49,9 @@ use crate::experimental::canon_dense_qd::canon_info_qd_dense;
 use crate::experimental::canon_traces_qd::canon_info_qd_traces;
 use crate::candidates::doubly_even_candidates_q;
 use crate::linalg::{apply_permutation, row_reduce};
-use crate::parent_rule::{phi_cascade, tie_break_parent, ParentRule, PhiOutcome, PhiResult};
+use crate::parent_rule::{
+    phi_cascade_shared, tie_break_parent, ParentRule, PhiOutcome, PhiParentSlot, PhiResult,
+};
 #[cfg(feature = "equivalence_verifier")]
 use crate::experimental::paired_iso::PairedIsoCachedCf;
 use crate::permutations::{
@@ -172,6 +174,13 @@ pub(crate) struct WorkerState {
     /// sequential path (no-op cost when absent).
     #[cfg(feature = "parallel")]
     global_mass: Option<std::sync::Arc<GlobalMassTracker>>,
+    /// D16 lever B: helper pool the SEEDER's σ_Q calls fan out onto
+    /// (`doubly_even_candidates_q_pooled`). Installed only on the
+    /// seeder's `WorkerState` by the parallel drivers and dropped right
+    /// after `traverse_seed` returns; workers keep `None` (they are
+    /// already saturated). `None` ⇒ exact pre-D16 sequential calls.
+    #[cfg(feature = "parallel")]
+    seeder_pool: Option<std::sync::Arc<crate::seeder_pool::SeederPool>>,
     /// When true, the two mass-stop branches in [`traverse`] (`mass_at_k[k+1]
     /// >= quota[k+1]` checks before and inside the candidate loop) become
     /// no-ops. Read once from `DOUBLY_EVEN_NO_MASS_STOP` at construction;
@@ -351,6 +360,21 @@ pub(crate) struct WorkerState {
     /// How many cascades were fully timed (the sampling weights).
     pub stats_phi_sampled_calls: u64,
     pub stats_phi_sampled_calls_by_k: Vec<u64>,
+    /// D16 split-frame φ: ns spent building per-parent shared contexts
+    /// (eager C-half tables + lazy per-stratum WHTs). Always-on. NOTE:
+    /// a SUBSET of `stats_phi_ns` — builds happen inside the timed
+    /// cascade call — so the φ wall share is still just `phi_ns`; this
+    /// field splits out the amortised-per-parent component.
+    pub stats_phi_ctx_ns: u128,
+    pub stats_phi_ctx_ns_by_k: Vec<u64>,
+    /// Number of per-parent ctx builds (= φ-tested parents).
+    pub stats_phi_ctx_builds: u64,
+    /// Cascades whose first-stratum decision needed no per-candidate
+    /// WHT (coset-only / C-only stratum fast paths, k = 0 frames).
+    pub stats_phi_s1_fastpath: u64,
+    /// Rejects proven by the killer pre-check (`DOUBLY_EVEN_PHI_KILLER`;
+    /// 0 unless that flag is on — reserved by D16, wired in A4).
+    pub stats_phi_killer_rejects: u64,
     /// Sums of nauty `statsblk` tree-shape counters across all
     /// `canon_info_*_native` calls. Each summand is one call; divide by
     /// `stats_canon_calls` for per-call averages. Recorded to decompose
@@ -427,6 +451,8 @@ impl WorkerState {
             skip_mass_stop,
             #[cfg(feature = "parallel")]
             global_mass: None,
+            #[cfg(feature = "parallel")]
+            seeder_pool: None,
             canon_cache: LruCache::new(canon_cache_capacity()),
             stats_is_canon_aug_calls_by_k: vec![0u64; len],
             stats_parent_eq_hits_by_k: vec![0u64; len],
@@ -490,6 +516,11 @@ impl WorkerState {
             stats_phi_direct_ns: 0,
             stats_phi_sampled_calls: 0,
             stats_phi_sampled_calls_by_k: vec![0u64; len],
+            stats_phi_ctx_ns: 0,
+            stats_phi_ctx_ns_by_k: vec![0u64; len],
+            stats_phi_ctx_builds: 0,
+            stats_phi_s1_fastpath: 0,
+            stats_phi_killer_rejects: 0,
             stats_nauty_numnodes: 0,
             stats_nauty_tctotal: 0,
             stats_nauty_maxlevel_sum: 0,
@@ -861,6 +892,7 @@ impl WorkerState {
         parent_k: usize,
         rref: &[BinVec],
         v: BinVec,
+        phi: &mut PhiParentSlot,
     ) -> Option<(Vec<BinVec>, Vec<u32>, Rc<CachedInfo>)> {
         let use_phi = match self.parent_rule {
             ParentRule::CosetSpectrum { max_rank } => parent_k as u32 + 1 <= max_rank,
@@ -868,11 +900,12 @@ impl WorkerState {
         };
         if use_phi {
             let t0 = std::time::Instant::now();
-            let res = phi_cascade(rref, v, self.n);
+            let res = phi_cascade_shared(phi, rref, v, self.n);
             let phi_delta = t0.elapsed().as_nanos();
             self.stats_phi_ns += phi_delta;
             self.stats_phi_ns_by_k[parent_k] += phi_delta as u64;
             self.drain_phi_sample(parent_k);
+            self.drain_phi_ctx_stats(parent_k, phi, &res);
             self.stats_phi_strata_sum += res.strata_used as u64;
             self.stats_phi_m_size_sum += res.m_size_at_decision as u64;
             return match res.outcome {
@@ -921,7 +954,7 @@ impl WorkerState {
         }
         // Legacy path (also taken by CosetSpectrum above its rank cap);
         // Audit additionally tallies the φ outcome post-hoc.
-        let phi_res = self.phi_audit_evaluate(parent_k, rref, v);
+        let phi_res = self.phi_audit_evaluate(parent_k, rref, v, phi);
         let (d_rref, d_pivots) = extend_rref(rref, v, self.n);
         let nauty_ns_before = self.stats_nauty_ns;
         let info_d = self.canon_info(&d_rref);
@@ -946,17 +979,39 @@ impl WorkerState {
         parent_k: usize,
         c_rref: &[BinVec],
         v: BinVec,
+        phi: &mut PhiParentSlot,
     ) -> Option<PhiResult> {
         if self.parent_rule != ParentRule::Audit {
             return None;
         }
         let t0 = std::time::Instant::now();
-        let res = phi_cascade(c_rref, v, self.n);
+        let res = phi_cascade_shared(phi, c_rref, v, self.n);
         let phi_delta = t0.elapsed().as_nanos();
         self.stats_phi_ns += phi_delta;
         self.stats_phi_ns_by_k[parent_k] += phi_delta as u64;
         self.drain_phi_sample(parent_k);
+        self.drain_phi_ctx_stats(parent_k, phi, &res);
         Some(res)
+    }
+
+    /// D16: drain the per-parent ctx build accounting from the slot and
+    /// tally the first-stratum fast-path hit, right after a cascade call.
+    #[inline]
+    fn drain_phi_ctx_stats(
+        &mut self,
+        parent_k: usize,
+        phi: &mut PhiParentSlot,
+        res: &PhiResult,
+    ) {
+        let (ctx_ns, ctx_builds) = phi.take_build_stats();
+        if ctx_ns != 0 {
+            self.stats_phi_ctx_ns += ctx_ns as u128;
+            self.stats_phi_ctx_ns_by_k[parent_k] += ctx_ns;
+        }
+        self.stats_phi_ctx_builds += ctx_builds;
+        if res.s1_fastpath {
+            self.stats_phi_s1_fastpath += 1;
+        }
     }
 
     /// D15 Phase 1 audit: tally a cascade result against the per-candidate
@@ -1033,6 +1088,22 @@ impl WorkerState {
         self.global_mass = Some(gm);
     }
 
+    /// D16 lever B: wire the seeder helper pool into this state (seeder
+    /// only). Cleared via [`Self::clear_seeder_pool`] before the run's
+    /// worker-dominated tail so helper threads exit promptly.
+    #[cfg(feature = "parallel")]
+    pub(crate) fn install_seeder_pool(
+        &mut self,
+        pool: std::sync::Arc<crate::seeder_pool::SeederPool>,
+    ) {
+        self.seeder_pool = Some(pool);
+    }
+
+    #[cfg(feature = "parallel")]
+    pub(crate) fn clear_seeder_pool(&mut self) {
+        self.seeder_pool = None;
+    }
+
     pub(crate) fn traverse(&mut self, rref: Vec<BinVec>, pivots: Vec<u32>, info: Rc<CachedInfo>) {
         let k = rref.len() as u32;
         // Emit. Streaming path skips the per-class clones of
@@ -1093,6 +1164,9 @@ impl WorkerState {
         self.stats_candidates_q_calls += 1;
         let total = candidates.len() as u64;
         self.stats_candidates_total_seen_by_k[k as usize] += total;
+        // D16: one shared φ context per parent, amortised across the
+        // sibling candidates below (built lazily on the first cascade).
+        let mut phi_slot = PhiParentSlot::new();
         for (idx, v) in candidates.iter().enumerate() {
             if !self.skip_mass_stop && self.next_rank_full(k as usize) {
                 let remaining = total - idx as u64;
@@ -1103,7 +1177,7 @@ impl WorkerState {
             // D = C.extend(v), accepted or skipped under the active
             // parent rule (φ rejects never touch RREF/cache/canon).
             let Some((d_rref, d_pivots, info_d)) =
-                self.test_candidate(k as usize, &rref, *v)
+                self.test_candidate(k as usize, &rref, *v, &mut phi_slot)
             else {
                 continue;
             };
@@ -1173,14 +1247,27 @@ impl WorkerState {
             return;
         }
         let dual = dual_basis(&rref, &pivots, self.n);
+        // NOTE: with the helper pool active, this seeder-side
+        // candidates_q_ns delta records WALL time of a parallel region,
+        // not CPU time — that shrinkage is the point of lever B.
         let cq_t0 = std::time::Instant::now();
-        let candidates = doubly_even_candidates_q(
-            self.n,
-            &rref,
-            &pivots,
-            &dual,
-            &info.aut_generators,
-        );
+        let candidates = match self.seeder_pool.as_deref() {
+            Some(pool) => crate::candidates::doubly_even_candidates_q_pooled(
+                self.n,
+                &rref,
+                &pivots,
+                &dual,
+                &info.aut_generators,
+                pool,
+            ),
+            None => doubly_even_candidates_q(
+                self.n,
+                &rref,
+                &pivots,
+                &dual,
+                &info.aut_generators,
+            ),
+        };
         let cq_delta = cq_t0.elapsed().as_nanos();
         self.stats_candidates_q_ns += cq_delta;
         self.stats_candidates_q_ns_by_k[k as usize] += cq_delta as u64;
@@ -1188,11 +1275,12 @@ impl WorkerState {
         self.stats_candidates_q_calls += 1;
         let total = candidates.len() as u64;
         self.stats_candidates_total_seen_by_k[k as usize] += total;
+        let mut phi_slot = PhiParentSlot::new();
         for v in candidates.iter() {
             // Same shared candidate test as `traverse` — the seeder must
             // apply the identical parent rule the workers do.
             let Some((d_rref, d_pivots, info_d)) =
-                self.test_candidate(k as usize, &rref, *v)
+                self.test_candidate(k as usize, &rref, *v, &mut phi_slot)
             else {
                 continue;
             };
@@ -1257,6 +1345,10 @@ impl WorkerState {
             self.stats_phi_wht_ns,
             self.stats_phi_direct_ns,
             self.stats_phi_sampled_calls as u128,
+            self.stats_phi_ctx_ns,
+            self.stats_phi_ctx_builds as u128,
+            self.stats_phi_s1_fastpath as u128,
+            self.stats_phi_killer_rejects as u128,
         ];
         let per_k_stats: Vec<Vec<u64>> = vec![
             self.stats_is_canon_aug_calls_by_k,
@@ -1277,6 +1369,7 @@ impl WorkerState {
             self.stats_candidates_q_ns_by_k,
             self.stats_nauty_ns_by_k,
             self.stats_phi_sampled_calls_by_k,
+            self.stats_phi_ctx_ns_by_k,
         ];
         (self.output, stats, per_k_stats)
     }
@@ -1291,9 +1384,9 @@ impl WorkerState {
 /// Returns `(output, stats, per_k_stats)`:
 ///
 /// - `output` — `Vec<EnumeratedRaw>` in DFS order.
-/// - `stats` — flat vector (45 u128 fields). See layout below; the
+/// - `stats` — flat vector (49 u128 fields). See layout below; the
 ///   canonical Python mirror is `scripts/bench.py::KERNEL_STATS_LAYOUT`.
-/// - `per_k_stats` — rectangular `[18][max_k+1]` matrix of u64 counters
+/// - `per_k_stats` — rectangular `[19][max_k+1]` matrix of u64 counters
 ///   bucketed by the *parent* rank k (i.e., the rank of C; D has rank
 ///   k+1), EXCEPT row 16 (`nauty_ns_by_k`) which is bucketed by the rank
 ///   of the code being canonised. Rows in fixed order:
@@ -1301,7 +1394,8 @@ impl WorkerState {
 ///   bfs_calls, bfs_hits, bfs_rejects, mass_stop_pre_loop,
 ///   mass_stop_in_loop, candidates_total_seen, candidates_skipped,
 ///   phi_reject, phi_accept_unique, phi_tie_accept, phi_tie_reject,
-///   phi_ns, candidates_q_ns, nauty_ns, phi_sampled_calls]`.
+///   phi_ns, candidates_q_ns, nauty_ns, phi_sampled_calls,
+///   phi_ctx_ns]`.
 ///   Rows 0–5 from Phase 1 of `for-complete-enumeration-of-proud-meerkat.md`
 ///   (σ_Q-orbit-min rejection-rate audit). Rows 6–9 from the mass-stop
 ///   audit (same plan, Conway–Pless gluing follow-up). Rows 10–13 from
@@ -1309,7 +1403,9 @@ impl WorkerState {
 ///   `DOUBLY_EVEN_PARENT_RULE=audit`). Rows 14–16 are the post-D15
 ///   per-rank timing rows (ns; always-on — they bucket deltas the
 ///   aggregate fields already pay for); row 17 counts the 1-in-64
-///   sampled φ cascades per rank (`phase_timers` builds only).
+///   sampled φ cascades per rank (`phase_timers` builds only); row 18
+///   (`phi_ctx_ns_by_k`, always-on) buckets the D16 per-parent ctx
+///   build time — a SUBSET of row 14, not additive with it.
 ///
 /// Stats vector layout (34 u128 fields, packed for pyo3 tuple-arity
 /// limits — pyo3 0.23 caps `IntoPyObject` tuples at 12 elements):
@@ -1350,6 +1446,22 @@ impl WorkerState {
 ///  31   phi_strata_sum                 (D15 audit)
 ///  32   phi_m_size_sum                 (D15 audit)
 ///  33   nauty_ns_kept                  (D15 audit; timer — κ numerator)
+///  34   cq_qbasis_ns                   (phase_timers; σ_Q 5-way split)
+///  35   cq_autimage_ns                 (phase_timers)
+///  36   cq_singular_ns                 (phase_timers)
+///  37   cq_orbitmin_ns                 (phase_timers)
+///  38   cq_lift_sort_ns                (phase_timers)
+///  39   phi_vhalf_ns                   (phase_timers; sampled φ split —
+///                                       pre-D16: frame+Gray sweep)
+///  40   phi_members_ns                 (phase_timers; pre-D16: sort)
+///  41   phi_first_stratum_ns           (phase_timers)
+///  42   phi_wht_ns                     (phase_timers; later-stratum WHT)
+///  43   phi_direct_ns                  (phase_timers; later direct)
+///  44   phi_sampled_calls              (phase_timers; sampling weights)
+///  45   phi_ctx_ns                     (D16; always-on; SUBSET of phi_ns)
+///  46   phi_ctx_builds                 (D16; always-on)
+///  47   phi_s1_fastpath                (D16; always-on)
+///  48   phi_killer_rejects             (D16; 0 unless DOUBLY_EVEN_PHI_KILLER)
 /// ```
 ///
 /// Fields 4–10 came from the Engine B BFS-cost profile (see
@@ -1454,7 +1566,9 @@ pub fn enumerate_doubly_even_parallel(
 
 /// [`enumerate_doubly_even_parallel`] with an explicit parent rule. The
 /// rule is resolved once here and handed to the seeder and every worker,
-/// guaranteeing rule agreement across the frontier.
+/// guaranteeing rule agreement across the frontier. Seeder-pool knobs
+/// come from the environment (`DOUBLY_EVEN_SEEDER_THREADS`,
+/// `DOUBLY_EVEN_SEEDER_PAR_MIN_L`).
 #[cfg(feature = "parallel")]
 pub fn enumerate_doubly_even_parallel_with_rule(
     n: u32,
@@ -1463,6 +1577,37 @@ pub fn enumerate_doubly_even_parallel_with_rule(
     factorial_n: u128,
     num_threads: usize,
     rule: ParentRule,
+) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
+    let (seeder_threads, seeder_min_l) =
+        crate::seeder_pool::SeederPool::env_defaults(num_threads);
+    enumerate_doubly_even_parallel_with_seeder(
+        n,
+        max_k,
+        quota,
+        factorial_n,
+        num_threads,
+        rule,
+        seeder_threads,
+        seeder_min_l,
+    )
+}
+
+/// [`enumerate_doubly_even_parallel_with_rule`] with explicit seeder-pool
+/// knobs — the env-independent entry the pooled-seeder determinism tests
+/// drive (integration tests must not mutate process env: the cargo
+/// harness is threaded). `seeder_threads <= 1` disables the helper pool
+/// (exact pre-D16 seeder behaviour).
+#[cfg(feature = "parallel")]
+#[allow(clippy::too_many_arguments)]
+pub fn enumerate_doubly_even_parallel_with_seeder(
+    n: u32,
+    max_k: u32,
+    quota: Vec<u128>,
+    factorial_n: u128,
+    num_threads: usize,
+    rule: ParentRule,
+    seeder_threads: usize,
+    seeder_min_l: u32,
 ) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
     use crossbeam_channel::{bounded, unbounded};
 
@@ -1526,6 +1671,14 @@ pub fn enumerate_doubly_even_parallel_with_rule(
     // thread; depth-`frontier_depth` seeds travel by channel.
     let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n, rule);
     seed_state.install_global_mass(std::sync::Arc::clone(&global_mass));
+    // D16 lever B: helper pool for the seeder's σ_Q calls, alive only
+    // for the seeding span (helpers exit before the worker-dominated
+    // tail; the main worker pool is starved during this span anyway).
+    if seeder_threads >= 2 {
+        seed_state.install_seeder_pool(std::sync::Arc::new(
+            crate::seeder_pool::SeederPool::new(seeder_threads, seeder_min_l),
+        ));
+    }
     {
         let zero_rref: Vec<BinVec> = Vec::new();
         let zero_pivots: Vec<u32> = Vec::new();
@@ -1538,6 +1691,7 @@ pub fn enumerate_doubly_even_parallel_with_rule(
             &task_tx,
         );
     }
+    seed_state.clear_seeder_pool();
     drop(task_tx);
 
     // Drain results.
@@ -1700,6 +1854,14 @@ pub fn enumerate_doubly_even_parallel_streaming(
     let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n, rule);
     seed_state.install_global_mass(std::sync::Arc::clone(&global_mass));
     seed_state.install_output_writer(seeder_writer);
+    // D16 lever B (same wiring as the in-memory parallel driver).
+    let (seeder_threads, seeder_min_l) =
+        crate::seeder_pool::SeederPool::env_defaults(num_threads);
+    if seeder_threads >= 2 {
+        seed_state.install_seeder_pool(std::sync::Arc::new(
+            crate::seeder_pool::SeederPool::new(seeder_threads, seeder_min_l),
+        ));
+    }
     {
         let zero_rref: Vec<BinVec> = Vec::new();
         let zero_pivots: Vec<u32> = Vec::new();
@@ -1712,6 +1874,7 @@ pub fn enumerate_doubly_even_parallel_streaming(
             &task_tx,
         );
     }
+    seed_state.clear_seeder_pool();
     drop(task_tx);
 
     let (_empty, mut combined_stats, mut combined_per_k) = seed_state.finalize();

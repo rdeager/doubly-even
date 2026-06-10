@@ -184,6 +184,227 @@ pub fn aut_orbit_minima_q_witt(
     minima
 }
 
+/// Below this frontier size a BFS level expands on the calling thread —
+/// dispatch overhead (one closure + channel round-trip per helper) only
+/// pays for itself on large levels. Large-L orbits at low rank have
+/// frontiers of 10^4–10^6; small orbits never leave the serial path.
+#[cfg(feature = "parallel")]
+const PAR_LEVEL_MIN: usize = 4096;
+
+/// [`aut_orbit_minima_q_witt`] with BFS levels fanned out on the seeder
+/// helper pool (D16 lever B; `architecture/08-post-d15-profile.md` §5).
+///
+/// Determinism: the returned minima `Vec` is EXACTLY the sequential
+/// function's output. The ascending rep scan is serial, so the i-th
+/// minimum depends only on the `seen` set after the first i−1 orbits —
+/// and `seen` after each orbit is exactly `previous ∪ Orb(v)` (the BFS
+/// saturates the orbit closure regardless of expansion order or thread
+/// interleaving). Within a level, the [`AtomicBitset::claim`] fetch_or
+/// guarantees each newly-seen element enters the next frontier exactly
+/// once; which racing range wins a duplicate only permutes the next
+/// frontier, never its membership.
+#[cfg(feature = "parallel")]
+pub fn aut_orbit_minima_q_witt_pooled(
+    reps_q: &[BinVec],
+    sigma_qs: &[Mat],
+    l: u32,
+    pool: &crate::seeder_pool::SeederPool,
+) -> Vec<BinVec> {
+    orbit_minima_pooled_impl(reps_q, sigma_qs, l, pool, PAR_LEVEL_MIN)
+}
+
+/// Implementation with an explicit parallel-level threshold so unit
+/// tests can force the pooled branch at small `L`.
+#[cfg(feature = "parallel")]
+fn orbit_minima_pooled_impl(
+    reps_q: &[BinVec],
+    sigma_qs: &[Mat],
+    l: u32,
+    pool: &crate::seeder_pool::SeederPool,
+    par_level_min: usize,
+) -> Vec<BinVec> {
+    use crate::seeder_pool::AtomicBitset;
+    use std::sync::Arc;
+
+    let gens: Vec<Mat> = sigma_qs
+        .iter()
+        .filter(|m| !is_identity_mat(m))
+        .cloned()
+        .collect();
+    if gens.is_empty() {
+        let mut out = reps_q.to_vec();
+        out.sort_unstable();
+        return out;
+    }
+    let mut reps_sorted = reps_q.to_vec();
+    reps_sorted.sort_unstable();
+    let universe = 1usize << l;
+    let seen = Arc::new(AtomicBitset::new(universe));
+    let gens = Arc::new(gens);
+    let mut minima: Vec<BinVec> = Vec::new();
+    let mut queue: Vec<BinVec> = Vec::with_capacity(reps_q.len());
+    let mut next: Vec<BinVec> = Vec::with_capacity(reps_q.len());
+    for &v in &reps_sorted {
+        if seen.contains(v as usize) {
+            continue;
+        }
+        minima.push(v);
+        seen.claim(v as usize);
+        queue.clear();
+        queue.push(v);
+        while !queue.is_empty() {
+            if queue.len() < par_level_min || pool.size() < 2 {
+                // Small level: expand serially (same atomic bitset).
+                next.clear();
+                for &current in &queue {
+                    for g in gens.iter() {
+                        let new_v = mat_apply(g, current);
+                        if seen.claim(new_v as usize) {
+                            next.push(new_v);
+                        }
+                    }
+                }
+                std::mem::swap(&mut queue, &mut next);
+            } else {
+                // Large level: split into contiguous ranges, one helper
+                // task each; concatenate the claimed images in range
+                // order. Range results ride a bounded channel whose
+                // send/recv edges order the bitset claims before the
+                // next level launches.
+                let frontier = Arc::new(std::mem::take(&mut queue));
+                let n_chunks = pool.size();
+                let per = frontier.len().div_ceil(n_chunks);
+                let (rtx, rrx) =
+                    crossbeam_channel::bounded::<(usize, Vec<BinVec>)>(n_chunks);
+                let mut sent = 0usize;
+                let mut lo = 0usize;
+                while lo < frontier.len() {
+                    let hi = (lo + per).min(frontier.len());
+                    let frontier = Arc::clone(&frontier);
+                    let gens = Arc::clone(&gens);
+                    let seen = Arc::clone(&seen);
+                    let rtx = rtx.clone();
+                    let idx = sent;
+                    pool.execute(Box::new(move || {
+                        let mut local: Vec<BinVec> = Vec::new();
+                        for &current in &frontier[lo..hi] {
+                            for g in gens.iter() {
+                                let new_v = mat_apply(g, current);
+                                if seen.claim(new_v as usize) {
+                                    local.push(new_v);
+                                }
+                            }
+                        }
+                        let _ = rtx.send((idx, local));
+                    }));
+                    sent += 1;
+                    lo = hi;
+                }
+                drop(rtx);
+                let mut slots: Vec<Option<Vec<BinVec>>> =
+                    (0..sent).map(|_| None).collect();
+                for _ in 0..sent {
+                    let (idx, part) = rrx
+                        .recv()
+                        .expect("seeder helper dropped a BFS range result");
+                    slots[idx] = Some(part);
+                }
+                queue = Vec::with_capacity(slots.iter().map(|s| s.as_ref().map_or(0, Vec::len)).sum());
+                for s in slots {
+                    queue.extend(s.expect("missing BFS range result"));
+                }
+            }
+        }
+    }
+    minima
+}
+
+/// [`singular_reps_q`] with the Gray walk split into per-helper ranges
+/// (D16 lever B, commit 2). The walk state at step `i` is closed-form
+/// (`u = i ^ (i >> 1)`, `lift` in O(L)), so each range replays
+/// independently; range-ordered concatenation is byte-identical to the
+/// sequential output.
+#[cfg(feature = "parallel")]
+pub fn singular_reps_q_pooled(
+    v_basis: &[BinVec],
+    pool: &crate::seeder_pool::SeederPool,
+) -> Vec<BinVec> {
+    singular_reps_pooled_impl(v_basis, pool, PAR_LEVEL_MIN as u64)
+}
+
+/// Implementation with an explicit minimum chunk size so unit tests can
+/// force multi-chunk splits at small `L`.
+#[cfg(feature = "parallel")]
+fn singular_reps_pooled_impl(
+    v_basis: &[BinVec],
+    pool: &crate::seeder_pool::SeederPool,
+    chunk_min: u64,
+) -> Vec<BinVec> {
+    use std::sync::Arc;
+
+    let l = v_basis.len();
+    if l == 0 {
+        return Vec::new();
+    }
+    debug_assert!(l < 64, "L = {l} exceeds the u64 shift range");
+    let size: u64 = 1u64 << l;
+    let n_chunks = pool
+        .size()
+        .min(((size - 1) / chunk_min).max(1) as usize);
+    if n_chunks < 2 {
+        return singular_reps_q(v_basis);
+    }
+    let per = (size - 1).div_ceil(n_chunks as u64);
+    let vb = Arc::new(v_basis.to_vec());
+    let (rtx, rrx) = crossbeam_channel::bounded::<(usize, Vec<BinVec>)>(n_chunks);
+    let mut sent = 0usize;
+    let mut lo = 1u64;
+    while lo < size {
+        let hi = (lo + per).min(size);
+        let vb = Arc::clone(&vb);
+        let rtx = rtx.clone();
+        let idx = sent;
+        pool.execute(Box::new(move || {
+            // Closed-form walk state just before step `lo`.
+            let mut u: BinVec = (lo - 1) ^ ((lo - 1) >> 1);
+            let mut v: BinVec = 0;
+            let mut t = u;
+            while t != 0 {
+                let j = t.trailing_zeros() as usize;
+                v ^= vb[j];
+                t &= t - 1;
+            }
+            let mut local: Vec<BinVec> =
+                Vec::with_capacity(((hi - lo) / 2) as usize);
+            for i in lo..hi {
+                let flip = i.trailing_zeros() as usize;
+                u ^= 1u64 << flip;
+                v ^= vb[flip];
+                if v.count_ones() & 3 == 0 {
+                    local.push(u);
+                }
+            }
+            let _ = rtx.send((idx, local));
+        }));
+        sent += 1;
+        lo = hi;
+    }
+    drop(rtx);
+    let mut slots: Vec<Option<Vec<BinVec>>> = (0..sent).map(|_| None).collect();
+    for _ in 0..sent {
+        let (idx, part) = rrx
+            .recv()
+            .expect("seeder helper dropped a Gray-walk range result");
+        slots[idx] = Some(part);
+    }
+    let mut out: Vec<BinVec> =
+        Vec::with_capacity(slots.iter().map(|s| s.as_ref().map_or(0, Vec::len)).sum());
+    for s in slots {
+        out.extend(s.expect("missing Gray-walk range result"));
+    }
+    out
+}
+
 /// Gray-code walk of `(2^L)` `Q`-coordinates, yielding those whose `F_2^N`
 /// lift has weight `≡ 0 (mod 4)`.
 ///
@@ -385,5 +606,141 @@ mod tests {
         // With only-identity gens the witt path should behave like
         // empty-gen-set: return sorted reps.
         assert_eq!(mins, vec![1, 2, 3]);
+    }
+}
+
+#[cfg(all(test, feature = "parallel"))]
+mod pooled_tests {
+    use super::*;
+    use crate::seeder_pool::SeederPool;
+
+    /// xorshift64* — deterministic, no rand dependency.
+    struct XorShift(u64);
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+    }
+
+    /// Random invertible L×L matrix over F_2 in column form, built as a
+    /// product of elementary shears/swaps applied to the identity.
+    fn random_invertible(rng: &mut XorShift, l: usize) -> Mat {
+        let mut m: Mat = (0..l).map(|i| 1u64 << i).collect();
+        for _ in 0..(4 * l) {
+            let a = (rng.next() % l as u64) as usize;
+            let b = (rng.next() % l as u64) as usize;
+            if a == b {
+                continue;
+            }
+            if rng.next() & 1 == 0 {
+                m.swap(a, b);
+            } else {
+                let mb = m[b];
+                m[a] ^= mb; // shear: col_a += col_b (stays invertible)
+            }
+        }
+        m
+    }
+
+    /// The full nonzero space `[1, 2^L)` is closed under any invertible
+    /// linear map, so it is always a valid (maximal) rep set.
+    fn full_reps(l: usize) -> Vec<BinVec> {
+        (1..(1u64 << l)).collect()
+    }
+
+    /// Brute-force orbit closure of a seed set under the generators —
+    /// independent of the BFS under test.
+    fn closure(seeds: &[BinVec], gens: &[Mat]) -> Vec<BinVec> {
+        use std::collections::BTreeSet;
+        let mut set: BTreeSet<BinVec> = seeds.iter().copied().collect();
+        let mut frontier: Vec<BinVec> = seeds.to_vec();
+        while let Some(v) = frontier.pop() {
+            for g in gens {
+                let nv = mat_apply(g, v);
+                if set.insert(nv) {
+                    frontier.push(nv);
+                }
+            }
+        }
+        set.into_iter().collect()
+    }
+
+    /// Pooled orbit-min must equal the sequential witt path EXACTLY
+    /// (Vec equality including order), across L, pool sizes, and both
+    /// the serial-level and forced-parallel-level branches.
+    #[test]
+    fn pooled_orbit_min_matches_sequential_exact() {
+        let mut rng = XorShift(0xB1F5_0001);
+        for &l in &[4usize, 8, 12, 14] {
+            for &pool_size in &[2usize, 3, 8] {
+                let pool = SeederPool::new(pool_size, 0);
+                for rep in 0..3 {
+                    let n_gens = 1 + (rng.next() % 3) as usize;
+                    let gens: Vec<Mat> =
+                        (0..n_gens).map(|_| random_invertible(&mut rng, l)).collect();
+                    let reps: Vec<BinVec> = if rep == 0 {
+                        full_reps(l)
+                    } else {
+                        let seeds: Vec<BinVec> = (0..4)
+                            .map(|_| 1 + rng.next() % ((1 << l) - 1))
+                            .collect();
+                        closure(&seeds, &gens)
+                    };
+                    let want = aut_orbit_minima_q_witt(&reps, &gens, l as u32);
+                    // Production threshold (parallel branch rarely hit
+                    // at these L) ...
+                    let got =
+                        aut_orbit_minima_q_witt_pooled(&reps, &gens, l as u32, &pool);
+                    assert_eq!(want, got, "default threshold, L={l}, pool={pool_size}");
+                    // ... and forced-parallel levels (threshold 1).
+                    let got_forced =
+                        orbit_minima_pooled_impl(&reps, &gens, l as u32, &pool, 1);
+                    assert_eq!(want, got_forced, "forced parallel, L={l}, pool={pool_size}");
+                }
+            }
+        }
+    }
+
+    /// Identity-only and empty generator sets fall back to sorted reps.
+    #[test]
+    fn pooled_orbit_min_identity_and_empty_gens() {
+        let pool = SeederPool::new(2, 0);
+        let ident: Mat = vec![1, 2, 4, 8];
+        let reps: Vec<BinVec> = vec![3, 1, 2];
+        assert_eq!(
+            aut_orbit_minima_q_witt_pooled(&reps, &[ident], 4, &pool),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            aut_orbit_minima_q_witt_pooled(&reps, &[], 4, &pool),
+            vec![1, 2, 3]
+        );
+    }
+
+    /// Pooled Gray walk must be byte-identical to the sequential one,
+    /// including emission order, across L, pool sizes, and chunk sizes.
+    #[test]
+    fn pooled_gray_walk_matches_sequential_exact() {
+        let mut rng = XorShift(0x6EA7_3A1C);
+        for &l in &[1usize, 2, 5, 9, 13, 16] {
+            for &pool_size in &[2usize, 5, 8] {
+                let pool = SeederPool::new(pool_size, 0);
+                for _ in 0..3 {
+                    let v_basis: Vec<BinVec> =
+                        (0..l).map(|_| rng.next() & 0xFFFF_FFFF).collect();
+                    let want = singular_reps_q(&v_basis);
+                    let got = singular_reps_q_pooled(&v_basis, &pool);
+                    assert_eq!(want, got, "default chunking, L={l}, pool={pool_size}");
+                    let got_small =
+                        singular_reps_pooled_impl(&v_basis, &pool, 3);
+                    assert_eq!(want, got_small, "tiny chunks, L={l}, pool={pool_size}");
+                }
+            }
+        }
     }
 }

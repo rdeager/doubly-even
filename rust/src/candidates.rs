@@ -130,6 +130,61 @@ pub fn doubly_even_candidates_q(
     })
 }
 
+/// [`doubly_even_candidates_q`] with the σ_Q heavy stages (singular-rep
+/// Gray walk + orbit-min BFS) fanned out on the seeder helper pool when
+/// the quotient dimension clears `pool.min_l` (D16 lever B). Output is
+/// identical to the sequential pipeline — see the determinism notes on
+/// [`crate::orbit::aut_orbit_minima_q_witt_pooled`] and
+/// [`crate::orbit::singular_reps_q_pooled`]. Only the parallel seeder
+/// calls this; workers stay on the sequential entry (they are already
+/// saturated).
+#[cfg(feature = "parallel")]
+pub fn doubly_even_candidates_q_pooled(
+    n: u32,
+    code_rref: &[BinVec],
+    pivots: &[u32],
+    dual_basis: &[BinVec],
+    aut_generators: &[ColPerm],
+    pool: &crate::seeder_pool::SeederPool,
+) -> Vec<BinVec> {
+    use crate::orbit::{aut_orbit_minima_q_witt_pooled, singular_reps_q_pooled};
+
+    if pivots.len() <= 1 {
+        // k = 0 / Young k = 1 closed forms — no σ_Q pipeline to pool.
+        return doubly_even_candidates_q(n, code_rref, pivots, dual_basis, aut_generators);
+    }
+    let (v_basis, pivots_v) = cq_timed!(0, q_basis(code_rref, pivots, dual_basis, n));
+    let sigma_qs = cq_timed!(
+        1,
+        aut_image_on_q(aut_generators, code_rref, pivots, &v_basis, &pivots_v)
+    );
+    let l = v_basis.len() as u32;
+    let pooled = pool.size() >= 2 && l >= pool.min_l;
+    let reps_q = cq_timed!(
+        2,
+        if pooled {
+            singular_reps_q_pooled(&v_basis, pool)
+        } else {
+            singular_reps_q(&v_basis)
+        }
+    );
+    let orbit_min = cq_timed!(
+        3,
+        if pooled {
+            aut_orbit_minima_q_witt_pooled(&reps_q, &sigma_qs, l, pool)
+        } else if use_witt_path(&sigma_qs, l) {
+            aut_orbit_minima_q_witt(&reps_q, &sigma_qs, l)
+        } else {
+            aut_orbit_minima_q_table(&reps_q, &sigma_qs, l)
+        }
+    );
+    cq_timed!(4, {
+        let mut out: Vec<BinVec> = orbit_min.iter().map(|&u| lift(u, &v_basis)).collect();
+        out.sort_unstable();
+        out
+    })
+}
+
 /// Closed-form `Aut(⟨v_ℓ⟩)`-orbit reps of doubly-even k=2 extensions, where
 /// `v_ℓ = (1)^{4ℓ}(0)^{N−4ℓ}`. Both `wt_a`, `wt_b` must be even and
 /// `(wt_a + wt_b) ≡ 0 (mod 4)`; the canonical rep takes `wt_a ≤ 2ℓ` to fold

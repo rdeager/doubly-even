@@ -311,6 +311,60 @@ Code: `rust/src/parent_rule.rs` (cascade + tie-break),
 `scripts/experimental/d15_phi_rule_check.py`; measurement harness
 `scripts/experimental/d15_phi_audit.py`.
 
+### 7. Split-frame spectrum sharing and the one-comparison reject
+
+Once the coset-spectrum rule became the default, the φ evaluation
+itself became the bottleneck — 60 % of the `N = 26` sequential wall,
+~79 % of the projected `N = 29` core-hours, because the per-candidate
+cost Θ((k+1)·2^(k+1)) multiplies an exploding candidate count. Two
+exact refinements (decisions provably bit-identical — the audit
+harness re-verifies the per-rank accept identity against the legacy
+rule on every candidate of full N = 22/24 runs) cut φ by ~2.8×:
+
+**Split-frame sharing.** Bit `k` of a frame coordinate splits the frame
+into the *C-half* — the `2^k` codewords of the parent `C`, identical
+for every sibling candidate — and the *v-half* (the coset `v + C`).
+Everything C-half-dependent is computed once per parent and shared
+across its siblings: the codeword table, weights, histogram, stratum
+lists, and (lazily, per stratum) a half-size Walsh–Hadamard transform
+`F̂_C`. The full-frame WHT then factors exactly as its last butterfly
+stage, `f̂[(u′, a)] = F̂_C[u′] + (1−2a)·Ĝ_v[u′]`, so a candidate pays
+only one `2^k`-point transform — and its weight sweep degenerates to a
+branchless XOR + popcount over the shared table, with no Gray-code
+serial dependency.
+
+**The one-comparison reject.** For any `u′ ≠ 0`, the better of the
+functional pair `(u′, 0)/(u′, 1)` scores `F̂_C[u′] + |Ĝ_v[u′]| ≥
+F̂_C[u′]`. So the per-parent constant `amax = max_{u′≠0} F̂_C[u′]`
+yields a sufficient reject test that needs **no per-candidate spectral
+work at all**: if `amax > f̂[u_C]` — and `f̂[u_C]` is free from the two
+weight histograms — some hyperplane provably beats the candidate's own.
+At `N = 24–26` this single integer comparison (plus two histogram-only
+fast paths for strata lying entirely in one half) decides ~99 % of
+first strata.
+
+A companion change parallelises the seeder's candidate generation in
+the multi-threaded kernel: the low-rank orbit-min BFS and Gray sweep
+fan out level-by-level onto a short-lived helper pool with exactly-once
+claiming on an atomic bitset (output provably identical to sequential —
+orbit closures are schedule-independent). The pool engages only on the
+large early calls (quotient dimension ≥ 22 by default) where the worker
+pool is still idle; pooling smaller calls measurably loses to
+helper-vs-worker contention.
+
+Measured same-session A/B against the coset-spectrum baseline (mean of
+3, all DFGHILM Table 3 cells verified per run): `N = 24` sequential
+9.34 → 7.80 s; `N = 26` sequential 207.1 → **126.6 s** (1.64×);
+`N = 26` parallel (t=24, d=4) 21.4 → **13.2 s** (1.62×). The
+count-anchored `N = 29` forecast drops to **1.4–2.2 h** on the same
+72-core cloud box that took 12.32 h pre-coset-spectrum.
+
+Knobs: `DOUBLY_EVEN_SEEDER_THREADS` (helper-pool size; default =
+worker count, `0`/`1` disables), `DOUBLY_EVEN_SEEDER_PAR_MIN_L`
+(default 22). Code: `rust/src/parent_rule.rs` (`PhiParentCtx`, the
+amax bound), `rust/src/seeder_pool.rs`, pooled variants in
+`rust/src/orbit.rs` / `rust/src/candidates.rs`.
+
 ## Cumulative result
 
 At `N = 22`, mean of 3 runs, parallel kernel at the recommended tuning

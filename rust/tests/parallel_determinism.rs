@@ -24,7 +24,9 @@
 
 use doubly_even_kernel::enumerate::{
     enumerate_doubly_even, enumerate_doubly_even_parallel,
+    enumerate_doubly_even_parallel_with_seeder,
 };
+use doubly_even_kernel::parent_rule::ParentRule;
 
 type Row = (Vec<u64>, u128);
 
@@ -159,8 +161,10 @@ fn parallel_with_one_thread_falls_back_to_sequential() {
     // 34–44 are the phase_timers sub-phase fields: 34–43 are timers and
     // 44 (phi_sampled_calls) depends on a process-lifetime thread-local
     // call counter, so none are run-deterministic when the feature is on.
+    // 45 (phi_ctx_ns, D16) is a timer; 46–48 (ctx_builds, s1_fastpath,
+    // killer_rejects) are deterministic counters and stay compared.
     let timing_idx: &[usize] = &[
-        9, 10, 11, 18, 20, 30, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44,
+        9, 10, 11, 18, 20, 30, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45,
     ];
     for (i, (a, b)) in stats_seq.iter().zip(stats_par.iter()).enumerate() {
         if timing_idx.contains(&i) {
@@ -189,6 +193,40 @@ fn parallel_with_one_thread_falls_back_to_sequential() {
             "per_k timing row {} length diverged",
             PER_K_TIMING_ROWS_START + i
         );
+    }
+}
+
+/// D16 lever B: the pooled-seeder σ_Q path must produce the identical
+/// output set. The default `min_l = 16` never fires at N ≤ 16
+/// (`L = N − 2k ≤ 12` for k ≥ 2), so this test forces `min_l = 2` via
+/// the env-free `_with_seeder` entry — the pooled Gray walk and pooled
+/// orbit-min BFS then execute at every reachable L.
+#[test]
+fn parallel_matches_sequential_pooled_seeder() {
+    for (n, max_k, sigma, fact) in [
+        (14u32, 7u32, SIGMA_N14.to_vec(), FACT_N14),
+        (16, 8, SIGMA_N16.to_vec(), FACT_N16),
+    ] {
+        let (out_seq, _, _) =
+            enumerate_doubly_even(n, max_k, sigma.clone(), fact);
+        let want = canonical_rows(out_seq);
+        for &nt in &[2usize, 4, 8] {
+            let (out_par, _, _) = enumerate_doubly_even_parallel_with_seeder(
+                n,
+                max_k,
+                sigma.clone(),
+                fact,
+                nt,
+                ParentRule::from_env(),
+                4, // seeder_threads
+                2, // seeder_min_l — force the pooled path at small L
+            );
+            assert_eq!(
+                want,
+                canonical_rows(out_par),
+                "pooled-seeder output diverged at N={n}, threads={nt}"
+            );
+        }
     }
 }
 

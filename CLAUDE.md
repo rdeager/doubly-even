@@ -190,30 +190,32 @@ Public docs **never use internal session labels (D5/D6/D10/D11/D13/V3/V4/V5)**.
 Those labels stay only in `/workspace/markdown/architecture/*.md` and in
 the section below.
 
-## Performance state (post-D15 coset-spectrum parent rule)
+## Performance state (post-D16 split-frame φ + pooled seeder)
 
 See `/workspace/markdown/architecture/04-optimisations.md` for the
-per-lever write-up (§D15 is the new headline lever) and
+per-lever write-up (§D15 + §D16 are the headline levers) and
 `architecture/05-retrospective.md` for the (now-amended) sign-off
 retrospective. The descriptive-name version of this is in
-`/workspace/src/docs/algorithm.md` (lever 6).
+`/workspace/src/docs/algorithm.md` (levers 6–7).
 
-Headline (post-D15, 2026-06-10, 13700K-equivalent dev container whose
+Headline (post-D16, 2026-06-10, 13700K-equivalent dev container whose
 same-session legacy controls reproduce the 13700K records within
-1–10 %; mean of 3, all Table-3 cells verified per run):
-**`N = 22` in 0.237 s** (24t d=4; legacy record 0.691 s → 2.9×;
-sequential 0.848 s vs legacy 6.48 s → **7.6×**); **`N = 24` in
-2.60 s** (24t d=5; legacy 7.98 s same-session → **3.1×**; sequential
-9.40 s vs 96.8 s → **10.3×**); **`N = 26` in 26.4 s** (24t d=5
-cap=500K; legacy 168.3 s same-session → **6.5×**). Canon-call count
-drops 15× / 32× / **87×** at N = 22 / 24 / 26 — the reduction *grows*
-with N because it cancels the calls-per-class explosion. Cumulative
-since the pre-kernel D6 baseline at `N = 22`: **~640×**
-(152 s → 0.237 s); **~1535×** vs Sage's measured 363.85 s.
-Kill-switch / A-B control: `DOUBLY_EVEN_PARENT_RULE=legacy`
-(pre-D15 numbers: N=22 0.691 s 20t / 6.64 s seq; N=24 8.90 s;
-N=26 169.8 s; N=28 61 min on c4a-72, ~$3; those cloud rows predate
-D15 — a post-D15 N ≥ 28 cloud run is the obvious next datapoint).
+1–10 %; mean of 3, all Table-3 cells verified per run; **d = 4 is now
+best at every benched N**): **`N = 22` in 0.245 s** (24t d=4;
+sequential 0.788 s); **`N = 24` in 1.67 s** (24t d=4; sequential
+7.80 s); **`N = 26` in 13.2 s** (24t d=4 cap=500K; sequential
+126.6 s). Same-session vs the plain D15 rule: N=26 **1.64× seq /
+1.62× par**, N=24 1.20× seq / 1.56× par; φ itself 2.8× (1.82 →
+0.64 µs/cand at N=24), φ wall share at N=26 seq 59.9 % → ~35 %.
+Canon-call counts unchanged from D15 (decisions identical; audit
+VERDICT GO). Cumulative since the pre-kernel D6 baseline at `N = 22`:
+**~620×** (152 s → 0.245 s); **~1485×** vs Sage's measured 363.85 s.
+Kill-switches / A-B controls: `DOUBLY_EVEN_PARENT_RULE=legacy` (whole
+rule), `DOUBLY_EVEN_SEEDER_THREADS=0` (seeder pool only). Pre-D15
+records: N=22 0.691 s 20t / 6.64 s seq; N=24 8.90 s; N=26 169.8 s;
+N=28 61 min on c4a-72, ~$3. The cloud rows predate D15+D16 — **a
+post-D16 N ≥ 28 cloud run is the obvious next datapoint** (N=29
+count-anchored forecast: **1.4–2.2 h** on c4a-72 vs 12.32 h actual).
 
 **Unmerged opt-in branches** (documented in the public README):
 - `feature/dfs-order-by-aut` (1 commit): aut_desc DFS child-ordering;
@@ -263,7 +265,11 @@ sort + first-stratum WHT) → the ranked next lever is **φ arithmetic
 volume** (share work across sibling candidates of one parent /
 cheaper first-stratum reject; 08-doc §7). σ_Q is 89.4 % orbit-min
 BFS (latency-bound, low-rank); canon is κ ≈ 0.04-and-falling — leave
-alone.
+alone. **EXECUTED same day as D16** (lever 16 below): φ 2.8×, and the
+key piece was not the planned sharing machinery but the **amax O(1)
+reject** found while implementing — one precomputed bound decides
+~99 % of first strata in a single integer compare. Lesson recorded in
+memory `[[d16-split-frame-phi]]`: bound-first, machinery second.
 
 Cumulative levers, oldest first:
 
@@ -368,6 +374,30 @@ Cumulative levers, oldest first:
     `d15_phi_audit.py` (Phase 1, κ = kept-canon-ns fraction: 0.039
     at N=24). Env `DOUBLY_EVEN_PARENT_RULE` ∈ {coset-spectrum
     (default), legacy, audit}.
+16. **D16 Split-frame φ + amax reject + pooled seeder** (2026-06-10,
+    same-day follow-on; `04-optimisations.md` §D16). (a) Per-parent
+    `PhiParentCtx` shares all C-half φ work (codeword table, weights,
+    strata, lazy half-size WHTs `F̂_C^{(w)}`) across sibling
+    candidates; the full WHT factors exactly as its last butterfly
+    stage `f̂[(u',a)] = F̂_C[u'] ± Ĝ_v[u']`. (b) **The amax O(1)
+    reject** — `max` over a pair is `F̂_C[u'] + |Ĝ_v[u']| ≥ F̂_C[u']`,
+    so the per-parent `amax_w > tc − tv` proves reject in ONE integer
+    compare; decides ~99 % of first strata (`phi_s1_fastpath`), no
+    per-candidate WHT. (c) Pooled seeder σ_Q (`rust/src/
+    seeder_pool.rs`): level-parallel orbit-min BFS + range-split Gray
+    walk, exactly-once via AtomicBitset, minima provably identical;
+    the **min_l = 22 gate is load-bearing** (pool only the idle-window
+    calls; min_l=16 measured 1.00× at d4 / 0.91× at d5 from
+    helper-vs-worker contention). Decisions bit-identical (audit
+    VERDICT GO at N=22/24, ±mass-stop). φ 2.8×; N=26 126.6 s seq /
+    13.2 s par (1.64×/1.62× over D15); N=24 par 2.60 → 1.67 s. The
+    planned "killer pre-check" (`DOUBLY_EVEN_PHI_KILLER`) is moot —
+    stats slot 48 reserved at 0. Also: mimalloc now builds with
+    `local_dynamic_tls` (initial-exec TLS made the dlopen'd wheel
+    fail imports at the glibc static-TLS surplus — keep the wheel
+    free of the STATIC_TLS ELF flag). Env: `DOUBLY_EVEN_SEEDER_
+    THREADS` (default = THREADS; 0/1 = off), `DOUBLY_EVEN_SEEDER_
+    PAR_MIN_L` (default 22).
 
 `bench.py` lives in `scripts/`; per-step JSON records are in
 `scripts/bench-results/` (gitignored). Rust microbench for
@@ -386,22 +416,29 @@ resurrected the seeder Amdahl ceiling (worker active/wall ≈ 54 % at
 d=5; the seeder's serial ranks-0–4 walk contains the low-rank σ_Q
 spike). N=26 SEQUENTIAL also needs
 `DOUBLY_EVEN_CANON_CACHE_CAP=500000` now (uncapped run was
-OOM-killed). Post-D15 N=29 on c4a-72 is priced at 3.3–5.1 h
-(count-anchored forecast, 08-doc §6) vs 12.32 h pre-D15; N=32 on a
-single 288-core box is NOT feasible without the φ lever. The two
-unmerged opt-in branches (`feature/dfs-order-by-aut`,
-`feature/dfs-speedup-bliss-pq`) were benched against the legacy rule
-and need re-validation on top of D15 before merging.
+OOM-killed). **Post-D16** N=29 on c4a-72 is priced at **1.4–2.2 h**
+(count-anchored re-fit, `post_d15_scaling_fit.py --glob
+'d16-split-phi-seq-*'`) vs 3.3–5.1 h post-D15 and 12.32 h pre-D15
+actual; N=32 single-thread ≈ 174 core-hours (φ 147) — still cluster
+territory. The φ lever (D16) has now landed; d=4 beats d=5 at every
+benched N. The two unmerged opt-in branches
+(`feature/dfs-order-by-aut`, `feature/dfs-speedup-bliss-pq`) were
+benched against the legacy rule and need re-validation on top of
+D15+D16 before merging.
 
-**Profiling instrumentation (2026-06-10 sprint):** the kernel stats
-vector is now 45 fields and per_k_stats 18 rows — per-rank timing rows
-`phi_ns/candidates_q_ns/nauty_ns` (rows 14–16) are ALWAYS-ON at zero
+**Profiling instrumentation (2026-06-10 sprint, D16 delta included):**
+the kernel stats vector is now 49 fields and per_k_stats 19 rows —
+per-rank timing rows `phi_ns/candidates_q_ns/nauty_ns` (rows 14–16)
+and `phi_ctx_ns` (row 18, a SUBSET of row 14) are ALWAYS-ON at zero
 timer cost; sub-phase splits (σ_Q 5-way, φ 5-way sampled 1-in-64 via
-portable rdtsc/cntvct in `rust/src/cycles.rs`) live behind the
+portable rdtsc/cntvct in `rust/src/cycles.rs`; φ phases re-mapped by
+D16: vhalf/members/first-stratum/wht/direct) live behind the
 `phase_timers` Cargo feature (overhead gate 1.008×/0.998× at N=22/24 —
 PASS; sampled φ mean validates to 1 % of the always-on mean). Layout
 mirror: `scripts/bench.py::KERNEL_STATS_LAYOUT` / `PER_K_STATS_ROWS`;
 bench JSONs now persist per_k_stats with sum==aggregate asserts.
+`scripts/microbench/src/phi_replay.rs` clones the PRE-D16 cascade —
+treat as historical until re-synced.
 Cache-cliff microbenches (portable x86/arm64): `scripts/microbench/`
 bins `wht_sweep`, `phi_replay`, `singular_walk`; extrapolation tool
 `scripts/experimental/post_d15_scaling_fit.py`. The dev container
@@ -442,10 +479,14 @@ the 13700K (16 physical / 24 logical) confirm:
 
 `DOUBLY_EVEN_FRONTIER_DEPTH` defaults to 4 and rarely needs
 tweaking. ~~At N ≥ 24 a value of 5 is better~~ — **obsolete post-D15**:
-the 2026-06-10 re-tune measured d=4 > d=5 at N=26 (22.2 s vs 27.1 s,
-t=24) because the seeder's serial span, not load balance, is now the
-binding constraint (08-doc §5). Use d=4 until the seeder fix lands;
-re-verify d for N ≥ 28.
+the 2026-06-10 re-tune measured d=4 > d=5 at N=26, and post-D16 the
+gap widened (13.2 s d4 vs 19.9 s d5 at t=24, pooled seeder on). Use
+d=4 everywhere; re-verify d on the first N ≥ 28 cloud run. The D16
+seeder pool (`DOUBLY_EVEN_SEEDER_THREADS`, default on;
+`DOUBLY_EVEN_SEEDER_PAR_MIN_L`, default 22) is a no-op at N ≤ 24 by
+construction (L < 22 everywhere) and worth ~6 % at N=26 d4; don't
+lower min_l — pooling past the idle window loses to helper-vs-worker
+contention.
 
 For `N ≥ 26`, also cap the per-worker canon cache via
 `DOUBLY_EVEN_CANON_CACHE_CAP` (default 1,000,000 entries; lower if

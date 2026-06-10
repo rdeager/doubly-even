@@ -30,6 +30,8 @@ pub mod parent_rule;
 pub mod permutations;
 pub mod qd_graph;
 pub mod quotient;
+#[cfg(feature = "parallel")]
+pub mod seeder_pool;
 pub mod streaming;
 pub mod subspace_orbit;
 pub mod types;

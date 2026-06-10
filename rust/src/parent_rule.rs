@@ -1,4 +1,5 @@
 //! D15 coset-spectrum parent rule: the φ cascade and its tie-break.
+//! D16 split-frame evaluation: per-parent work shared across siblings.
 //!
 //! ### The rule
 //!
@@ -35,10 +36,10 @@
 //! candidate pays a full canon call before the parent test starts — and
 //! 93.4 % of those calls (N=22) end in a cheap weight-enumerator reject.
 //! Under the φ rule the reject decision usually needs no canon call at
-//! all: one Gray-code sweep of `D`'s `2^(k+1)` codewords plus a
-//! Walsh–Hadamard transform per weight stratum, evaluated lazily until
-//! the lex comparison resolves. Canon is paid only on accepts (needed
-//! anyway for `Aut(D)` / mass / recursion) and on exact ties.
+//! all: weight data plus per-stratum Walsh–Hadamard transforms, evaluated
+//! lazily until the lex comparison resolves. Canon is paid only on
+//! accepts (needed anyway for `Aut(D)` / mass / recursion) and on exact
+//! ties.
 //!
 //! ### Evaluation frame
 //!
@@ -47,6 +48,41 @@
 //! the last-coordinate functional `u_C = 1 << k`, and coordinate vectors
 //! are plain `u16` indices. Candidate generation guarantees `v ∉ C`
 //! (nonzero coset reps), so the frame rows are independent.
+//!
+//! ### Split-frame sharing (D16)
+//!
+//! Bit `k` of a coordinate `x = (x', b)` splits the frame into the
+//! **C-half** (`b = 0`: the `2^k` codewords of `C`, identical for every
+//! sibling candidate of one parent) and the **v-half** (`b = 1`: the
+//! coset `v + C`). All C-half data — codeword table, weights, histogram,
+//! stratum lists, per-stratum WHTs — is computed ONCE per parent in a
+//! [`PhiParentCtx`] and shared across the sibling candidates. Per
+//! candidate only the v-half remains: `2^k` XOR+popcounts (branchless,
+//! no Gray serial dependency), a histogram, and at most one half-size
+//! WHT per stratum.
+//!
+//! The decomposition is exact — it is literally the last butterfly stage
+//! of the full WHT factored out. For the stratum indicator `f = f_C + f_v`
+//! and a functional `u = (u', a)`:
+//!
+//! ```text
+//! f̂[(u', a)] = F̂_C[u'] + (1 − 2a) · Ĝ_v[u']
+//! ```
+//!
+//! where `F̂_C`/`Ĝ_v` are the `2^k`-point WHTs of the C-half / v-half
+//! indicators. In particular `f̂[u_C] = f̂[(0, 1)] = |T_w ∩ C| −
+//! |T_w ∩ (v+C)|` is free from the two histograms, which yields two
+//! exact first-stratum fast paths with no per-candidate spectral work:
+//!
+//! - **coset-only stratum** (`|T_w ∩ C| = 0`, `k ≥ 1`): some `(u', a)`
+//!   pair always beats `u_C` — for any `u' ≠ 0`,
+//!   `max(f̂[(u',0)], f̂[(u',1)]) = |Ĝ_v[u']| ≥ 0 > f̂[u_C]` — so the
+//!   candidate REJECTS in O(1).
+//! - **C-only stratum** (`|T_w ∩ (v+C)| = 0`): `Ĝ_v ≡ 0`, so
+//!   `f̂[(u', a)] = F̂_C[u'] ≤ F̂_C[0] = f̂[u_C]`: `u_C` always survives,
+//!   and the surviving argmin set is `E_w ∪ {u_C} ∪ (u_C + E_w)` with
+//!   `E_w = {u' ≠ 0 : F̂_C[u'] = |T_w ∩ C|}` precomputed per parent.
+//!   Empty `E_w` ⇒ ACCEPT-UNIQUE in O(1).
 
 use std::cell::RefCell;
 
@@ -54,11 +90,11 @@ use crate::linalg::{apply_permutation, row_reduce};
 use crate::types::BinVec;
 
 /// Default child-rank cap for the φ cascade. The per-candidate WHT costs
-/// `(k+1)·2^(k+1)` adds, which passes the ~30 µs canon call it replaces
-/// around `k+1 ≈ 14–16`; children of rank ≥ 14 only exist at `N ≥ 30`,
-/// where falling back to the legacy rule above the cap is the right
-/// trade. Per-rank rule mixing is sound: rank is iso-invariant and
-/// McKay's induction is local to one child rank.
+/// `k·2^k` adds post-D16 (was `(k+1)·2^(k+1)`), which passes the ~30 µs
+/// canon call it replaces around `k+1 ≈ 14–16`; children of rank ≥ 14
+/// only exist at `N ≥ 30`, where falling back to the legacy rule above
+/// the cap is the right trade. Per-rank rule mixing is sound: rank is
+/// iso-invariant and McKay's induction is local to one child rank.
 pub const DEFAULT_PHI_MAX_RANK: u32 = 13;
 
 /// Active parent-selection rule for one enumeration run.
@@ -112,9 +148,9 @@ impl ParentRule {
 }
 
 /// Above this argmin-set size, a stratum is filtered by a fresh
-/// Walsh–Hadamard transform (cost `(k+1)·2^(k+1)` adds); at or below it,
-/// per-functional direct parity counting over the stratum members is
-/// cheaper. Crossover is flat in the 32–128 range; 64 measured fine.
+/// Walsh–Hadamard transform (cost `k·2^k` adds post-D16); at or below
+/// it, per-functional direct parity counting over the stratum members
+/// is cheaper. Crossover is flat in the 32–128 range; 64 measured fine.
 const DIRECT_THRESHOLD: usize = 64;
 
 /// Outcome of the φ cascade for one candidate augmentation `(C, v)`.
@@ -136,26 +172,290 @@ pub(crate) struct PhiResult {
     /// Number of weight strata evaluated before the cascade resolved.
     pub(crate) strata_used: u32,
     /// `|M|` at the decision point (1 for AcceptUnique; the surviving
-    /// tie-set size for Tie; the set size that excluded `u_C` for Reject).
+    /// tie-set size for Tie). For REJECTS decided at the first stratum
+    /// the early-exit scan no longer materialises the beating argmin
+    /// set, so a witness count of 1 is reported (pre-D16 this was the
+    /// full beating-set size). Diagnostic mean only — nothing gates on
+    /// it.
     pub(crate) m_size_at_decision: u32,
+    /// True when the first-stratum decision needed no per-candidate WHT
+    /// (k = 0 frame, coset-only stratum, or C-only stratum fast path).
+    pub(crate) s1_fastpath: bool,
 }
 
-/// Grow-only per-thread scratch (D13-V4 house pattern, cf.
+/// Per-parent shared φ context (D16). Holds everything that depends only
+/// on the parent `C`: the C-half codeword table, weights, histogram and
+/// stratum lists (built eagerly), plus per-stratum `2^k`-point WHTs
+/// `F̂_C^{(w)}` and the C-only-stratum argmax sets `E_w` (built lazily on
+/// first use of stratum `w`). One ctx serves every sibling candidate of
+/// one parent; backing boxes are recycled through a thread-local pool.
+///
+/// Memory: at the default rank cap (`k ≤ 12`, `h = 4096`) the eager part
+/// is ~46 KB and each cached stratum WHT adds 16 KB; one live ctx per
+/// recursion level per thread (sizes geometric in k), so the per-thread
+/// pool footprint stays a few hundred KB.
+pub(crate) struct PhiParentCtx {
+    /// Frame size `k + 1`; the half size is `h = 1 << (kp1 - 1)`.
+    kp1: usize,
+    /// Copy of the parent rows the ctx was built from (slot-misuse guard).
+    parent_rows: Vec<BinVec>,
+    /// C-half codeword per plain coordinate `x' ∈ [0, h)`.
+    cwords: Vec<BinVec>,
+    /// `wt_c[x'] = wt(cwords[x'])`.
+    wt_c: Vec<u8>,
+    /// C-half weight histogram (`counts_c[0] == 1`, the zero word).
+    counts_c: [u32; 65],
+    /// Counting-sort offsets into `sorted_c` per weight.
+    start_c: [u32; 66],
+    /// C-half coordinates sorted by weight (stratum member lists).
+    sorted_c: Vec<u16>,
+    /// Lazy per-stratum `2^k`-point WHT of the C-half indicator at
+    /// weight `w`; valid iff bit `w` of `fhat_built` is set.
+    fhat_c: Vec<Vec<i32>>,
+    /// Lazy `E_w = {u' ≠ 0 : F̂_C^{(w)}[u'] = counts_c[w]}` (ascending),
+    /// built together with `fhat_c[w]`; only populated when
+    /// `counts_c[w] > 0` (it is the C-only-stratum surviving set).
+    e_set: Vec<Vec<u16>>,
+    /// Lazy `amax_w = max_{u' ≠ 0} F̂_C^{(w)}[u']`, built with `fhat_c[w]`.
+    /// Powers the O(1) first-stratum reject: `max(f̂[(u',0)], f̂[(u',1)])
+    /// = F̂_C[u'] + |Ĝ_v[u']| ≥ F̂_C[u']`, so `amax_w > tc − tv` proves
+    /// some functional beats `u_C` before any per-candidate spectral
+    /// work. (i32::MIN when the half has a single coordinate.)
+    amax: Vec<i32>,
+    /// Bit `w` set ⇔ `fhat_c[w]` / `e_set[w]` are valid for this parent.
+    fhat_built: u128,
+    /// Build time (eager + lazy) accumulated since the last drain, and
+    /// the number of eager builds. Drained by `WorkerState` into
+    /// `stats_phi_ctx_ns` / `stats_phi_ctx_builds`.
+    ns: u64,
+    builds: u64,
+}
+
+impl Default for PhiParentCtx {
+    fn default() -> Self {
+        Self {
+            kp1: 0,
+            parent_rows: Vec::new(),
+            cwords: Vec::new(),
+            wt_c: Vec::new(),
+            counts_c: [0; 65],
+            start_c: [0; 66],
+            sorted_c: Vec::new(),
+            fhat_c: Vec::new(),
+            e_set: Vec::new(),
+            amax: Vec::new(),
+            fhat_built: 0,
+            ns: 0,
+            builds: 0,
+        }
+    }
+}
+
+impl PhiParentCtx {
+    /// (Re)build the eager C-half tables for parent `c_rref`. Buffers
+    /// are grow-only across pool recycling.
+    fn build(&mut self, c_rref: &[BinVec]) {
+        let t0 = std::time::Instant::now();
+        let kp1 = c_rref.len() + 1;
+        debug_assert!(kp1 <= 16, "φ cascade needs k+1 ≤ 16 (u16 coordinate vectors)");
+        let h = 1usize << (kp1 - 1);
+        self.kp1 = kp1;
+        self.parent_rows.clear();
+        self.parent_rows.extend_from_slice(c_rref);
+        // Gray-code sweep over C's k rows: codeword per plain coordinate.
+        self.cwords.clear();
+        self.cwords.resize(h, 0);
+        let mut cur: BinVec = 0;
+        for i in 1..h {
+            let flip = i.trailing_zeros() as usize;
+            cur ^= c_rref[flip];
+            self.cwords[i ^ (i >> 1)] = cur;
+        }
+        // Weights (separate pass: branchless, auto-vectorises) + histogram.
+        self.wt_c.clear();
+        self.wt_c.resize(h, 0);
+        for x in 0..h {
+            self.wt_c[x] = self.cwords[x].count_ones() as u8;
+        }
+        self.counts_c = [0u32; 65];
+        for x in 0..h {
+            self.counts_c[self.wt_c[x] as usize] += 1;
+        }
+        debug_assert_eq!(
+            self.counts_c[0], 1,
+            "dependent parent rows: C's RREF rows must be independent"
+        );
+        // Counting sort into per-weight stratum member lists.
+        self.start_c[0] = 0;
+        for w in 0..65 {
+            self.start_c[w + 1] = self.start_c[w] + self.counts_c[w];
+        }
+        self.sorted_c.clear();
+        self.sorted_c.resize(h, 0);
+        let mut cursor = self.start_c;
+        for x in 0..h {
+            let w = self.wt_c[x] as usize;
+            self.sorted_c[cursor[w] as usize] = x as u16;
+            cursor[w] += 1;
+        }
+        self.fhat_built = 0;
+        if self.fhat_c.is_empty() {
+            self.fhat_c = vec![Vec::new(); 65];
+            self.e_set = vec![Vec::new(); 65];
+            self.amax = vec![i32::MIN; 65];
+        }
+        self.builds += 1;
+        self.ns += t0.elapsed().as_nanos() as u64;
+    }
+
+    /// Ensure `F̂_C^{(w)}` (and `E_w`) are built for stratum `w`.
+    fn ensure_fhat(&mut self, w: usize) {
+        if self.fhat_built >> w & 1 == 1 {
+            return;
+        }
+        let t0 = std::time::Instant::now();
+        let h = 1usize << (self.kp1 - 1);
+        let f = &mut self.fhat_c[w];
+        f.clear();
+        f.resize(h, 0);
+        let b = self.start_c[w] as usize;
+        let e = b + self.counts_c[w] as usize;
+        for &x in &self.sorted_c[b..e] {
+            f[x as usize] = 1;
+        }
+        wht_in_place(f);
+        let es = &mut self.e_set[w];
+        es.clear();
+        let tc = self.counts_c[w] as i32;
+        let mut amax = i32::MIN;
+        for (u, &fu) in f.iter().enumerate().take(h).skip(1) {
+            amax = amax.max(fu);
+            if tc > 0 && fu == tc {
+                es.push(u as u16);
+            }
+        }
+        self.amax[w] = amax;
+        self.fhat_built |= 1 << w;
+        self.ns += t0.elapsed().as_nanos() as u64;
+    }
+}
+
+thread_local! {
+    /// Recycled ctx boxes (LIFO; one live ctx per recursion level, so
+    /// the pool depth tracks the recursion depth).
+    static PHI_CTX_POOL: RefCell<Vec<Box<PhiParentCtx>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// One parent's φ context slot. A stack local in each `traverse` /
+/// `traverse_seed` frame, created before the candidate loop and passed
+/// by `&mut` into `test_candidate`; the ctx materialises lazily on the
+/// first φ-tested candidate (so legacy-rule runs and mass-stopped loops
+/// never pay a build) and returns to the thread-local pool on drop.
+pub(crate) struct PhiParentSlot {
+    ctx: Option<Box<PhiParentCtx>>,
+}
+
+impl PhiParentSlot {
+    pub(crate) fn new() -> Self {
+        Self { ctx: None }
+    }
+
+    fn ensure(&mut self, c_rref: &[BinVec]) -> &mut PhiParentCtx {
+        if self.ctx.is_none() {
+            let mut b = PHI_CTX_POOL
+                .with(|p| p.borrow_mut().pop())
+                .unwrap_or_default();
+            b.ns = 0;
+            b.builds = 0;
+            b.build(c_rref);
+            self.ctx = Some(b);
+        }
+        let ctx = self.ctx.as_mut().expect("ctx ensured above");
+        debug_assert_eq!(
+            ctx.parent_rows.as_slice(),
+            c_rref,
+            "PhiParentSlot reused across different parents"
+        );
+        ctx
+    }
+
+    /// Drain `(build_ns, builds)` accumulated since the last drain.
+    pub(crate) fn take_build_stats(&mut self) -> (u64, u64) {
+        match self.ctx.as_mut() {
+            Some(c) => {
+                let r = (c.ns, c.builds);
+                c.ns = 0;
+                c.builds = 0;
+                r
+            }
+            None => (0, 0),
+        }
+    }
+}
+
+impl Drop for PhiParentSlot {
+    fn drop(&mut self) {
+        if let Some(ctx) = self.ctx.take() {
+            PHI_CTX_POOL.with(|p| p.borrow_mut().push(ctx));
+        }
+    }
+}
+
+/// Grow-only per-thread per-candidate scratch (D13-V4 house pattern, cf.
 /// `canon::CanonScratch`): zero heap allocation per call after warmup,
 /// except the rare `Tie` return which clones its small argmin set.
-#[derive(Default)]
 struct PhiScratch {
-    /// Frame rows `[C's RREF rows, v]`.
-    rows: Vec<BinVec>,
-    /// `wt[x]` = Hamming weight of the codeword with coordinate vector
-    /// `x` in the frame basis. Indexed by plain (non-Gray) coordinates.
-    wt: Vec<u8>,
-    /// WHT buffer. `i32` is required: values reach ±2^(k+1) (≤ 65536).
-    f: Vec<i32>,
-    /// Coordinate vectors counting-sorted by weight (stratum member lists).
-    sorted_idx: Vec<u16>,
+    /// `wt_v[x'] = wt(cwords[x'] ^ v)` — v-half weights, plain-indexed.
+    wt_v: Vec<u8>,
+    /// Half-size WHT buffer (`Ĝ_v`). `i32`: values reach ±2^k ≤ 32768.
+    g: Vec<i32>,
+    /// v-half coordinates counting-sorted by weight. Built lazily, once
+    /// per candidate, on the first later-stratum DIRECT filter (the only
+    /// consumer of explicit member lists; the WHT paths fill their
+    /// indicator branchlessly from `wt_v` instead).
+    sorted_v: Vec<u16>,
+    start_v: [u32; 66],
+    sorted_v_built: bool,
+    /// Direct-path parity counts (one per surviving functional).
+    counts_buf: Vec<u32>,
     /// Running argmin set of functionals.
     m_buf: Vec<u16>,
+}
+
+impl Default for PhiScratch {
+    fn default() -> Self {
+        Self {
+            wt_v: Vec::new(),
+            g: Vec::new(),
+            sorted_v: Vec::new(),
+            start_v: [0; 66],
+            sorted_v_built: false,
+            counts_buf: Vec::new(),
+            m_buf: Vec::new(),
+        }
+    }
+}
+
+impl PhiScratch {
+    /// Lazy per-candidate counting sort of the v-half coords by weight.
+    fn ensure_sorted_v(&mut self, h: usize, counts_v: &[u32; 65]) {
+        if self.sorted_v_built {
+            return;
+        }
+        self.start_v[0] = 0;
+        for w in 0..65 {
+            self.start_v[w + 1] = self.start_v[w] + counts_v[w];
+        }
+        self.sorted_v.clear();
+        self.sorted_v.resize(h, 0);
+        let mut cursor = self.start_v;
+        for (x, &wt) in self.wt_v.iter().enumerate().take(h) {
+            let w = wt as usize;
+            self.sorted_v[cursor[w] as usize] = x as u16;
+            cursor[w] += 1;
+        }
+        self.sorted_v_built = true;
+    }
 }
 
 thread_local! {
@@ -163,13 +463,14 @@ thread_local! {
 }
 
 /// Sampled φ sub-phase timing (`phase_timers` builds only). A φ cascade
-/// runs 1–4 µs; five `Instant` pairs per call would distort the very
-/// share being measured, so every 64th call on each thread is fully
-/// timed via the ~6–9 ns cycle counter (`crate::cycles`) and the rest
-/// pay one thread-local counter increment. The driver takes the sample
-/// via [`phi_sample::take_last`] right after the cascade returns and
-/// reweights per rank at analysis time (φ cost correlates strongly
-/// with k — see `stats_phi_sampled_calls_by_k`). Diagnostic ±10 %.
+/// runs well under a microsecond post-D16; five `Instant` pairs per call
+/// would distort the very share being measured, so every 64th call on
+/// each thread is fully timed via the ~6–9 ns cycle counter
+/// (`crate::cycles`) and the rest pay one thread-local counter
+/// increment. The driver takes the sample via [`phi_sample::take_last`]
+/// right after the cascade returns and reweights per rank at analysis
+/// time (φ cost correlates strongly with k — see
+/// `stats_phi_sampled_calls_by_k`). Diagnostic ±10 %.
 #[cfg(feature = "phase_timers")]
 pub(crate) mod phi_sample {
     use std::cell::Cell;
@@ -209,8 +510,11 @@ pub(crate) mod phi_sample {
 
 /// Per-cascade phase clock: no-op for unsampled calls and on
 /// non-`phase_timers` builds (zero-sized, fully compiled away).
-/// Phase indices: 0 frame+Gray sweep, 1 counting sort, 2 first-stratum
-/// argmin, 3 later-stratum WHT, 4 later-stratum direct parity.
+/// Post-D16 phase indices: 0 v-half weights+histogram, 1 first-stratum
+/// member collection, 2 first-stratum decision (fast paths / Ĝ WHT +
+/// fused scan), 3 later-stratum WHT, 4 later-stratum direct parity.
+/// (Pre-D16: 0 frame+Gray sweep, 1 counting sort, 2 first-stratum
+/// argmin — phases 0–2 cover the same prefix work, re-split.)
 #[cfg(feature = "phase_timers")]
 struct PhaseClock {
     sampled: bool,
@@ -267,83 +571,160 @@ impl PhaseClock {
     fn commit(&self) {}
 }
 
-/// Evaluate the φ cascade for candidate `v` against parent RREF `c_rref`.
+/// Evaluate the φ cascade for candidate `v` against parent RREF `c_rref`,
+/// building a throwaway per-parent ctx. Compat entry for unit tests and
+/// one-off callers; the enumeration hot path uses [`phi_cascade_shared`]
+/// with a per-parent slot so the C-half work amortises across siblings.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn phi_cascade(c_rref: &[BinVec], v: BinVec, n: u32) -> PhiResult {
-    PHI_SCRATCH.with(|cell| phi_cascade_with(&mut cell.borrow_mut(), c_rref, v, n))
+    let mut slot = PhiParentSlot::new();
+    phi_cascade_shared(&mut slot, c_rref, v, n)
 }
 
-fn phi_cascade_with(s: &mut PhiScratch, c_rref: &[BinVec], v: BinVec, n: u32) -> PhiResult {
+/// Evaluate the φ cascade for candidate `v` of the parent owning `slot`
+/// (D16 split-frame path). The slot's ctx is built on first use and
+/// shared by every sibling candidate tested through the same slot.
+pub(crate) fn phi_cascade_shared(
+    slot: &mut PhiParentSlot,
+    c_rref: &[BinVec],
+    v: BinVec,
+    n: u32,
+) -> PhiResult {
+    let ctx = slot.ensure(c_rref);
+    PHI_SCRATCH.with(|cell| phi_cascade_split(&mut cell.borrow_mut(), ctx, v, n))
+}
+
+fn phi_cascade_split(
+    s: &mut PhiScratch,
+    ctx: &mut PhiParentCtx,
+    v: BinVec,
+    n: u32,
+) -> PhiResult {
     let mut clock = PhaseClock::start();
-    let kp1 = c_rref.len() + 1;
-    debug_assert!(kp1 <= 16, "φ cascade needs k+1 ≤ 16 (u16 coordinate vectors)");
-    let size = 1usize << kp1;
+    let kp1 = ctx.kp1;
+    let h = 1usize << (kp1 - 1);
     let u_c: u16 = 1 << (kp1 - 1);
 
-    s.rows.clear();
-    s.rows.extend_from_slice(c_rref);
-    s.rows.push(v);
-
-    // One Gray-code sweep of all 2^(k+1) codewords: weight per coordinate
-    // vector + per-weight counts. Same arithmetic volume as the two
-    // weight_enum() passes the legacy reject path pays.
-    s.wt.clear();
-    s.wt.resize(size, 0);
-    let mut counts = [0u32; 65];
-    counts[0] = 1; // the zero codeword (coordinate 0)
-    let mut cur: BinVec = 0;
-    for i in 1..size {
-        let flip = i.trailing_zeros() as usize;
-        cur ^= s.rows[flip];
-        let w = cur.count_ones() as usize;
-        s.wt[i ^ (i >> 1)] = w as u8;
-        counts[w] += 1;
+    // Phase 0: v-half weights + histogram. Branchless XOR+popcount over
+    // the shared C-half codeword table — no Gray serial dependency, so
+    // LLVM auto-vectorises the weight loop. The histogram accumulates
+    // into 4 interleaved sub-counts to break the store-to-load
+    // dependency chain on repeated weights (classic histogram split).
+    s.wt_v.clear();
+    s.wt_v.resize(h, 0);
+    s.sorted_v_built = false;
+    for (wt, &cw) in s.wt_v.iter_mut().zip(ctx.cwords.iter()) {
+        *wt = (cw ^ v).count_ones() as u8;
     }
-    debug_assert_eq!(
-        counts[0], 1,
-        "dependent frame rows: candidate v must lie outside C"
-    );
+    let mut counts4 = [[0u32; 65]; 4];
+    let mut chunks = s.wt_v.chunks_exact(4);
+    for c in &mut chunks {
+        counts4[0][c[0] as usize] += 1;
+        counts4[1][c[1] as usize] += 1;
+        counts4[2][c[2] as usize] += 1;
+        counts4[3][c[3] as usize] += 1;
+    }
+    for &wt in chunks.remainder() {
+        counts4[0][wt as usize] += 1;
+    }
+    let mut counts_v = [0u32; 65];
+    for w in 0..65 {
+        counts_v[w] = counts4[0][w] + counts4[1][w] + counts4[2][w] + counts4[3][w];
+    }
+    debug_assert_eq!(counts_v[0], 0, "candidate v must lie outside C");
     clock.mark(0);
 
-    // Counting sort: stratum member lists without per-stratum rescans.
-    let mut start = [0u32; 66];
-    for w in 0..65 {
-        start[w + 1] = start[w] + counts[w];
-    }
-    s.sorted_idx.clear();
-    s.sorted_idx.resize(size, 0);
-    let mut cursor = start;
-    for idx in 0..size {
-        let w = s.wt[idx] as usize;
-        s.sorted_idx[cursor[w] as usize] = idx as u16;
-        cursor[w] += 1;
-    }
-    clock.mark(1);
-
-    // Lazy lex cascade, strata ascending. (Doubly-even inputs only have
-    // strata at multiples of 4; the loop is weight-agnostic so unit tests
-    // can exercise arbitrary frames.)
+    // Lazy lex cascade, strata ascending over D = C ∪ (v+C). (Doubly-even
+    // inputs only have strata at multiples of 4; the loop is
+    // weight-agnostic so unit tests can exercise arbitrary frames.)
     let mut strata_used = 0u32;
     let mut first = true;
+    let mut s1_fastpath = false;
     let n_cap = (n as usize).min(64);
     for w in 1..=n_cap {
-        if counts[w] == 0 {
+        let tc = ctx.counts_c[w];
+        let tv = counts_v[w];
+        if tc + tv == 0 {
             continue;
         }
-        let t_begin = start[w] as usize;
-        let t_end = t_begin + counts[w] as usize;
         strata_used += 1;
 
         let u_c_in = if first {
             first = false;
-            let r = filter_first_stratum(s, size, t_begin, t_end, u_c);
-            clock.mark(2);
-            r
+            // k = 0 frame: u_C is the only nonzero functional.
+            if h == 1 {
+                clock.mark(2);
+                clock.commit();
+                return PhiResult {
+                    outcome: PhiOutcome::AcceptUnique,
+                    strata_used,
+                    m_size_at_decision: 1,
+                    s1_fastpath: true,
+                };
+            }
+            // Coset-only first stratum: O(1) exact reject (see module
+            // doc — some pair (u', a) always beats u_C).
+            if tc == 0 {
+                clock.mark(2);
+                clock.commit();
+                return PhiResult {
+                    outcome: PhiOutcome::Reject,
+                    strata_used,
+                    m_size_at_decision: 1,
+                    s1_fastpath: true,
+                };
+            }
+            // C-only first stratum: u_C always survives; the argmin set
+            // comes from the per-parent E_w. Empty ⇒ unique accept.
+            if tv == 0 {
+                s1_fastpath = true;
+                ctx.ensure_fhat(w);
+                let e = &ctx.e_set[w];
+                if e.is_empty() {
+                    clock.mark(2);
+                    clock.commit();
+                    return PhiResult {
+                        outcome: PhiOutcome::AcceptUnique,
+                        strata_used,
+                        m_size_at_decision: 1,
+                        s1_fastpath: true,
+                    };
+                }
+                // Ascending-u order: (u', 0) for u' ∈ E, then u_C, then
+                // (u', 1) — byte-identical to the pre-D16 argmin set.
+                s.m_buf.clear();
+                s.m_buf.extend_from_slice(e);
+                s.m_buf.push(u_c);
+                for &u in e.iter() {
+                    s.m_buf.push(u_c + u);
+                }
+                clock.mark(2);
+                true
+            } else {
+                // General first stratum (tc ≥ 1, tv ≥ 1). O(1) exact
+                // reject first: max over the pair (u',0)/(u',1) is
+                // F̂_C[u'] + |Ĝ_v[u']| ≥ F̂_C[u'], so a per-parent amax
+                // beating f̂[u_C] = tc − tv settles the candidate with
+                // no v-half spectral work.
+                ctx.ensure_fhat(w);
+                if ctx.amax[w] > tc as i32 - tv as i32 {
+                    clock.mark(2);
+                    clock.commit();
+                    return PhiResult {
+                        outcome: PhiOutcome::Reject,
+                        strata_used,
+                        m_size_at_decision: 1,
+                        s1_fastpath: true,
+                    };
+                }
+                first_stratum_split(s, ctx, &mut clock, w, tc, tv, u_c)
+            }
         } else if s.m_buf.len() > DIRECT_THRESHOLD {
-            let r = filter_by_wht(s, size, t_begin, t_end, u_c);
+            let r = later_stratum_wht_split(s, ctx, w, tc, tv, u_c);
             clock.mark(3);
             r
         } else {
-            let r = filter_direct(s, t_begin, t_end, u_c);
+            let r = later_stratum_direct_split(s, ctx, w, &counts_v, u_c);
             clock.mark(4);
             r
         };
@@ -353,7 +734,10 @@ fn phi_cascade_with(s: &mut PhiScratch, c_rref: &[BinVec], v: BinVec, n: u32) ->
             return PhiResult {
                 outcome: PhiOutcome::Reject,
                 strata_used,
-                m_size_at_decision: s.m_buf.len() as u32,
+                // First-stratum early-exit rejects leave m_buf cleared;
+                // report the witness count (see field doc).
+                m_size_at_decision: s.m_buf.len().max(1) as u32,
+                s1_fastpath,
             };
         }
         if s.m_buf.len() == 1 {
@@ -362,6 +746,7 @@ fn phi_cascade_with(s: &mut PhiScratch, c_rref: &[BinVec], v: BinVec, n: u32) ->
                 outcome: PhiOutcome::AcceptUnique,
                 strata_used,
                 m_size_at_decision: 1,
+                s1_fastpath,
             };
         }
     }
@@ -370,12 +755,199 @@ fn phi_cascade_with(s: &mut PhiScratch, c_rref: &[BinVec], v: BinVec, n: u32) ->
         outcome: PhiOutcome::Tie(s.m_buf.clone()),
         strata_used,
         m_size_at_decision: s.m_buf.len() as u32,
+        s1_fastpath,
     }
+}
+
+/// First stratum, general case (`tc ≥ 1`, `tv ≥ 1`, `h ≥ 2`): argmin over
+/// ALL nonzero functionals (u = 0 is excluded from the start — φ(0) ≡ 0
+/// would always win and reject everything). Returns whether `u_c`
+/// survived; on a reject `s.m_buf` is left cleared (early exit).
+fn first_stratum_split(
+    s: &mut PhiScratch,
+    ctx: &mut PhiParentCtx,
+    clock: &mut PhaseClock,
+    w: usize,
+    tc: u32,
+    tv: u32,
+    u_c: u16,
+) -> bool {
+    let h = 1usize << (ctx.kp1 - 1);
+    s.m_buf.clear();
+    // Phase 1: v-half stratum indicator, filled branchlessly from the
+    // weight table (cmp+select vectorises; no member list needed).
+    s.g.clear();
+    s.g.resize(h, 0);
+    for (gx, &wt) in s.g.iter_mut().zip(s.wt_v.iter()) {
+        *gx = (wt as usize == w) as i32;
+    }
+    clock.mark(1);
+    // Phase 2: Ĝ_v (half-size WHT of the v-half indicator) + the fused
+    // argmax scan (F̂_C is already ensured by the caller's amax check).
+    wht_in_place(&mut s.g);
+    let fc = ctx.fhat_c[w].as_slice();
+    let g = s.g.as_slice();
+    // f̂[u_C] = f̂[(0, 1)] = F̂_C[0] − Ĝ_v[0] = tc − tv: free.
+    let target = tc as i32 - tv as i32;
+    // Fused scan with early exit: max(f̂[(u',0)], f̂[(u',1)]) =
+    // F̂_C[u'] + |Ĝ_v[u']|, blockwise so the inner max auto-vectorises
+    // and the reject branch costs one compare per block.
+    let mut i = 1usize;
+    while i < h {
+        let end = (i + 256).min(h);
+        let mut mx = i32::MIN;
+        for u in i..end {
+            let val = fc[u] + g[u].abs();
+            mx = mx.max(val);
+        }
+        if mx > target {
+            clock.mark(2);
+            return false;
+        }
+        i = end;
+    }
+    // u_C attains the max. Build the argmin set in ascending-u order
+    // (a = 0 half first, then a = 1) — byte-identical to pre-D16.
+    for (u, (&f, &gv)) in fc.iter().zip(g.iter()).enumerate().take(h).skip(1) {
+        if f + gv == target {
+            s.m_buf.push(u as u16);
+        }
+    }
+    for (u, (&f, &gv)) in fc.iter().zip(g.iter()).enumerate().take(h) {
+        if f - gv == target {
+            s.m_buf.push(u_c + u as u16);
+        }
+    }
+    debug_assert!(s.m_buf.contains(&u_c), "u_C must be in its own argmin set");
+    clock.mark(2);
+    true
+}
+
+/// Later stratum, large argmin set: half-size WHT of the v-half stratum
+/// indicator, combined with the per-parent `F̂_C^{(w)}`, max restricted
+/// to `m_buf`.
+fn later_stratum_wht_split(
+    s: &mut PhiScratch,
+    ctx: &mut PhiParentCtx,
+    w: usize,
+    tc: u32,
+    tv: u32,
+    u_c: u16,
+) -> bool {
+    let h = 1usize << (ctx.kp1 - 1);
+    let hmask = u_c - 1;
+    s.g.clear();
+    s.g.resize(h, 0);
+    if tv > 0 {
+        for (gx, &wt) in s.g.iter_mut().zip(s.wt_v.iter()) {
+            *gx = (wt as usize == w) as i32;
+        }
+        wht_in_place(&mut s.g);
+    }
+    // C-half spectrum: skip the (all-zero) WHT when the stratum has no
+    // C-half members.
+    let fc: Option<&[i32]> = if tc > 0 {
+        ctx.ensure_fhat(w);
+        Some(ctx.fhat_c[w].as_slice())
+    } else {
+        None
+    };
+    let g = std::mem::take(&mut s.g);
+    let val = |u: u16| -> i32 {
+        let up = (u & hmask) as usize;
+        let f = fc.map_or(0, |f| f[up]);
+        if u & u_c == 0 {
+            f + g[up]
+        } else {
+            f - g[up]
+        }
+    };
+    let mut best = i32::MIN;
+    for &u in &s.m_buf {
+        best = best.max(val(u));
+    }
+    s.m_buf.retain(|&u| val(u) == best);
+    s.g = g;
+    s.m_buf.contains(&u_c)
+}
+
+/// Later stratum, small argmin set: per-functional parity counting over
+/// the split stratum members (`|M|·|T_w|` ops, cheaper than a WHT here).
+/// `φ_w((u', a)) = pC(u') + (a = 0 ? pV(u') : tv − pV(u'))` where `pC` /
+/// `pV` count odd-parity members in the C-half / v-half lists; `pC`
+/// reads `(tc − F̂_C[u'])/2` for free whenever the stratum WHT happens
+/// to be cached already.
+fn later_stratum_direct_split(
+    s: &mut PhiScratch,
+    ctx: &mut PhiParentCtx,
+    w: usize,
+    counts_v: &[u32; 65],
+    u_c: u16,
+) -> bool {
+    let h = 1usize << (ctx.kp1 - 1);
+    let hmask = u_c - 1;
+    let tv = counts_v[w];
+    // The direct path is the only consumer of explicit v-half member
+    // lists; build the per-candidate counting sort once, lazily.
+    s.ensure_sorted_v(h, counts_v);
+    let vb = s.start_v[w] as usize;
+    let mv = &s.sorted_v[vb..vb + tv as usize];
+    let tc = ctx.counts_c[w];
+    // Read pC from the cached stratum WHT when present; BUILD it when
+    // this single call's C-half parity work would already exceed the
+    // WHT cost (k·h) — later siblings of the same parent then get
+    // O(1) pC for free. Cost-only heuristic: decisions are unchanged.
+    let kh = (ctx.kp1 as u32 - 1) * (1u32 << (ctx.kp1 - 1));
+    if ctx.fhat_built >> w & 1 == 0 && s.m_buf.len() as u32 * tc > kh {
+        ctx.ensure_fhat(w);
+    }
+    let b = ctx.start_c[w] as usize;
+    let e = b + ctx.counts_c[w] as usize;
+    let mc = &ctx.sorted_c[b..e];
+    let fc: Option<&[i32]> = if ctx.fhat_built >> w & 1 == 1 {
+        Some(ctx.fhat_c[w].as_slice())
+    } else {
+        None
+    };
+    s.counts_buf.clear();
+    let mut best = u32::MAX;
+    for &u in &s.m_buf {
+        let up = u & hmask;
+        let p_c: u32 = match fc {
+            Some(f) => ((tc as i32 - f[up as usize]) / 2) as u32,
+            None => mc
+                .iter()
+                .filter(|&&x| (up & x).count_ones() & 1 == 1)
+                .count() as u32,
+        };
+        let p_v: u32 = mv
+            .iter()
+            .filter(|&&x| (up & x).count_ones() & 1 == 1)
+            .count() as u32;
+        let c = p_c + if u & u_c == 0 { p_v } else { tv - p_v };
+        s.counts_buf.push(c);
+        best = best.min(c);
+    }
+    let counts = std::mem::take(&mut s.counts_buf);
+    let mut i = 0;
+    s.m_buf.retain(|_| {
+        let keep = counts[i] == best;
+        i += 1;
+        keep
+    });
+    s.counts_buf = counts;
+    s.m_buf.contains(&u_c)
 }
 
 /// In-place Walsh–Hadamard transform: `f̂[u] = Σ_x f[x]·(−1)^(u·x)`.
 /// For a stratum indicator, `f̂[u] = |T_w| − 2·φ_w(u)`, so minimising
 /// `φ_w` over `u` is maximising `f̂`.
+///
+/// D16 exactness note: applying this to the two halves of a split frame
+/// and combining with `f̂[(u', a)] = F̂_C[u'] + (1−2a)·Ĝ_v[u']` is
+/// literally the last butterfly stage (`h = 2^k`) factored out — the
+/// split path computes the identical integers the full-frame transform
+/// would.
 fn wht_in_place(f: &mut [i32]) {
     let size = f.len();
     let mut h = 1;
@@ -392,89 +964,6 @@ fn wht_in_place(f: &mut [i32]) {
         }
         h <<= 1;
     }
-}
-
-fn fill_indicator(s: &mut PhiScratch, size: usize, t_begin: usize, t_end: usize) {
-    s.f.clear();
-    s.f.resize(size, 0);
-    for i in t_begin..t_end {
-        s.f[s.sorted_idx[i] as usize] = 1;
-    }
-    wht_in_place(&mut s.f);
-}
-
-/// First stratum: argmin over ALL nonzero functionals (u = 0 is excluded
-/// from the start — φ(0) ≡ 0 would always win and reject everything).
-/// Returns whether `u_c` survived.
-fn filter_first_stratum(
-    s: &mut PhiScratch,
-    size: usize,
-    t_begin: usize,
-    t_end: usize,
-    u_c: u16,
-) -> bool {
-    fill_indicator(s, size, t_begin, t_end);
-    let mut best = i32::MIN;
-    for u in 1..size {
-        if s.f[u] > best {
-            best = s.f[u];
-        }
-    }
-    s.m_buf.clear();
-    let mut u_c_in = false;
-    for u in 1..size {
-        if s.f[u] == best {
-            s.m_buf.push(u as u16);
-            u_c_in |= u as u16 == u_c;
-        }
-    }
-    u_c_in
-}
-
-/// Later stratum, large argmin set: fresh WHT, max restricted to `m_buf`.
-fn filter_by_wht(
-    s: &mut PhiScratch,
-    size: usize,
-    t_begin: usize,
-    t_end: usize,
-    u_c: u16,
-) -> bool {
-    fill_indicator(s, size, t_begin, t_end);
-    let mut best = i32::MIN;
-    for &u in &s.m_buf {
-        if s.f[u as usize] > best {
-            best = s.f[u as usize];
-        }
-    }
-    let f = std::mem::take(&mut s.f);
-    s.m_buf.retain(|&u| f[u as usize] == best);
-    s.f = f;
-    s.m_buf.contains(&u_c)
-}
-
-/// Later stratum, small argmin set: per-functional parity counting over
-/// the stratum members (`|M|·|T_w|` ops, cheaper than a WHT here).
-fn filter_direct(s: &mut PhiScratch, t_begin: usize, t_end: usize, u_c: u16) -> bool {
-    let members = &s.sorted_idx[t_begin..t_end];
-    let mut best = u32::MAX;
-    let mut counts: Vec<u32> = Vec::with_capacity(s.m_buf.len());
-    for &u in &s.m_buf {
-        let mut c = 0u32;
-        for &x in members {
-            c += ((u & x).count_ones() & 1) as u32;
-        }
-        counts.push(c);
-        if c < best {
-            best = c;
-        }
-    }
-    let mut i = 0;
-    s.m_buf.retain(|_| {
-        let keep = counts[i] == best;
-        i += 1;
-        keep
-    });
-    s.m_buf.contains(&u_c)
 }
 
 /// σ_D tie-break: among the argmin functionals `m_set`, select the
@@ -733,6 +1222,161 @@ mod tests {
                 members.len() as i32 - 2 * direct,
                 "WHT mismatch at u={u}"
             );
+        }
+    }
+
+    /// Tiny deterministic PRNG (xorshift64*) — tests must not pull in a
+    /// rand dependency, and seeds are fixed for reproducibility.
+    struct XorShift(u64);
+    impl XorShift {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+    }
+
+    /// D16 decomposition identity: the split-frame combine
+    /// `f̂[(u', a)] = F̂_C[u'] + (1−2a)·Ĝ_v[u']` must reproduce the
+    /// full-frame WHT exactly, for every stratum of random frames.
+    #[test]
+    fn split_wht_combine_matches_full_frame_wht() {
+        let mut rng = XorShift(0x5EED_D16);
+        for kp1 in 1..=8usize {
+            for _ in 0..20 {
+                let n = 16u32;
+                let mask = (1u64 << n) - 1;
+                // Random independent frame rows via row_reduce.
+                let raw: Vec<BinVec> =
+                    (0..kp1).map(|_| rng.next() & mask).collect();
+                let (rref, _) = row_reduce(&raw, n);
+                if rref.len() < kp1 {
+                    continue; // dependent sample; skip
+                }
+                let c_rref = &rref[..kp1 - 1];
+                let v = rref[kp1 - 1];
+                let h = 1usize << (kp1 - 1);
+                let size = 2 * h;
+                // Full-frame weights (Gray sweep, as pre-D16).
+                let mut rows: Vec<BinVec> = c_rref.to_vec();
+                rows.push(v);
+                let mut wt = vec![0u8; size];
+                let mut cur: BinVec = 0;
+                for i in 1..size {
+                    let flip = i.trailing_zeros() as usize;
+                    cur ^= rows[flip];
+                    wt[i ^ (i >> 1)] = cur.count_ones() as u8;
+                }
+                for w in 1..=(n as usize) {
+                    let mut full = vec![0i32; size];
+                    let mut f_c = vec![0i32; h];
+                    let mut g_v = vec![0i32; h];
+                    let mut any = false;
+                    for x in 0..size {
+                        if wt[x] as usize == w {
+                            any = true;
+                            full[x] = 1;
+                            if x < h {
+                                f_c[x] = 1;
+                            } else {
+                                g_v[x - h] = 1;
+                            }
+                        }
+                    }
+                    if !any {
+                        continue;
+                    }
+                    wht_in_place(&mut full);
+                    wht_in_place(&mut f_c);
+                    wht_in_place(&mut g_v);
+                    for up in 0..h {
+                        assert_eq!(full[up], f_c[up] + g_v[up], "a=0 combine");
+                        assert_eq!(full[h + up], f_c[up] - g_v[up], "a=1 combine");
+                    }
+                }
+            }
+        }
+    }
+
+    /// D16 property test: the shared-ctx cascade must agree with the
+    /// brute-force reference on random frames across all frame sizes,
+    /// including the fast-path edge cases (coset-only / C-only first
+    /// strata arise naturally in random frames).
+    #[test]
+    fn random_frames_match_brute_force() {
+        let mut rng = XorShift(0xD16_CA5CADE);
+        // (kp1, reps): brute force is O(4^kp1·kp1), so taper the count.
+        let plan: &[(usize, usize)] =
+            &[(1, 60), (2, 120), (3, 200), (4, 200), (5, 150), (6, 120), (7, 60), (8, 40), (9, 16), (10, 8)];
+        let mut checked = 0u32;
+        for &(kp1, reps) in plan {
+            let mut done = 0;
+            let mut attempts = 0;
+            while done < reps && attempts < reps * 10 {
+                attempts += 1;
+                // Mix of small and larger n so strata land on diverse
+                // weights (including weight collisions across halves).
+                let n = [8u32, 12, 16, 24][(rng.next() % 4) as usize];
+                let mask = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
+                let raw: Vec<BinVec> = (0..kp1).map(|_| rng.next() & mask).collect();
+                let (rref, _) = row_reduce(&raw, n);
+                if rref.len() < kp1 {
+                    continue;
+                }
+                let c_rref: Vec<BinVec> = rref[..kp1 - 1].to_vec();
+                let v = rref[kp1 - 1];
+                check_against_reference(&c_rref, v, n);
+                done += 1;
+                checked += 1;
+            }
+            assert!(done > 0, "no independent samples at kp1={kp1}");
+        }
+        assert!(checked > 500, "property test too small: {checked}");
+    }
+
+    /// D16 staleness test: many sibling candidates evaluated through ONE
+    /// shared slot must each agree with a fresh per-call cascade — this
+    /// is the test that catches stale lazy caches (`fhat_c` / `e_set`
+    /// leaking across strata or parents).
+    #[test]
+    fn shared_slot_agrees_with_fresh_cascade_across_siblings() {
+        let mut rng = XorShift(0x51B1_1265);
+        let n = 16u32;
+        let mask = (1u64 << n) - 1;
+        for _ in 0..40 {
+            let kp1 = 2 + (rng.next() % 5) as usize; // 2..=6
+            let raw: Vec<BinVec> = (0..kp1).map(|_| rng.next() & mask).collect();
+            let (rref, _) = row_reduce(&raw, n);
+            if rref.len() < kp1 {
+                continue;
+            }
+            let c_rref: Vec<BinVec> = rref[..kp1 - 1].to_vec();
+            // Generate sibling candidates: random vectors outside C.
+            let mut slot = PhiParentSlot::new();
+            let mut tested = 0;
+            while tested < 25 {
+                let cand = rng.next() & mask;
+                let mut probe: Vec<BinVec> = c_rref.clone();
+                probe.push(cand);
+                let (pr, _) = row_reduce(&probe, n);
+                if pr.len() < kp1 || cand == 0 {
+                    continue; // cand ∈ C (dependent) — not a valid frame
+                }
+                tested += 1;
+                let shared = phi_cascade_shared(&mut slot, &c_rref, cand, n);
+                let fresh = phi_cascade(&c_rref, cand, n);
+                assert_eq!(shared.strata_used, fresh.strata_used);
+                assert_eq!(shared.m_size_at_decision, fresh.m_size_at_decision);
+                let key = |r: PhiResult| match r.outcome {
+                    PhiOutcome::Reject => (0u8, Vec::new()),
+                    PhiOutcome::AcceptUnique => (1u8, Vec::new()),
+                    PhiOutcome::Tie(m) => (2u8, m), // order must match too
+                };
+                assert_eq!(key(shared), key(fresh));
+            }
         }
     }
 }
