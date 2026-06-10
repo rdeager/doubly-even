@@ -240,6 +240,93 @@ mod tests {
     use super::*;
     use crate::permutations::dual_basis as compute_dual_basis;
 
+    /// Dump REAL σ_Q inputs `(n, k, l, v_basis, sigma_qs)` for every
+    /// rank-2/3 parent at N = 26, 27 — the seeder-exclusive ranks whose
+    /// orbit-min BFS dominates the parallel seeder span (timeline capture
+    /// 2026-06-10). The `orbit_probe` microbench replays these instead of
+    /// random-GL synthetics: real aut groups are small permutation-induced
+    /// subgroups with many tiny orbits, and restructure verdicts on
+    /// random-GL inputs (few giant orbits) would not transfer.
+    ///
+    /// Not a test of anything — quarantined behind `#[ignore]` so the
+    /// suite stays fast. Run explicitly:
+    ///
+    /// ```sh
+    /// cargo test --release dump_sigma_inputs -- --ignored --nocapture
+    /// ```
+    ///
+    /// Output: one line-oriented text file per parent under
+    /// `scripts/bench-results/sigma-inputs/` (gitignored). `reps_q` is
+    /// NOT dumped — the replay regenerates it with its `singular_reps_q`
+    /// clone, keeping files < 1 KB each.
+    ///
+    /// σ(N, k) and N! constants from `doubly_even.spec.mass.gaborit_sigma`.
+    #[test]
+    #[ignore]
+    fn dump_sigma_inputs_n26_n27() {
+        use std::io::Write;
+
+        let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../scripts/bench-results/sigma-inputs");
+        std::fs::create_dir_all(&out_dir).expect("create sigma-inputs dir");
+
+        let cases: [(u32, [u128; 4], u128); 2] = [
+            (
+                26,
+                [1, 16_777_215, 23_456_241_068_715, 3_513_661_139_803_975_875],
+                403_291_461_126_605_635_584_000_000,
+            ),
+            (
+                27,
+                [1, 33_550_335, 93_790_621_315_755, 28_085_293_383_818_511_555],
+                10_888_869_450_418_352_160_768_000_000,
+            ),
+        ];
+        for (n, sigma, fact) in cases {
+            let (out, _stats, _per_k) =
+                crate::enumerate::enumerate_doubly_even(n, 3, sigma.to_vec(), fact);
+            let mut idx_by_k = [0usize; 4];
+            for e in &out {
+                let k = e.rref.len();
+                if k < 2 {
+                    continue;
+                }
+                let (rref, pivots) = crate::linalg::row_reduce(&e.rref, n);
+                debug_assert_eq!(rref, e.rref, "emitted basis must already be RREF");
+                let dual = crate::permutations::dual_basis(&rref, &pivots, n);
+                let (v_basis, pivots_v) = crate::quotient::q_basis(&rref, &pivots, &dual, n);
+                let sigma_qs = crate::quotient::aut_image_on_q(
+                    &e.aut_generators,
+                    &rref,
+                    &pivots,
+                    &v_basis,
+                    &pivots_v,
+                );
+                let l = v_basis.len();
+                assert_eq!(l as u32, n - 2 * k as u32, "L != N - 2k");
+                let idx = idx_by_k[k];
+                idx_by_k[k] += 1;
+                let path = out_dir.join(format!("n{n}-k{k}-p{idx:03}.txt"));
+                let mut f = std::fs::File::create(&path).expect("create dump file");
+                writeln!(f, "n {n}").unwrap();
+                writeln!(f, "k {k}").unwrap();
+                writeln!(f, "l {l}").unwrap();
+                writeln!(f, "aut_order {}", e.aut_order).unwrap();
+                let vb: Vec<String> = v_basis.iter().map(|w| format!("{w:x}")).collect();
+                writeln!(f, "v_basis {}", vb.join(" ")).unwrap();
+                writeln!(f, "gens {}", sigma_qs.len()).unwrap();
+                for g in &sigma_qs {
+                    let cols: Vec<String> = g.iter().map(|w| format!("{w:x}")).collect();
+                    writeln!(f, "gen {}", cols.join(" ")).unwrap();
+                }
+            }
+            println!(
+                "N={n}: dumped {} rank-2 + {} rank-3 parents",
+                idx_by_k[2], idx_by_k[3]
+            );
+        }
+    }
+
     /// Run the post-fast-path generic pipeline directly.
     fn generic_candidates(
         n: u32,

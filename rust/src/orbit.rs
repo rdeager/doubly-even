@@ -41,6 +41,101 @@ fn is_identity_mat(m: &[BinVec]) -> bool {
     true
 }
 
+/// Minimum quotient dimension for the method-of-four-Russians BFS body
+/// (pre-SIMD sprint item 4, 2026-06-10). Table build costs
+/// `gens × ceil(L/8) × 256` XORs; the BFS computes `gens × ~2^(L-2)`
+/// images (the singular set is group-invariant and ~1/4 of `F_2^L`, and
+/// the closure visits all of it), so at `L = 14` the build is ≤ 1/5 of
+/// the image count and amortizes safely. Below the threshold the legacy
+/// `mat_apply` walk stays — both bodies produce byte-identical minima,
+/// the gate is purely a cost trade.
+const M4R_MIN_L: u32 = 14;
+
+/// Frontier-chunk length for the gen-major m4r level expansion: one
+/// generator's tables (`ceil(L/8) × 2 KB ≤ 8 KB`) stay L1-resident
+/// across a chunk while the chunk itself stays small enough that the
+/// probe working set doesn't thrash.
+const M4R_CHUNK: usize = 1024;
+
+/// Method-of-four-Russians tables for one generator: `tables[c][b]` is
+/// the image of the chunk-`c` byte value `b` (bits `8c..8c+8` of the
+/// input), so `σ_Q · x = XOR_c tables[c][byte_c(x)]` — `ceil(L/8)` L1
+/// loads + XORs per image instead of a `popcount(x)`-step chained
+/// ctz/XOR walk ([`mat_apply`]). Measured 1.84–1.94× on the whole BFS
+/// against the real rank-2/3 inputs at N = 26/27
+/// (`scripts/microbench/src/orbit_probe.rs`; the probes are L2-resident
+/// at those L, so the walk's serial arithmetic dominates the call).
+fn m4r_build<M: AsRef<[BinVec]>>(gens: &[M], l: u32) -> Vec<Vec<[BinVec; 256]>> {
+    let n_chunks = (l as usize).div_ceil(8);
+    gens.iter()
+        .map(|g| {
+            let m = g.as_ref();
+            let mut tables = vec![[0u64; 256]; n_chunks];
+            for (c, t) in tables.iter_mut().enumerate() {
+                let base = c * 8;
+                let width = (l as usize - base).min(8);
+                for b in 1usize..1 << width {
+                    t[b] = t[b & (b - 1)] ^ m[base + b.trailing_zeros() as usize];
+                }
+            }
+            tables
+        })
+        .collect()
+}
+
+/// Apply one generator's m4r tables to `x`.
+#[inline]
+fn m4r_apply(tables: &[[BinVec; 256]], x: BinVec) -> BinVec {
+    let mut out: BinVec = 0;
+    for (c, t) in tables.iter().enumerate() {
+        out ^= t[((x >> (c * 8)) & 0xff) as usize];
+    }
+    out
+}
+
+/// m4r BFS body shared by [`aut_orbit_minima_q_witt`] (and the serial
+/// levels of the pooled variant). GEN-MAJOR over frontier chunks: probe
+/// order within a level differs from the legacy element-major loop, but
+/// the set of newly-seen elements per level is `images(level) \ seen` —
+/// independent of probe order — so the orbit closure and the
+/// ascending-rep minima scan are byte-identical to the legacy body
+/// (same argument as the pooled variant's determinism note).
+fn orbit_minima_m4r(
+    reps_sorted: &[BinVec],
+    tables: &[Vec<[BinVec; 256]>],
+    l: u32,
+) -> Vec<BinVec> {
+    let universe = 1usize << l;
+    let mut seen = FixedBitSet::with_capacity(universe);
+    let mut minima: Vec<BinVec> = Vec::new();
+    let cap = reps_sorted.len();
+    let mut queue: Vec<BinVec> = Vec::with_capacity(cap);
+    let mut next: Vec<BinVec> = Vec::with_capacity(cap);
+    for &v in reps_sorted {
+        if seen.put(v as usize) {
+            continue;
+        }
+        minima.push(v);
+        queue.clear();
+        queue.push(v);
+        while !queue.is_empty() {
+            next.clear();
+            for chunk in queue.chunks(M4R_CHUNK) {
+                for t in tables {
+                    for &current in chunk {
+                        let new_v = m4r_apply(t, current);
+                        if !seen.put(new_v as usize) {
+                            next.push(new_v);
+                        }
+                    }
+                }
+            }
+            std::mem::swap(&mut queue, &mut next);
+        }
+    }
+    minima
+}
+
 /// Precompute `table[u] = σ_Q · u` for every `u ∈ [0, 2^L)`.
 ///
 /// Built in Gray-code order — each entry costs one XOR vs. the previous,
@@ -153,13 +248,24 @@ pub fn aut_orbit_minima_q_witt(
     }
     let mut reps_sorted = reps_q.to_vec();
     reps_sorted.sort_unstable();
+    if l >= M4R_MIN_L {
+        let tables = m4r_build(&gens, l);
+        return orbit_minima_m4r(&reps_sorted, &tables, l);
+    }
+    orbit_minima_walk(&reps_sorted, &gens, l)
+}
+
+/// Legacy BFS body — element-major `mat_apply` walk. Kept for `L <`
+/// [`M4R_MIN_L`] (where the m4r table build doesn't amortize) and as the
+/// byte-equality oracle for the m4r body in tests.
+fn orbit_minima_walk(reps_sorted: &[BinVec], gens: &[&Mat], l: u32) -> Vec<BinVec> {
     let universe = 1usize << l;
     let mut seen = FixedBitSet::with_capacity(universe);
     let mut minima: Vec<BinVec> = Vec::new();
-    let cap = reps_q.len();
+    let cap = reps_sorted.len();
     let mut queue: Vec<BinVec> = Vec::with_capacity(cap);
     let mut next: Vec<BinVec> = Vec::with_capacity(cap);
-    for &v in &reps_sorted {
+    for &v in reps_sorted {
         if seen.contains(v as usize) {
             continue;
         }
@@ -170,7 +276,7 @@ pub fn aut_orbit_minima_q_witt(
         while !queue.is_empty() {
             next.clear();
             for &current in &queue {
-                for g in &gens {
+                for g in gens {
                     let new_v = mat_apply(g, current);
                     if !seen.contains(new_v as usize) {
                         seen.insert(new_v as usize);
@@ -240,6 +346,12 @@ fn orbit_minima_pooled_impl(
     reps_sorted.sort_unstable();
     let universe = 1usize << l;
     let seen = Arc::new(AtomicBitset::new(universe));
+    // m4r tables (read-only, shared with the helper ranges). The pooled
+    // entry only runs at L ≥ min_l ≥ 22 in production, so the tables are
+    // always built there; the threshold only matters for the forced
+    // small-L unit tests, which exercise the legacy `mat_apply` arm.
+    let m4r: Option<Arc<Vec<Vec<[BinVec; 256]>>>> =
+        (l >= M4R_MIN_L).then(|| Arc::new(m4r_build(&gens, l)));
     let gens = Arc::new(gens);
     let mut minima: Vec<BinVec> = Vec::new();
     let mut queue: Vec<BinVec> = Vec::with_capacity(reps_q.len());
@@ -256,11 +368,24 @@ fn orbit_minima_pooled_impl(
             if queue.len() < par_level_min || pool.size() < 2 {
                 // Small level: expand serially (same atomic bitset).
                 next.clear();
-                for &current in &queue {
-                    for g in gens.iter() {
-                        let new_v = mat_apply(g, current);
-                        if seen.claim(new_v as usize) {
-                            next.push(new_v);
+                if let Some(tables) = m4r.as_deref() {
+                    for chunk in queue.chunks(M4R_CHUNK) {
+                        for t in tables {
+                            for &current in chunk {
+                                let new_v = m4r_apply(t, current);
+                                if seen.claim(new_v as usize) {
+                                    next.push(new_v);
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for &current in &queue {
+                        for g in gens.iter() {
+                            let new_v = mat_apply(g, current);
+                            if seen.claim(new_v as usize) {
+                                next.push(new_v);
+                            }
                         }
                     }
                 }
@@ -282,16 +407,30 @@ fn orbit_minima_pooled_impl(
                     let hi = (lo + per).min(frontier.len());
                     let frontier = Arc::clone(&frontier);
                     let gens = Arc::clone(&gens);
+                    let m4r = m4r.clone();
                     let seen = Arc::clone(&seen);
                     let rtx = rtx.clone();
                     let idx = sent;
                     pool.execute(Box::new(move || {
                         let mut local: Vec<BinVec> = Vec::new();
-                        for &current in &frontier[lo..hi] {
-                            for g in gens.iter() {
-                                let new_v = mat_apply(g, current);
-                                if seen.claim(new_v as usize) {
-                                    local.push(new_v);
+                        if let Some(tables) = m4r.as_deref() {
+                            for chunk in frontier[lo..hi].chunks(M4R_CHUNK) {
+                                for t in tables {
+                                    for &current in chunk {
+                                        let new_v = m4r_apply(t, current);
+                                        if seen.claim(new_v as usize) {
+                                            local.push(new_v);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            for &current in &frontier[lo..hi] {
+                                for g in gens.iter() {
+                                    let new_v = mat_apply(g, current);
+                                    if seen.claim(new_v as usize) {
+                                        local.push(new_v);
+                                    }
                                 }
                             }
                         }
@@ -446,6 +585,79 @@ mod tests {
     fn singular_reps_empty_v_basis() {
         let out = singular_reps_q(&[]);
         assert!(out.is_empty());
+    }
+
+    /// xorshift64* — deterministic, no rand dependency (the pooled test
+    /// module has its own copy; this one runs on default features).
+    struct XorShift64(u64);
+    impl XorShift64 {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+    }
+
+    /// Random invertible L×L column matrix (shears + swaps on identity).
+    fn rand_gl(rng: &mut XorShift64, l: usize) -> Mat {
+        let mut m: Mat = (0..l).map(|i| 1u64 << i).collect();
+        for _ in 0..(4 * l) {
+            let a = (rng.next() % l as u64) as usize;
+            let b = (rng.next() % l as u64) as usize;
+            if a == b {
+                continue;
+            }
+            if rng.next() & 1 == 0 {
+                m.swap(a, b);
+            } else {
+                let mb = m[b];
+                m[a] ^= mb;
+            }
+        }
+        m
+    }
+
+    /// The m4r BFS body must be byte-identical to the legacy walk —
+    /// same minima Vec, same order — across L values straddling
+    /// `M4R_MIN_L`, generator counts, and rep-set shapes. Also pins the
+    /// public entry's gate: `aut_orbit_minima_q_witt` at `L ≥ M4R_MIN_L`
+    /// (m4r path) must equal the legacy body's output.
+    #[test]
+    fn m4r_body_matches_legacy_walk_exactly() {
+        let mut rng = XorShift64(0x0517_ACED);
+        for &l in &[10usize, 13, 14, 16, 18] {
+            for &n_gens in &[1usize, 4, 12] {
+                let gens_owned: Vec<Mat> =
+                    (0..n_gens).map(|_| rand_gl(&mut rng, l)).collect();
+                let gens: Vec<&Mat> =
+                    gens_owned.iter().filter(|m| !is_identity_mat(m)).collect();
+                if gens.is_empty() {
+                    continue;
+                }
+                // Random rep subset (~1/4 of the space) plus the full
+                // nonzero space — both must agree between bodies.
+                let mask = (1u64 << l) - 1;
+                let mut subset: Vec<BinVec> = (0..(1usize << l) / 4)
+                    .map(|_| rng.next() & mask)
+                    .filter(|&v| v != 0)
+                    .collect();
+                subset.sort_unstable();
+                subset.dedup();
+                let full: Vec<BinVec> = (1..(1u64 << l)).collect();
+                for reps in [&subset, &full] {
+                    let want = orbit_minima_walk(reps, &gens, l as u32);
+                    let tables = m4r_build(&gens, l as u32);
+                    let got = orbit_minima_m4r(reps, &tables, l as u32);
+                    assert_eq!(want, got, "m4r != walk at L={l}, gens={n_gens}");
+                    let via_entry =
+                        aut_orbit_minima_q_witt(reps, &gens_owned, l as u32);
+                    assert_eq!(want, via_entry, "entry gate at L={l}, gens={n_gens}");
+                }
+            }
+        }
     }
 
     /// `L = 1` with `v_basis = (e_0,)`: only u=1 ⇒ lift = e_0 (weight 1, not ≡ 0 mod 4) ⇒ no output.

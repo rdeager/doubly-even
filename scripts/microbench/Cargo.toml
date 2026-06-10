@@ -46,3 +46,7 @@ nauty-Traces-sys = { version = "0.11", default-features = false, features = ["bu
 lto = "thin"
 codegen-units = 1
 debug = true
+
+[[bin]]
+name = "orbit_probe"
+path = "src/orbit_probe.rs"
