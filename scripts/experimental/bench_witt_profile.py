@@ -60,9 +60,11 @@ def profile_one(N: int) -> dict:
     wall_s = time.perf_counter() - t0
     wall_ns = int(wall_s * 1e9)
 
-    if len(stats) != 22:
+    # Stats vector is append-only (22 fields at the time this script was
+    # written; later kernels appended Q6 + D15 fields).
+    if len(stats) < 22:
         raise RuntimeError(
-            f"expected stats length 22 (Phase 1 rejection-rate kernel), got {len(stats)}. "
+            f"expected stats length >= 22 (Phase 1 rejection-rate kernel), got {len(stats)}. "
             f"Did you rebuild with `maturin develop --release` after the instrumentation?"
         )
 

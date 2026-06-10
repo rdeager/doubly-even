@@ -152,9 +152,11 @@ fn parallel_with_one_thread_falls_back_to_sequential() {
         1,
     );
     assert_eq!(canonical_rows(out_seq), canonical_rows(out_par));
-    // Indices 9, 10, 11, 18, 20 in the stats vector are *_ns timers and
-    // are inherently noisy; compare the deterministic counters only.
-    let timing_idx: &[usize] = &[9, 10, 11, 18, 20];
+    // Indices 9, 10, 11, 18, 20, 30, 33 in the stats vector are *_ns
+    // timers and are inherently noisy; compare the deterministic
+    // counters only. (30 = phi_ns, 33 = nauty_ns_kept — both 0 unless
+    // DOUBLY_EVEN_PARENT_RULE=audit, but excluded for future-proofing.)
+    let timing_idx: &[usize] = &[9, 10, 11, 18, 20, 30, 33];
     for (i, (a, b)) in stats_seq.iter().zip(stats_par.iter()).enumerate() {
         if timing_idx.contains(&i) {
             continue;

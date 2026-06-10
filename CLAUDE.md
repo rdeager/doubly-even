@@ -190,24 +190,30 @@ Public docs **never use internal session labels (D5/D6/D10/D11/D13/V3/V4/V5)**.
 Those labels stay only in `/workspace/markdown/architecture/*.md` and in
 the section below.
 
-## Performance state (post-D13-V5 + N = 28 cloud)
+## Performance state (post-D15 coset-spectrum parent rule)
 
 See `/workspace/markdown/architecture/04-optimisations.md` for the
-per-lever write-up and `architecture/05-retrospective.md` for the
-sign-off retrospective. The descriptive-name version of this is in
-`/workspace/src/docs/algorithm.md`.
+per-lever write-up (§D15 is the new headline lever) and
+`architecture/05-retrospective.md` for the (now-amended) sign-off
+retrospective. The descriptive-name version of this is in
+`/workspace/src/docs/algorithm.md` (lever 6).
 
-Headline (post-D13-V5, post-N=28 cloud, 2026-05-22, 13700K):
-**~220× cumulative at `N = 22`** since the pre-kernel D6 baseline
-(152 s → 0.691 s parallel-20t); **> 880×** since the pre-Q_C original
-baseline. Parallel kernel: `N = 20` in 0.22 s; **`N = 22` in 0.691 s**
-(20 threads, depth=4, mean of 3); **`N = 24` in 8.90 s** (24 threads,
-depth=5); **`N = 26` in 169.8 s** (24 threads, depth=5, cap=500K).
-**N = 28 in 61 min on GCP c4a-standard-72** (72 threads, depth=5,
-cap=300K, ~$3 of compute, 21,505,546 classes, all DFGHILM Table 3
-cells agree). Sequential at `N = 22` is **6.64 s** post-V4. We beat
-Sage's `self_orthogonal_binary_codes` by **~525× end-to-end at
-`N = 22`** (Sage 363.85 s, single-threaded).
+Headline (post-D15, 2026-06-10, 13700K-equivalent dev container whose
+same-session legacy controls reproduce the 13700K records within
+1–10 %; mean of 3, all Table-3 cells verified per run):
+**`N = 22` in 0.237 s** (24t d=4; legacy record 0.691 s → 2.9×;
+sequential 0.848 s vs legacy 6.48 s → **7.6×**); **`N = 24` in
+2.60 s** (24t d=5; legacy 7.98 s same-session → **3.1×**; sequential
+9.40 s vs 96.8 s → **10.3×**); **`N = 26` in 26.4 s** (24t d=5
+cap=500K; legacy 168.3 s same-session → **6.5×**). Canon-call count
+drops 15× / 32× / **87×** at N = 22 / 24 / 26 — the reduction *grows*
+with N because it cancels the calls-per-class explosion. Cumulative
+since the pre-kernel D6 baseline at `N = 22`: **~640×**
+(152 s → 0.237 s); **~1535×** vs Sage's measured 363.85 s.
+Kill-switch / A-B control: `DOUBLY_EVEN_PARENT_RULE=legacy`
+(pre-D15 numbers: N=22 0.691 s 20t / 6.64 s seq; N=24 8.90 s;
+N=26 169.8 s; N=28 61 min on c4a-72, ~$3; those cloud rows predate
+D15 — a post-D15 N ≥ 28 cloud run is the obvious next datapoint).
 
 **Unmerged opt-in branches** (documented in the public README):
 - `feature/dfs-order-by-aut` (1 commit): aut_desc DFS child-ordering;
@@ -219,9 +225,35 @@ Sage's `self_orthogonal_binary_codes` by **~525× end-to-end at
 
 Scaling forecast for `N ≥ 28` lives at
 `/workspace/markdown/architecture/06-scaling-frontier.md`: N=28
-reachable today (~1 hr at 20 threads), N=29 needs the streaming-
-output refactor (1–2 days), N=30 needs streaming + ≥256 GB RAM or
-a small cluster.
+reproduced 2026-05-21 on c4a-72 in 61 min; N=29 reproduced
+2026-05-23 on the same platform in 12.32 hr (239,465,540 classes,
+~$35 compute) using the streaming-output path now shipped; N=30
+needs streaming + ≥256 GB RAM or a small cluster. The N=29
+certificate lives at `docs/results/n29.json` (per-`k` cells +
+mass + `gaborit_sigma`), with the citable `CITATION.cff` at the
+repo root.
+
+**Strategic note from N=29 (2026-05-23) — RESOLVED by D15
+(2026-06-10).** At N=29 the kernel made 87.2 billion canon calls at
+29.5 µs/call mean — ~364 canon calls per emitted equivalence class
+(15.6 at N=22, growing ~2.6× per 2-step). Per-call cost is *dropping*
+with N, but the canonical-augmentation candidate count explodes
+faster than the class count, so the directive was: **any future >2×
+lever at N ≥ 28 must cut call count, not per-call cost.** D15 (the
+coset-spectrum parent rule, `rust/src/parent_rule.rs`) is that lever:
+it redefines the McKay canonical-parent function so an exact
+weight-spectrum computation (Gray sweep + per-stratum Walsh–Hadamard,
+1–4 µs) decides ~94–97 % of candidates with **no canon call at all**.
+This is NOT in the ruled-out family below: those were all cheap
+*equivalence rejectors* bolted onto the old rule (per-probe ≈
+per-call trap); D15 changes which question the parent test asks.
+The old closure claim in `05-retrospective.md` §5 ("every alternative
+p requires canonicalising D") was wrong — McKay needs iso-invariance
++ single orbit only, canon only for ties (cf.
+Bouyukliev–Bouyuklieva 2019 §3.3) — and is amended in place.
+Post-D15 the wall is no longer canon-dominated: at N=22 seq, canon
+is 47.8 % and σ_Q candidate generation 38.3 % — re-profile before
+proposing the next lever.
 
 Cumulative levers, oldest first:
 
@@ -307,19 +339,43 @@ Cumulative levers, oldest first:
       **The single biggest V4 lever**: -20.7 % wall at N=22 PEEP,
       -20.3 % unbound, -0.8 % at N=24. Also fixes pre-existing
       `parallel_profiling` feature breakage from V3 ship.
+15. **D15 Coset-spectrum parent rule** (2026-06-10, default since
+    same day) — replaces the σ-derived canonical-parent function with
+    "parent = hyperplane whose complement-coset weight spectrum
+    φ(u) = (φ_4, φ_8, …) is lex-minimal", ties broken legacy-style
+    restricted to the argmin set. Evaluated per candidate in the
+    frame `[C-rows, v]` via one Gray sweep + lazy per-stratum
+    Walsh–Hadamard transforms (1–4 µs); φ-rejects skip RREF, cache
+    and nauty entirely. Per-rank cap `DOUBLY_EVEN_PHI_MAX_RANK`
+    (default 13, legacy above — sound, rank is iso-invariant).
+    Wall: **7.6× seq / 2.9× parallel at N=22, 3.1× at N=24,
+    6.5× at N=26** (same-session A/B); canon calls −15×/−32×/−87×.
+    Hard gate passed: per-rank φ-accepts == legacy accepts exactly
+    (no-mass-stop, N=14–24, seq + parallel). Mass formula + Table 3
+    green everywhere. Code `rust/src/parent_rule.rs` +
+    `enumerate.rs::test_candidate`; gate harnesses
+    `scripts/experimental/d15_phi_rule_check.py` (Phase 0) and
+    `d15_phi_audit.py` (Phase 1, κ = kept-canon-ns fraction: 0.039
+    at N=24). Env `DOUBLY_EVEN_PARENT_RULE` ∈ {coset-spectrum
+    (default), legacy, audit}.
 
 `bench.py` lives in `scripts/`; per-step JSON records are in
 `scripts/bench-results/` (gitignored). Rust microbench for
 sparsenauty internals: `scripts/microbench/src/nauty_decomp.rs`.
 
-**The `N ≤ 22` frontier is saturated at the pure-algorithmic level**
-with this canonicaliser — see `architecture/05-retrospective.md` for
-the failure-mode analysis of recent 2× attempts and the recommended
-next-direction decision (push the `N ≥ 28` frontier via Engine A; or
-multi-week GPU port; or ship-what-we-have). D13 (outer-DFS
-parallelism, 2026-05-18) sits *orthogonally* to that statement: it
-buys ~3× wall-time via infrastructure (worker pool) without changing
-the algorithmic ceiling.
+**The pre-D15 statement "the `N ≤ 22` frontier is saturated at the
+pure-algorithmic level with this canonicaliser" is obsolete** — it was
+true only within the fixed-parent-rule frame;
+`architecture/05-retrospective.md` §5 records the correction. Post-D15
+the N=22 sequential wall splits ~48 % canon / ~38 % σ_Q candidate
+generation, so the next lever (if any) starts from a fresh profile,
+not from nauty. D13 (outer-DFS parallelism) composes with D15
+unchanged; note the parallel speedup *ratio* at N=24 is now bounded by
+non-canon overheads (Amdahl), so frontier-depth/thread sweet spots may
+shift — re-tune before any record attempt. The two unmerged opt-in
+branches (`feature/dfs-order-by-aut`, `feature/dfs-speedup-bliss-pq`)
+were benched against the legacy rule and need re-validation on top of
+D15 before merging.
 
 ## D13 quickstart
 

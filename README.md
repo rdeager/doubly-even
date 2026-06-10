@@ -97,6 +97,12 @@ Single platform for reproducibility: **GCP `c4a-standard-72`** (Axion /
 Arm Neoverse V2, aarch64, 72 physical cores, 288 GB), parallel Rust
 kernel at `t=72 d=5`. All wall times below are kernel-only:
 
+All cloud rows below predate the **coset-spectrum parent rule**
+(2026-06-10, now the default — see [Algorithmic levers](#algorithmic-levers)),
+which cuts canonicalisation calls a further 15–87× at `N = 22–26` and
+walls 3–7.6× on the development host; a re-run of the large-`N` rows is
+pending.
+
 | `N` | wall                        | classes       |
 |----:|----------------------------:|--------------:|
 |  20 |                     0.21 s  |         1,211 |
@@ -115,8 +121,12 @@ dedicated run; `N ≤ 27` and `N = 29` come from the 2026-05-22/23 sweep.
 At `N = 29` the kernel made 87.2 billion canonicalisation calls at a
 mean of 29.5 µs/call — about 364 calls per emitted equivalence class.
 The scaling bottleneck at this length is the number of calls, not the
-per-call cost. The 13700K desktop measurements (`N = 22` in 0.69 s,
-`N = 26` in 170 s) and the cross-platform Sage comparison (~525× at
+per-call cost — which is precisely what the coset-spectrum parent rule
+now attacks: most candidates are rejected by an exact weight-spectrum
+comparison before any canonicalisation (canon calls drop 87× at
+`N = 26`, wall 169.8 s → 26.4 s on the development host). Desktop
+measurements (`N = 22` in 0.237 s parallel / 0.848 s sequential,
+`N = 26` in 26.4 s) and the cross-platform Sage comparison (~1535× at
 `N = 22`) live in [`docs/performance.md`](docs/performance.md).
 
 ### `N = 29` per-rank class counts
@@ -160,11 +170,11 @@ Four independent checks back every emitted class:
 The enumerator implements DFGHILM Appendix B end-to-end: Gaborit's mass
 formula, a bipartite-graph encoding fed to `sparsenauty`, the
 doubly-even linear-algebra optimisations of Corollary B.1, and McKay
-1998 canonical augmentation. The production kernel adds five
+1998 canonical augmentation. The production kernel adds six
 engineering changes on top of that recipe. The per-lever multipliers
-below are 13700K desktop measurements (the development platform used
-for ablation); the cumulative effect is roughly 220× over the
-pure-Python baseline at `N = 22` and ~525× faster than Sage
+below are desktop measurements (the development platform used for
+ablation); the cumulative effect is roughly 640× over the
+pure-Python baseline at `N = 22` and ~1535× faster than Sage
 `self_orthogonal_binary_codes`.
 
 - **Quotient-space orbit-min prefilter** — work in the
@@ -188,11 +198,21 @@ pure-Python baseline at `N = 22` and ~525× faster than Sage
 - **Mass-formula early stop** — the closed-form `σ(N, k)` plus a
   monotone quota check skips the rest of a rank as soon as
   `Σ N!/|Aut| = σ(N, k+1)`. `4–11%` in isolation.
+- **Coset-spectrum parent rule** — the McKay canonical parent of a
+  child code is selected by the lex-min complement-coset weight
+  spectrum over all `2^(k+1) − 1` hyperplanes (computed for all of
+  them at once by per-stratum Walsh–Hadamard transforms, 1–4 µs), so
+  ~94–97 % of candidates are rejected with **no canonicalisation call
+  at all**; nauty runs only on accepts and exact ties. `7.6×`
+  sequential at `N = 22`, `3.1×` at `N = 24` parallel, `6.5×` at
+  `N = 26` parallel — growing with `N` (canon-call count −15×/−32×/−87×).
+  Kill-switch: `DOUBLY_EVEN_PARENT_RULE=legacy`.
 
 The cumulative ablation table and per-lever writeup are in
-[`docs/algorithm.md`](docs/algorithm.md). About 90 % of the `N = 22`
-parallel wall is inside `sparsenauty`'s C code, which is the per-call
-floor at this graph shape.
+[`docs/algorithm.md`](docs/algorithm.md). Before the coset-spectrum
+rule, ~90 % of the `N = 22` parallel wall was inside `sparsenauty`'s C
+code; after it, canon is ~48 % of a 7.6×-smaller sequential wall, with
+quotient-space candidate generation (~38 %) the other major slice.
 
 ## Long-running jobs (local or cloud)
 
@@ -286,7 +306,7 @@ This package follows several foundational works:
 Full credits and the validation hierarchy are in
 [`docs/references.md`](docs/references.md). Sage's
 `self_orthogonal_binary_codes` is the prior open-source bar
-(single-threaded Cython); the parallel Rust kernel here runs ~525×
+(single-threaded Cython); the parallel Rust kernel here runs ~1535×
 faster at `N = 22`.
 
 ## Opt-in branches
@@ -306,6 +326,9 @@ choose:
 
 Each branch can be checked out and measured directly:
 `git checkout feature/dfs-order-by-aut && maturin build --release …`.
+Both branches were measured against the legacy parent rule; their
+deltas have not been re-validated on top of the coset-spectrum rule
+(which reshuffles where the wall goes), so re-bench before stacking.
 
 ## License
 

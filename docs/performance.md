@@ -4,21 +4,25 @@ Single home for the measured wall-time numbers and tuning knobs. The
 algorithmic *why* lives in [`algorithm.md`](algorithm.md); this doc is
 tables.
 
-## Headline (13700K, parallel kernel, mean of 3 runs)
+## Headline (coset-spectrum parent rule, parallel kernel, mean of 3 runs)
 
-13700K = Intel Core i7-13700K (8 P-cores × SMT2 + 8 E-cores =
-24 logical / 16 physical). Each run starts from a cold canon cache.
+Measured 2026-06-10 on a 13700K-equivalent dev container (its
+same-session legacy controls reproduce the 13700K records within 1–10 %,
+e.g. `N = 26` 168.3 s vs the recorded 169.8 s). Each run starts from a
+cold canon cache; all DFGHILM Table 3 cells verified per run.
 
-| N  | classes  | sequential | parallel best          | speedup |
-|----|---------:|-----------:|------------------------|--------:|
-| 18 |      341 |     0.15 s | —                      | —       |
-| 20 |    1,211 |     0.97 s | 0.22 s (t=16, d=4)     |  4.4×   |
-| 22 |    5,118 |     6.64 s | **0.691 s** (t=20, d=4)| **9.6×**|
-| 24 |   37,496 |    ~107 s  | **8.90 s** (t=24, d=5) | ~12.0×  |
-| 26 |  494,272 |     —      | **170 s** (t=24, d=5)  | ~11.2×  |
+| N  | classes  | sequential | parallel best           | vs legacy rule (same session) |
+|----|---------:|-----------:|-------------------------|------------------------------:|
+| 18 |      341 |    0.030 s | —                       |  4.7× (seq)  |
+| 20 |    1,211 |    0.151 s | 0.053 s (t=16, d=4)     |  6.0× (seq)  |
+| 22 |    5,118 |    0.848 s | **0.237 s** (t=24, d=4) |  7.6× (seq), 2.9× (par) |
+| 24 |   37,496 |     9.40 s | **2.60 s** (t=24, d=5)  | 10.3× (seq), 3.1× (par) |
+| 26 |  494,272 |     —      | **26.4 s** (t=24, d=5)  |  6.5× (par)  |
 
-Sequential at `N = 26` was not measured directly; the extrapolation
-from `N = 24` is ~30 min.
+The legacy σ-based parent rule remains available as
+`DOUBLY_EVEN_PARENT_RULE=legacy`; its 13700K record numbers (kept for
+history and for older cross-references): `N = 22` 6.64 s seq / 0.691 s
+t=20 d=4; `N = 24` 8.90 s t=24 d=5; `N = 26` 169.8 s t=24 d=5.
 
 ## Cloud runs
 
@@ -156,18 +160,19 @@ Net for wall-time forecasting: the dominant multiplier per 2-step is
 Across `N = 26 → 28` this was `43.5× × 2.73× × 0.64× = 76×` (expected)
 and `66×` (measured); the ~10 % gap is end-of-run tail imbalance.
 
-**Implication for the next algorithmic improvement.** Per-call cost is
-already inside sparsenauty's C code — there is no >5 % headroom left
-at this graph shape (the audit summarised in
-[`algorithm.md` §"What we did not beat"](algorithm.md#what-we-did-not-beat)
-walks through every closed line). The leverage point is calls per
-class, not microseconds per call. A successful next lever would have
-to reject candidate codes *before* canonicalising them — and every
-cheap rejector we have measured (paired-iso, cubic tensor, T11) costs
-more per probe than the canon call it would replace. The honest
-framing: at `N = 29` and beyond, total wall is being driven by the
-combinatorial growth of canonical-augmentation work, not by
-canonicaliser speed.
+**Resolution (2026-06-10).** The conclusion this table forced — the
+leverage point is calls per class, and a successful lever must reject
+candidates *before* canonicalising them — is what the
+**coset-spectrum parent rule** delivered (lever 6 in
+[`algorithm.md`](algorithm.md#6-coset-spectrum-parent-rule)). Unlike
+the cheap *rejectors* measured earlier (paired-iso, cubic tensor, T11
+— all costlier per probe than the canon call), it changes the parent
+*definition* so that an exact 1–4 µs weight-spectrum computation
+decides ~94–97 % of candidates with no canon call at all. Measured
+canon-call reduction: 15× at `N = 22`, 32× at `N = 24`, **87× at
+`N = 26`** — growing with `N` because it cancels precisely the
+calls-per-class explosion in the table above. The table's per-call
+column still describes the calls that remain (accepts + rare φ-ties).
 
 ## Full `c4a-standard-72` sweep — DFGHILM Table 3 reproduction
 
@@ -251,6 +256,8 @@ no effect when unset; defaults are the recommended values for `N ≤ 22`.
 | `DOUBLY_EVEN_FRONTIER_DEPTH`         | 4             | DFS depth at which the seeder yields seeds to the worker pool; raise to 5 for `N ≥ 24` |
 | `DOUBLY_EVEN_CANON_CACHE_CAP`        | 1,000,000     | per-worker LRU size (entries); load-bearing at `N ≥ 26` to keep the per-worker × N-workers footprint under host memory |
 | `DOUBLY_EVEN_NO_MASS_STOP`           | unset         | set to `1` to disable mass-stop pruning (ablation only) |
+| `DOUBLY_EVEN_PARENT_RULE`            | `coset-spectrum` | parent-selection rule: `coset-spectrum` (default), `legacy` (σ-based rule, kill-switch / A-B control), `audit` (legacy behaviour + φ instrumentation) |
+| `DOUBLY_EVEN_PHI_MAX_RANK`           | 13            | child-rank cap for the coset-spectrum cascade; above it the kernel uses the legacy rule per rank (only relevant at `N ≥ 30`) |
 
 Recommended config table (after the 2026-05-23 thread-count recalibration):
 

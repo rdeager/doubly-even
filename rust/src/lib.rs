@@ -24,6 +24,7 @@ pub mod enumerate;
 pub mod experimental;
 pub mod linalg;
 pub mod orbit;
+pub mod parent_rule;
 pub mod permutations;
 pub mod qd_graph;
 pub mod quotient;

@@ -34,6 +34,17 @@ The driver :func:`enumerate_doubly_even` yields one canonical
 representative per permutation-equivalence class. The default ordering of
 yields is the depth-first order induced by sorted candidate cosets — this
 is stable across runs and useful for debugging.
+
+**Parent-rule note (D15).** The Rust kernel additionally implements the
+*coset-spectrum* parent rule (``DOUBLY_EVEN_PARENT_RULE`` env var; see
+``rust/src/parent_rule.rs`` and ``docs/algorithm.md``): the parent is the
+hyperplane with lex-minimal complement-coset weight spectrum, so most
+non-canonical candidates are rejected without any nauty call. This pure
+Python module keeps the legacy σ-based rule only. Both rules are valid
+McKay parent functions and enumerate the *same equivalence classes* —
+but the chosen in-class representative of each class can differ at rank
+≥ 2, so do not diff raw representative sets across backends; compare
+per-rank counts and ``|Aut|`` multisets (what the tests do).
 """
 
 from __future__ import annotations

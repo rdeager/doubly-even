@@ -96,7 +96,8 @@ pub fn enumerate_doubly_even_parallel_with_profile(
         return (out, stats, per_k, profile);
     }
 
-    let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n);
+    let rule = crate::parent_rule::ParentRule::from_env();
+    let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n, rule);
     // Bridge V3's channel-based seeder into this profile harness's
     // two-phase pattern: collect the frontier eagerly via an unbounded
     // channel, then dispatch it labelled with seed_id afterwards.
@@ -157,7 +158,7 @@ pub fn enumerate_doubly_even_parallel_with_profile(
         let fact = factorial_n;
         handles.push(std::thread::spawn(move || {
             let inf_quota = vec![u128::MAX; (mk + 1) as usize];
-            let mut worker = WorkerState::new(nn, mk, inf_quota, fact);
+            let mut worker = WorkerState::new(nn, mk, inf_quota, fact, rule);
             let mut seed_profiles: Vec<SeedProfile> = Vec::new();
             let mut active_ns: u64 = 0;
             let mut idle_ns: u64 = 0;

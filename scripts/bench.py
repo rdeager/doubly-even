@@ -85,6 +85,14 @@ KERNEL_STATS_LAYOUT: tuple[str, ...] = (
     "nauty_tctotal_sum",          # 23 — Q6: target-cell work
     "nauty_maxlevel_sum",         # 24 — Q6: deepest level reached
     "nauty_generators_sum",       # 25 — Q6: Aut generators found
+    "phi_reject",                 # 26 — D15: φ rejects (no canon call)
+    "phi_accept_unique",          # 27 — D15: φ unique-min accepts
+    "phi_tie_accept",             # 28 — D15: φ ties resolved accept
+    "phi_tie_reject",             # 29 — D15: φ ties resolved reject
+    "phi_ns",                     # 30 — D15: ns inside the φ cascade
+    "phi_strata_sum",             # 31 — D15: Σ strata evaluated
+    "phi_m_size_sum",             # 32 — D15: Σ |M| at decision
+    "nauty_ns_kept",              # 33 — D15 audit: κ numerator
 )
 
 

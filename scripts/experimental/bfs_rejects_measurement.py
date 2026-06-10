@@ -21,12 +21,21 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import doubly_even_kernel as _kernel
 from doubly_even.spec.mass import gaborit_sigma
+
+# This script audits the LEGACY parent rule by design: its accounting
+# identity (parent_eq + we_filtered + bfs_hits + bfs_rejects ==
+# is_canon_aug_calls) only holds when every candidate goes through
+# is_canonical_augmentation. Under the D15 coset-spectrum rule most
+# candidates never reach it (see scripts/experimental/d15_phi_audit.py
+# for that rule's audit), so pin the rule here.
+os.environ["DOUBLY_EVEN_PARENT_RULE"] = "legacy"
 
 
 def measure(N: int) -> dict:

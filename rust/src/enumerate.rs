@@ -49,6 +49,7 @@ use crate::experimental::canon_dense_qd::canon_info_qd_dense;
 use crate::experimental::canon_traces_qd::canon_info_qd_traces;
 use crate::candidates::doubly_even_candidates_q;
 use crate::linalg::{apply_permutation, row_reduce};
+use crate::parent_rule::{phi_cascade, tie_break_parent, ParentRule, PhiOutcome, PhiResult};
 #[cfg(feature = "equivalence_verifier")]
 use crate::experimental::paired_iso::PairedIsoCachedCf;
 use crate::permutations::{
@@ -279,6 +280,35 @@ pub(crate) struct WorkerState {
     pub stats_verifier_compares: u64,
     /// Cumulative ns spent inside the verifier path (scan + reconstruct).
     pub stats_verifier_ns: u128,
+    /// Active parent-selection rule (see [`crate::parent_rule`]). Resolved
+    /// once per driver invocation and passed in, so the seeder and every
+    /// worker of a parallel run agree. `Legacy` = σ-based rule, one canon
+    /// call per candidate. `CosetSpectrum` = D15 φ cascade decides most
+    /// rejects with no canon call (the >2× lever). `Audit` = legacy
+    /// behaviour byte-for-byte plus φ tallies + κ accounting (gate driver:
+    /// `scripts/experimental/d15_phi_audit.py`).
+    parent_rule: ParentRule,
+    /// φ outcome tallies (audit mode only; always 0 otherwise).
+    pub stats_phi_reject: u64,
+    pub stats_phi_accept_unique: u64,
+    pub stats_phi_tie_accept: u64,
+    pub stats_phi_tie_reject: u64,
+    /// Cumulative ns inside `phi_cascade` (+ tie resolution).
+    pub stats_phi_ns: u128,
+    /// Sum of strata evaluated per cascade (mean = /candidates).
+    pub stats_phi_strata_sum: u64,
+    /// Sum of `|M|` at the cascade decision point.
+    pub stats_phi_m_size_sum: u64,
+    /// Canon-dispatch ns spent on candidates the φ rule would KEEP
+    /// (accepts + ties). κ = nauty_ns_kept / nauty_ns is the fraction of
+    /// today's canon time the new rule cannot remove — measured in ns,
+    /// not call counts, so systematically-expensive kept calls are priced.
+    pub stats_nauty_ns_kept: u128,
+    /// Per-parent-rank φ outcome tallies (audit mode only).
+    pub stats_phi_reject_by_k: Vec<u64>,
+    pub stats_phi_accept_unique_by_k: Vec<u64>,
+    pub stats_phi_tie_accept_by_k: Vec<u64>,
+    pub stats_phi_tie_reject_by_k: Vec<u64>,
     /// Times `doubly_even_candidates_q` was invoked.
     pub stats_candidates_q_calls: u64,
     /// Cumulative ns spent inside `doubly_even_candidates_q`. Bounds the
@@ -309,6 +339,14 @@ pub(crate) struct WorkerState {
     pub(crate) output_writer: Option<BinaryWriter<std::fs::File>>,
 }
 
+/// `D = ⟨C, v⟩`: append `v` to the parent basis and re-RREF.
+fn extend_rref(rref: &[BinVec], v: BinVec, n: u32) -> (Vec<BinVec>, Vec<u32>) {
+    let mut new_basis = Vec::with_capacity(rref.len() + 1);
+    new_basis.extend_from_slice(rref);
+    new_basis.push(v);
+    row_reduce(&new_basis, n)
+}
+
 /// Sorted weight enumerator of the code with the given RREF basis.
 fn weight_enum(rref: &[BinVec]) -> Vec<u32> {
     let k = rref.len();
@@ -330,7 +368,13 @@ fn weight_enum(rref: &[BinVec]) -> Vec<u32> {
 }
 
 impl WorkerState {
-    pub(crate) fn new(n: u32, max_k: u32, quota: Vec<u128>, factorial_n: u128) -> Self {
+    pub(crate) fn new(
+        n: u32,
+        max_k: u32,
+        quota: Vec<u128>,
+        factorial_n: u128,
+        parent_rule: ParentRule,
+    ) -> Self {
         let len = (max_k + 1) as usize;
         let env_instrument = std::env::var("DOUBLY_EVEN_SECONDARY_CACHE_INSTRUMENTATION")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -381,6 +425,19 @@ impl WorkerState {
             stats_verifier_hits: 0,
             stats_verifier_compares: 0,
             stats_verifier_ns: 0,
+            parent_rule,
+            stats_phi_reject: 0,
+            stats_phi_accept_unique: 0,
+            stats_phi_tie_accept: 0,
+            stats_phi_tie_reject: 0,
+            stats_phi_ns: 0,
+            stats_phi_strata_sum: 0,
+            stats_phi_m_size_sum: 0,
+            stats_nauty_ns_kept: 0,
+            stats_phi_reject_by_k: vec![0u64; len],
+            stats_phi_accept_unique_by_k: vec![0u64; len],
+            stats_phi_tie_accept_by_k: vec![0u64; len],
+            stats_phi_tie_reject_by_k: vec![0u64; len],
             stats_candidates_q_calls: 0,
             stats_candidates_q_ns: 0,
             stats_nauty_numnodes: 0,
@@ -697,6 +754,157 @@ impl WorkerState {
         hit
     }
 
+    /// Decide one candidate augmentation `(C → D = ⟨C, v⟩)` under the
+    /// active parent rule. Returns the child's `(rref, pivots, canon
+    /// info)` when the augmentation is canonical; `None` to skip. On the
+    /// coset-spectrum Reject path no RREF, no cache probe, and no canon
+    /// call happen at all — that is the D15 lever (φ costs a Gray sweep
+    /// plus per-stratum WHTs, ~1–4 µs, against the ~30–75 µs canon call
+    /// the legacy rule pays on every reject).
+    ///
+    /// Shared by `traverse` and `traverse_seed` so the seeder and the
+    /// workers apply the identical rule.
+    fn test_candidate(
+        &mut self,
+        parent_k: usize,
+        rref: &[BinVec],
+        v: BinVec,
+    ) -> Option<(Vec<BinVec>, Vec<u32>, Rc<CachedInfo>)> {
+        let use_phi = match self.parent_rule {
+            ParentRule::CosetSpectrum { max_rank } => parent_k as u32 + 1 <= max_rank,
+            _ => false,
+        };
+        if use_phi {
+            let t0 = std::time::Instant::now();
+            let res = phi_cascade(rref, v, self.n);
+            self.stats_phi_ns += t0.elapsed().as_nanos();
+            self.stats_phi_strata_sum += res.strata_used as u64;
+            self.stats_phi_m_size_sum += res.m_size_at_decision as u64;
+            return match res.outcome {
+                PhiOutcome::Reject => {
+                    self.stats_phi_reject += 1;
+                    self.stats_phi_reject_by_k[parent_k] += 1;
+                    None
+                }
+                PhiOutcome::AcceptUnique => {
+                    // m(D) is the orbit of C itself; canon is still paid
+                    // here because the recursion needs Aut(D) + |Aut(D)|
+                    // (the same cost any rule pays on accepts).
+                    self.stats_phi_accept_unique += 1;
+                    self.stats_phi_accept_unique_by_k[parent_k] += 1;
+                    let (d_rref, d_pivots) = extend_rref(rref, v, self.n);
+                    let info_d = self.canon_info(&d_rref);
+                    Some((d_rref, d_pivots, info_d))
+                }
+                PhiOutcome::Tie(m_set) => {
+                    let (d_rref, d_pivots) = extend_rref(rref, v, self.n);
+                    let info_d = self.canon_info(&d_rref);
+                    let t1 = std::time::Instant::now();
+                    let target = tie_break_parent(
+                        rref,
+                        v,
+                        self.n,
+                        &m_set,
+                        &info_d.canonical_column_order,
+                    );
+                    let accept =
+                        subspace_in_orbit(self.n, rref, &target, &info_d.aut_generators);
+                    self.stats_phi_ns += t1.elapsed().as_nanos();
+                    if accept {
+                        self.stats_phi_tie_accept += 1;
+                        self.stats_phi_tie_accept_by_k[parent_k] += 1;
+                        Some((d_rref, d_pivots, info_d))
+                    } else {
+                        self.stats_phi_tie_reject += 1;
+                        self.stats_phi_tie_reject_by_k[parent_k] += 1;
+                        None
+                    }
+                }
+            };
+        }
+        // Legacy path (also taken by CosetSpectrum above its rank cap);
+        // Audit additionally tallies the φ outcome post-hoc.
+        let phi_res = self.phi_audit_evaluate(rref, v);
+        let (d_rref, d_pivots) = extend_rref(rref, v, self.n);
+        let nauty_ns_before = self.stats_nauty_ns;
+        let info_d = self.canon_info(&d_rref);
+        let accept = self.is_canonical_augmentation(parent_k, rref, &d_rref, &info_d);
+        if let Some(res) = phi_res {
+            let delta = self.stats_nauty_ns - nauty_ns_before;
+            self.phi_audit_resolve(parent_k, rref, v, res, &info_d, delta);
+        }
+        if accept {
+            Some((d_rref, d_pivots, info_d))
+        } else {
+            None
+        }
+    }
+
+    /// D15 Phase 1 audit: run the φ cascade for one candidate, timed.
+    /// `None` unless audit mode is on. Behaviour-neutral — the result is
+    /// only tallied by [`Self::phi_audit_resolve`] after the legacy path.
+    #[inline]
+    fn phi_audit_evaluate(&mut self, c_rref: &[BinVec], v: BinVec) -> Option<PhiResult> {
+        if self.parent_rule != ParentRule::Audit {
+            return None;
+        }
+        let t0 = std::time::Instant::now();
+        let res = phi_cascade(c_rref, v, self.n);
+        self.stats_phi_ns += t0.elapsed().as_nanos();
+        Some(res)
+    }
+
+    /// D15 Phase 1 audit: tally a cascade result against the per-candidate
+    /// ground truth, resolving φ-ties with the `info_d` the legacy path
+    /// already paid for. `nauty_ns_delta` is the canon-dispatch time this
+    /// candidate cost (0 on a cache hit) — accumulated into
+    /// `stats_nauty_ns_kept` for φ-kept candidates only, so
+    /// κ = kept/total prices exactly the canon time the φ rule retains.
+    fn phi_audit_resolve(
+        &mut self,
+        parent_k: usize,
+        c_rref: &[BinVec],
+        v: BinVec,
+        res: PhiResult,
+        info_d: &CachedInfo,
+        nauty_ns_delta: u128,
+    ) {
+        self.stats_phi_strata_sum += res.strata_used as u64;
+        self.stats_phi_m_size_sum += res.m_size_at_decision as u64;
+        match res.outcome {
+            PhiOutcome::Reject => {
+                self.stats_phi_reject += 1;
+                self.stats_phi_reject_by_k[parent_k] += 1;
+            }
+            PhiOutcome::AcceptUnique => {
+                self.stats_phi_accept_unique += 1;
+                self.stats_phi_accept_unique_by_k[parent_k] += 1;
+                self.stats_nauty_ns_kept += nauty_ns_delta;
+            }
+            PhiOutcome::Tie(m_set) => {
+                let t0 = std::time::Instant::now();
+                let target = tie_break_parent(
+                    c_rref,
+                    v,
+                    self.n,
+                    &m_set,
+                    &info_d.canonical_column_order,
+                );
+                let accept =
+                    subspace_in_orbit(self.n, c_rref, &target, &info_d.aut_generators);
+                self.stats_phi_ns += t0.elapsed().as_nanos();
+                if accept {
+                    self.stats_phi_tie_accept += 1;
+                    self.stats_phi_tie_accept_by_k[parent_k] += 1;
+                } else {
+                    self.stats_phi_tie_reject += 1;
+                    self.stats_phi_tie_reject_by_k[parent_k] += 1;
+                }
+                self.stats_nauty_ns_kept += nauty_ns_delta;
+            }
+        }
+    }
+
     /// D13-V4 cut 4: shared mass-stop predicate. When `global_mass` is
     /// `Some` (parallel path), consult the cross-worker counter; otherwise
     /// fall back to the local `mass_at_k` (sequential, byte-identical
@@ -782,14 +990,13 @@ impl WorkerState {
                 self.stats_candidates_skipped_by_k[k as usize] += remaining;
                 return;
             }
-            // D = C.extend(v): append v, re-RREF.
-            let mut new_basis = rref.clone();
-            new_basis.push(*v);
-            let (d_rref, d_pivots) = row_reduce(&new_basis, self.n);
-            let info_d = self.canon_info(&d_rref);
-            if !self.is_canonical_augmentation(k as usize, &rref, &d_rref, &info_d) {
+            // D = C.extend(v), accepted or skipped under the active
+            // parent rule (φ rejects never touch RREF/cache/canon).
+            let Some((d_rref, d_pivots, info_d)) =
+                self.test_candidate(k as usize, &rref, *v)
+            else {
                 continue;
-            }
+            };
             self.traverse(d_rref, d_pivots, info_d);
         }
     }
@@ -869,13 +1076,13 @@ impl WorkerState {
         let total = candidates.len() as u64;
         self.stats_candidates_total_seen_by_k[k as usize] += total;
         for v in candidates.iter() {
-            let mut new_basis = rref.clone();
-            new_basis.push(*v);
-            let (d_rref, d_pivots) = row_reduce(&new_basis, self.n);
-            let info_d = self.canon_info(&d_rref);
-            if !self.is_canonical_augmentation(k as usize, &rref, &d_rref, &info_d) {
+            // Same shared candidate test as `traverse` — the seeder must
+            // apply the identical parent rule the workers do.
+            let Some((d_rref, d_pivots, info_d)) =
+                self.test_candidate(k as usize, &rref, *v)
+            else {
                 continue;
-            }
+            };
             self.traverse_seed(d_rref, d_pivots, info_d, frontier_depth, task_tx);
         }
     }
@@ -918,6 +1125,14 @@ impl WorkerState {
             self.stats_nauty_tctotal as u128,
             self.stats_nauty_maxlevel_sum as u128,
             self.stats_nauty_generators_sum as u128,
+            self.stats_phi_reject as u128,
+            self.stats_phi_accept_unique as u128,
+            self.stats_phi_tie_accept as u128,
+            self.stats_phi_tie_reject as u128,
+            self.stats_phi_ns,
+            self.stats_phi_strata_sum as u128,
+            self.stats_phi_m_size_sum as u128,
+            self.stats_nauty_ns_kept,
         ];
         let per_k_stats: Vec<Vec<u64>> = vec![
             self.stats_is_canon_aug_calls_by_k,
@@ -930,6 +1145,10 @@ impl WorkerState {
             self.stats_mass_stop_in_loop_by_k,
             self.stats_candidates_total_seen_by_k,
             self.stats_candidates_skipped_by_k,
+            self.stats_phi_reject_by_k,
+            self.stats_phi_accept_unique_by_k,
+            self.stats_phi_tie_accept_by_k,
+            self.stats_phi_tie_reject_by_k,
         ];
         (self.output, stats, per_k_stats)
     }
@@ -945,17 +1164,20 @@ impl WorkerState {
 ///
 /// - `output` — `Vec<EnumeratedRaw>` in DFS order.
 /// - `stats` — flat vector (22 u128 fields). See layout below.
-/// - `per_k_stats` — rectangular `[10][max_k+1]` matrix of u64 counters
+/// - `per_k_stats` — rectangular `[14][max_k+1]` matrix of u64 counters
 ///   bucketed by the *parent* rank k (i.e., the rank of C; D has rank
 ///   k+1). Rows in fixed order:
 ///   `[is_canon_aug_calls, parent_eq_hits, weight_enum_filtered,
 ///   bfs_calls, bfs_hits, bfs_rejects, mass_stop_pre_loop,
-///   mass_stop_in_loop, candidates_total_seen, candidates_skipped]`.
+///   mass_stop_in_loop, candidates_total_seen, candidates_skipped,
+///   phi_reject, phi_accept_unique, phi_tie_accept, phi_tie_reject]`.
 ///   Rows 0–5 from Phase 1 of `for-complete-enumeration-of-proud-meerkat.md`
 ///   (σ_Q-orbit-min rejection-rate audit). Rows 6–9 from the mass-stop
-///   audit (same plan, Conway–Pless gluing follow-up).
+///   audit (same plan, Conway–Pless gluing follow-up). Rows 10–13 from
+///   the D15 coset-spectrum parent-rule audit (zero unless
+///   `DOUBLY_EVEN_PARENT_RULE=audit`).
 ///
-/// Stats vector layout (22 u128 fields, packed for pyo3 tuple-arity
+/// Stats vector layout (34 u128 fields, packed for pyo3 tuple-arity
 /// limits — pyo3 0.23 caps `IntoPyObject` tuples at 12 elements):
 ///
 /// ```text
@@ -986,6 +1208,14 @@ impl WorkerState {
 ///  23   nauty_tctotal_sum              (Q6 audit: total target-cell work)
 ///  24   nauty_maxlevel_sum             (Q6 audit: deepest level reached)
 ///  25   nauty_generators_sum           (Q6 audit: Aut generators found)
+///  26   phi_reject                     (D15 audit; 0 unless audit mode)
+///  27   phi_accept_unique              (D15 audit)
+///  28   phi_tie_accept                 (D15 audit)
+///  29   phi_tie_reject                 (D15 audit)
+///  30   phi_ns                         (D15 audit; timer)
+///  31   phi_strata_sum                 (D15 audit)
+///  32   phi_m_size_sum                 (D15 audit)
+///  33   nauty_ns_kept                  (D15 audit; timer — κ numerator)
 /// ```
 ///
 /// Fields 4–10 came from the Engine B BFS-cost profile (see
@@ -1002,7 +1232,20 @@ pub fn enumerate_doubly_even(
     quota: Vec<u128>,
     factorial_n: u128,
 ) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
-    let mut state = WorkerState::new(n, max_k, quota, factorial_n);
+    enumerate_doubly_even_with_rule(n, max_k, quota, factorial_n, ParentRule::from_env())
+}
+
+/// [`enumerate_doubly_even`] with an explicit parent rule — the
+/// env-independent entry the rule-equivalence tests drive (integration
+/// tests must not mutate process env: the cargo harness is threaded).
+pub fn enumerate_doubly_even_with_rule(
+    n: u32,
+    max_k: u32,
+    quota: Vec<u128>,
+    factorial_n: u128,
+    rule: ParentRule,
+) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
+    let mut state = WorkerState::new(n, max_k, quota, factorial_n, rule);
     // Zero code: rref empty, pivots empty.
     let zero_rref: Vec<BinVec> = Vec::new();
     let zero_pivots: Vec<u32> = Vec::new();
@@ -1065,6 +1308,28 @@ pub fn enumerate_doubly_even_parallel(
     factorial_n: u128,
     num_threads: usize,
 ) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
+    enumerate_doubly_even_parallel_with_rule(
+        n,
+        max_k,
+        quota,
+        factorial_n,
+        num_threads,
+        ParentRule::from_env(),
+    )
+}
+
+/// [`enumerate_doubly_even_parallel`] with an explicit parent rule. The
+/// rule is resolved once here and handed to the seeder and every worker,
+/// guaranteeing rule agreement across the frontier.
+#[cfg(feature = "parallel")]
+pub fn enumerate_doubly_even_parallel_with_rule(
+    n: u32,
+    max_k: u32,
+    quota: Vec<u128>,
+    factorial_n: u128,
+    num_threads: usize,
+    rule: ParentRule,
+) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
     use crossbeam_channel::{bounded, unbounded};
 
     // D13-V2: deeper frontier breaks the tail. With depth 3 (V1) at N=22
@@ -1079,7 +1344,7 @@ pub fn enumerate_doubly_even_parallel(
         .unwrap_or(4);
 
     if num_threads <= 1 || max_k <= frontier_depth {
-        return enumerate_doubly_even(n, max_k, quota, factorial_n);
+        return enumerate_doubly_even_with_rule(n, max_k, quota, factorial_n, rule);
     }
 
     // Worker pool spawns first and waits on the (initially empty)
@@ -1108,7 +1373,7 @@ pub fn enumerate_doubly_even_parallel(
         let gm = std::sync::Arc::clone(&global_mass);
         handles.push(std::thread::spawn(move || {
             let inf_quota = vec![u128::MAX; (mk + 1) as usize];
-            let mut worker = WorkerState::new(nn, mk, inf_quota, fact);
+            let mut worker = WorkerState::new(nn, mk, inf_quota, fact, rule);
             worker.install_global_mass(gm);
             while let Ok(seed) = task_rx.recv() {
                 worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
@@ -1125,7 +1390,7 @@ pub fn enumerate_doubly_even_parallel(
     // seeder's traversal cost with worker recursion. Codes at depths
     // 0..frontier_depth-1 land in seed_state.output here on the main
     // thread; depth-`frontier_depth` seeds travel by channel.
-    let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n);
+    let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n, rule);
     seed_state.install_global_mass(std::sync::Arc::clone(&global_mass));
     {
         let zero_rref: Vec<BinVec> = Vec::new();
@@ -1214,7 +1479,8 @@ pub fn enumerate_doubly_even_streaming(
     let writer = BinaryWriter::create(&path, n, 0)
         .expect("failed to create streaming output file");
     let quota_for_assert = quota.clone();
-    let mut state = WorkerState::new(n, max_k, quota, factorial_n);
+    let rule = ParentRule::from_env();
+    let mut state = WorkerState::new(n, max_k, quota, factorial_n, rule);
     state.install_output_writer(writer);
     let zero_rref: Vec<BinVec> = Vec::new();
     let zero_pivots: Vec<u32> = Vec::new();
@@ -1263,6 +1529,9 @@ pub fn enumerate_doubly_even_parallel_streaming(
     let quota_for_assert = quota.clone();
     let global_mass = std::sync::Arc::new(GlobalMassTracker::new(quota.clone()));
 
+    // One rule resolution for seeder + all workers (rule agreement).
+    let rule = ParentRule::from_env();
+
     let mut handles = Vec::with_capacity(num_threads);
     for worker_id in 0..num_threads {
         let task_rx = task_rx.clone();
@@ -1276,7 +1545,7 @@ pub fn enumerate_doubly_even_parallel_streaming(
             let writer = BinaryWriter::create(&path, nn, worker_id as u32)
                 .expect("failed to create per-worker streaming file");
             let inf_quota = vec![u128::MAX; (mk + 1) as usize];
-            let mut worker = WorkerState::new(nn, mk, inf_quota, fact);
+            let mut worker = WorkerState::new(nn, mk, inf_quota, fact, rule);
             worker.install_global_mass(gm);
             worker.install_output_writer(writer);
             while let Ok(seed) = task_rx.recv() {
@@ -1294,7 +1563,7 @@ pub fn enumerate_doubly_even_parallel_streaming(
     let seeder_path = output_dir.join(format!("out.w{:03}.bin", seeder_id));
     let seeder_writer = BinaryWriter::create(&seeder_path, n, seeder_id as u32)
         .expect("failed to create seeder streaming file");
-    let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n);
+    let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n, rule);
     seed_state.install_global_mass(std::sync::Arc::clone(&global_mass));
     seed_state.install_output_writer(seeder_writer);
     {

@@ -2,13 +2,14 @@
 
 This doc walks through what `doubly-even` adds on top of the DFGHILM
 Appendix B canonical-augmentation recipe to make the enumeration tractable
-on a desktop or modest cloud VM. Five levers carry the load; each delivered
+on a desktop or modest cloud VM. Six levers carry the load; each delivered
 a measurable wall-time reduction on its own, and they compose to roughly
-~220× over the pure-Python baseline at `N = 22` and ~525× over Sage's
+~640× over the pure-Python baseline at `N = 22` and ~1500× over Sage's
 `self_orthogonal_binary_codes` at the same length.
 
 Cumulative wall-time ablation on the 13700K development host (sequential
-unless noted):
+unless noted; the coset-spectrum row is a 13700K-equivalent container,
+same-session A/B against the row above it):
 
 | stage                                                | N = 20  | N = 22  | N = 24 |
 |------------------------------------------------------|--------:|--------:|-------:|
@@ -17,7 +18,8 @@ unless noted):
 | + degree-based initial nauty partition               |  2.00 s |  18.8 s |   —    |
 | + native Rust kernel (no Python↔Rust crossings)      |  1.46 s |  14.5 s |   —    |
 | + low-weight-incidence canonicaliser                 |  1.07 s |  7.57 s |  107 s |
-| + outer-DFS pipelined-seeder parallel kernel (24t)   |  0.22 s | **0.69 s** | **8.90 s** |
+| + outer-DFS pipelined-seeder parallel kernel (24t)   |  0.22 s |  0.69 s |  8.90 s |
+| + coset-spectrum parent rule (parallel, same knobs)  | 0.053 s | **0.24 s** | **2.60 s** |
 
 The remainder of this doc explains what each lever does and why it works.
 
@@ -225,39 +227,128 @@ The `σ(N, k)` itself is implemented in
 against `sigma_brute` for `N ≤ 8`). The quota check is in
 `rust/src/enumerate.rs`.
 
+### 6. Coset-spectrum parent rule
+
+The biggest lever, and the only one that attacks canon **call count**
+rather than per-call cost. Background: in McKay's canonical-augmentation
+framework, each candidate child `D = ⟨C, v⟩` is accepted iff `C` is the
+"canonical parent" of `D` — and the parent-selection function is *ours
+to choose*, subject only to being isomorphism-invariant and selecting a
+single `Aut(D)`-orbit of subcodes (McKay 1998; the canonical form is
+needed only to break ties). The textbook choice — also DFGHILM's and
+our original one — derives the parent from the canonical labeling, so
+**every candidate pays a full nauty call before the test even starts**,
+and at scale ~94–99.7 % of those calls reject the candidate. Worse,
+profiling showed 93.4 % of those rejections (N = 22) were ultimately
+decided by a 1.5 µs weight-enumerator comparison made *after* the
+~75 µs canon call.
+
+The fix is to select the parent by weight data directly. The parent of
+a rank-`(k+1)` code `D` is one of its `2^(k+1) − 1` hyperplanes (index-2
+subcodes `H_u`, one per nonzero functional `u`; every hyperplane of a
+doubly-even code is doubly-even). Define the complement-coset weight
+spectrum
+
+```
+φ_w(u) = #{ x ∈ D : wt(x) = w, u(x) = 1 },     φ(u) = (φ_4(u), φ_8(u), …)
+```
+
+and let the canonical parent be the `Aut(D)`-orbit of the hyperplane
+with lexicographically minimal `φ` — ties broken exactly like the old
+rule, but restricted to the argmin set. Both definitions are valid
+McKay parent functions; they enumerate the same equivalence classes.
+
+What makes φ cheap is that it is computable for **all hyperplanes at
+once** without nauty: working in the frame basis `[C's rows, v]` (where
+the candidate's own functional is the last coordinate), one Gray-code
+sweep collects the weight of all `2^(k+1)` codewords, and then a
+Walsh–Hadamard transform per weight stratum yields `φ_w(u)` for every
+`u` simultaneously in `(k+1)·2^(k+1)` integer adds. The lex comparison
+is evaluated lazily, stratum by stratum, shrinking the argmin set `M`
+until one of three exits:
+
+- the candidate's functional drops out of `M` → **reject, with no RREF,
+  no cache probe, and no nauty call at all** (the common case:
+  94–97 % of candidates at `N = 20–24`);
+- `M` is exactly the candidate → **accept** (nauty is then called as
+  before — the recursion genuinely needs `Aut(D)` and `|Aut(D)|`, so
+  accepts cost what they always cost);
+- the full spectra tie across several functionals (high-symmetry codes,
+  e.g. extended Hamming) → nauty + the old σ-based tie-break restricted
+  to the tied set, i.e. exactly the legacy cost path (~2 % of
+  candidates).
+
+The φ evaluation costs 1–4 µs per candidate against the ~30–75 µs canon
+call it replaces, uses ~100 KB of grow-only thread-local scratch, and
+involves no caching or cross-code state. Above a configurable child-rank
+cap (default 13, only relevant at `N ≥ 30`) the kernel falls back to the
+legacy rule per rank — sound, because rank is isomorphism-invariant and
+the exactly-once argument is local to one child rank.
+
+Measured same-session A/B (13700K-equivalent host, both rules, all
+DFGHILM Table 3 cells verified on every run):
+
+| N  | mode      | legacy   | coset-spectrum | wall ratio | canon calls     |
+|----|-----------|---------:|---------------:|-----------:|----------------:|
+| 22 | seq       |  6.48 s  |       0.85 s   |   **7.6×** | 78,750 → 5,248  |
+| 24 | 24t, d=5  |  7.98 s  |       2.60 s   |   **3.1×** | 1.27 M → 39.5 K |
+| 26 | 24t, d=5  | 168.3 s  |      26.4 s    |   **6.5×** | 45.5 M → 523 K  |
+
+The canon-call reduction grows with `N` (15× → 32× → **87×**), tracking
+exactly the calls-per-class explosion that motivated the lever, so it
+strengthens toward the `N ≥ 28` frontier. Correctness is enforced at
+run time by the mass-formula panic (any duplicate or missed class at
+any rank aborts), and the test suite pins rule-equivalence on per-rank
+class counts and `|Aut|` multisets at `N = 10–16`, audit-mode byte
+identity, per-rank rule mixing, and parallel-vs-sequential agreement.
+
+Knobs: `DOUBLY_EVEN_PARENT_RULE` = `coset-spectrum` (default) |
+`legacy` (kill-switch / A-B control) | `audit` (instrumented legacy);
+`DOUBLY_EVEN_PHI_MAX_RANK` (default 13).
+
+Code: `rust/src/parent_rule.rs` (cascade + tie-break),
+`rust/src/enumerate.rs::test_candidate` (dispatch); Python prototype
+`scripts/experimental/d15_phi_rule_check.py`; measurement harness
+`scripts/experimental/d15_phi_audit.py`.
+
 ## Cumulative result
 
-At `N = 22`, mean of 3 runs on the 13700K, parallel kernel at the
-recommended tuning:
+At `N = 22`, mean of 3 runs, parallel kernel at the recommended tuning
+(rows above the last: 13700K; last row: 13700K-equivalent container,
+same-session A/B against the legacy rule):
 
 | baseline                                     | wall    | ratio |
 |----------------------------------------------|--------:|------:|
 | pure Python, BFS over `C⊥` (no Q_C orbit-min)| > 600 s | 1.00× |
 | Sage `self_orthogonal_binary_codes`          | 363.85 s | 1.65× |
-| post all levers, sequential                  |  6.64 s | ≥ 90× |
-| post all levers, parallel (t=20, d=4)        | **0.691 s** | **≥ 870×** |
+| legacy parent rule, sequential               |  6.64 s | ≥ 90× |
+| legacy parent rule, parallel (t=20, d=4)     |  0.691 s | ≥ 870× |
+| coset-spectrum rule, sequential              |  0.848 s | ≥ 700× |
+| coset-spectrum rule, parallel (t=24, d=4)    | **0.237 s** | **≥ 2500×** |
 
 The "≥" is because the pure-Python BFS was killed by timeout — we never
 let it run to completion at `N = 22`, only at `N = 20` (235 s). The
-ratio `0.691 / 363.85 = 525×` against Sage is anchored to a measured
+ratio `0.237 / 363.85 ≈ 1535×` against Sage is anchored to a measured
 run.
 
-## What we did not beat
+## What we beat last, and what is left
 
-The 13700K parallel-kernel `N = 22` wall of 0.691 s has roughly 90 % of
-its time inside sparsenauty's C code. The remaining ~10 % is split
-across Rust enumerate overhead (`apply_permutation`, `row_reduce`,
-the orbit BFS in `subspace_in_orbit`, mass-accumulator bookkeeping); no
-individual slice is > 2 % of wall.
-
-A second framing matters more for the `N ≥ 26` frontier: at `N = 29`
-the kernel makes ~**364 canon calls per emitted class** (15.6 at
-`N = 22`, growing ~2.6× per 2-step — see
+Until 2026-06 the framing was: ~90 % of the parallel `N = 22` wall sat
+inside sparsenauty's C code, per-call cost was already at its
+algorithmic floor, and at `N = 29` the kernel made ~**364 canon calls
+per emitted class** (15.6 at `N = 22`, growing ~2.6× per 2-step — see
 [`performance.md`](performance.md#the-scaling-story-per-call-cost-drops-calls-per-class-explodes)).
-Per-call cost is *dropping* with `N`, but the canonical-augmentation
-candidate count is exploding faster than the class count. A real >2×
-lever at `N = 29` would have to cut the number of canon calls per
-class, not the cost per call.
+The conclusion — *a real >2× lever must cut the number of canon calls
+per class, not the cost per call* — is exactly what the coset-spectrum
+parent rule (lever 6) then did: ~94–97 % of candidates now resolve
+without any canon call, and the per-class call multiplicity collapses
+(87× fewer calls at `N = 26`).
+
+What remains after that lever, at `N = 22` sequential: canon is 47.8 %
+of the (7.6×-smaller) wall and quotient-space candidate generation is
+38.3 %. Neither dominates outright anymore — future levers have to
+re-profile first, and the σ_Q candidate machinery is for the first
+time a co-equal target.
 
 Three classes of further improvement were investigated and closed during
 the 2026-05-15 → 2026-05-23 optimisation sprint:
