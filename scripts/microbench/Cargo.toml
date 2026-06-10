@@ -50,3 +50,7 @@ debug = true
 [[bin]]
 name = "orbit_probe"
 path = "src/orbit_probe.rs"
+
+[[bin]]
+name = "vhalf_sweep"
+path = "src/vhalf_sweep.rs"
