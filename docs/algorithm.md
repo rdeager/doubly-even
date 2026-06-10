@@ -421,13 +421,16 @@ per-rank accept identity against the legacy rule on full `N = 22` / `24`
 runs, mass-stop on and off.
 
 Measured same-session A/B (median of 3, all DFGHILM Table 3 cells
-verified per run): the chain decides **34 / 41 / 43 %** of *all*
-candidates at `N = 22 / 24 / 26` in O(1) at stratum ≥ 2; spectrum
+verified per run): the chain decides **34 / 41 / 43 / 38 %** of *all*
+candidates at `N = 22 / 24 / 26 / 27` in O(1) at stratum ≥ 2; spectrum
 evaluation drops 3.78× at `N = 26` (43.7 → 11.6 s of a 126.6 s
-sequential wall → **97.2 s**, 1.30×); `N = 24` sequential 7.75 →
-7.52 s. What remains of the spectrum evaluation is ~67 % the
-unconditional XOR + popcount sweep over the shared codeword table —
-a pure SIMD target, deliberately left for a vectorisation pass.
+sequential wall → **97.2 s**, 1.30×) and 4.62× at `N = 27`, where the
+*parallel* wall drops 94.1 → **66.1 s** (1.42× — large enough that a
+24-thread desktop beats the pre-parent-rule 72-core cloud `N = 27` row
+5.7×); `N = 24` sequential 7.75 → 7.52 s. What remains of the spectrum
+evaluation is ~67 % the unconditional XOR + popcount sweep over the
+shared codeword table — a pure SIMD target, deliberately left for a
+vectorisation pass.
 
 No knobs (exact, bit-identical; `DOUBLY_EVEN_PARENT_RULE=legacy`
 bypasses the whole spectrum rule if ever needed). Code:

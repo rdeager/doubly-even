@@ -36,8 +36,16 @@ t=24 d=5; `N = 26` 169.8 s t=24 d=5.
 Parallel `N ≤ 26` is bounded by the serial seeder span (worker
 active/wall is 44 % at `N = 26`, 19 % at `N = 24`, t=24 d=4), which is
 why the chain's 1.30× sequential win shows up as only ~1.03× parallel
-on the desktop — on a many-core cloud run the sequential per-candidate
-saving carries into the core-hours directly.
+on the desktop at those sizes. One step up the win emerges: at
+**`N = 27`** (same-hour A/B, median of 3, t=24 d=4 cap=500K) the
+chain takes the parallel wall from 94.1 s to **66.1 s (1.42×)** —
+total work grows ~6× per step while the seeder span only roughly
+doubles, so the worker share recovers and the per-candidate saving
+(4.6× on spectrum evaluation at `N = 27`) lands on the wall. The
+2,673,492 classes reproduce the `c4a-standard-72` record exactly —
+a 24-thread desktop now beats that pre-parent-rule 72-core cloud row
+5.7×. On a many-core cloud run the sequential saving carries into
+the core-hours directly.
 
 ## Cloud runs
 
