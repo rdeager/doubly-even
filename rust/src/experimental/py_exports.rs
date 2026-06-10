@@ -322,14 +322,20 @@ fn py_all_invariants(
 // but accumulates per-worker / per-seed timing. Only registered when the
 // `parallel_profiling` Cargo feature is on.
 
-/// Phase 3 parallel profiling entry. Same return shape as
-/// `enumerate_doubly_even` plus a profile payload:
+/// Phase 3 parallel profiling entry (re-pipelined + seeder timeline,
+/// 2026-06-10). Same return shape as `enumerate_doubly_even` plus a
+/// 7-element profile payload (was 4 in the pre-timeline shim — bench.py
+/// hard-rejects the old arity so stale wheels fail loudly):
 ///
 ///   `(workers: list[(worker_id, active_ns, idle_ns, seed_count)],
-///     seeds:   list[(worker_id, seed_id, ns, nodes, emitted)],
-///     frontier_depth, total_wall_ns)`
+///     seeds:   list[(worker_id, seed_id, start_ns, ns, nodes, emitted)],
+///     frontier_depth, total_wall_ns,
+///     enqueues: list[(ready_ns, sent_ns)],          # index == seed_id
+///     sigma_spans: list[(k, l, pooled, start_ns, end_ns)],
+///     seeder_done_ns)`
 ///
-/// Only available when the kernel is built with
+/// All timestamps are relative to the run-start epoch (`total_wall_ns`'s
+/// zero). Only available when the kernel is built with
 /// `--features parallel_profiling`. `num_threads` must be >= 2 to
 /// exercise the worker pool.
 #[cfg(feature = "parallel_profiling")]
@@ -351,8 +357,11 @@ fn py_enumerate_doubly_even_with_profile(
     Vec<Vec<u64>>,
     (
         Vec<(u32, u64, u64, u32)>,
-        Vec<(u32, u32, u64, u64, u32)>,
+        Vec<(u32, u32, u64, u64, u64, u32)>,
         u32,
+        u64,
+        Vec<(u64, u64)>,
+        Vec<(u32, u32, bool, u64, u64)>,
         u64,
     ),
 )> {
@@ -388,16 +397,24 @@ fn py_enumerate_doubly_even_with_profile(
         .iter()
         .map(|w| (w.worker_id, w.active_ns, w.idle_ns, w.seed_count))
         .collect();
-    let seeds: Vec<(u32, u32, u64, u64, u32)> = profile
+    let seeds: Vec<(u32, u32, u64, u64, u64, u32)> = profile
         .seeds
         .iter()
-        .map(|s| (s.worker_id, s.seed_id, s.ns, s.nodes, s.emitted))
+        .map(|s| (s.worker_id, s.seed_id, s.start_ns, s.ns, s.nodes, s.emitted))
         .collect();
     Ok((
         result,
         stats,
         per_k,
-        (workers, seeds, profile.frontier_depth, profile.total_wall_ns),
+        (
+            workers,
+            seeds,
+            profile.frontier_depth,
+            profile.total_wall_ns,
+            profile.seeder.enqueues.clone(),
+            profile.seeder.sigma_spans.clone(),
+            profile.seeder.seeder_done_ns,
+        ),
     ))
 }
 

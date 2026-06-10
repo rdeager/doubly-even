@@ -1,14 +1,22 @@
-//! crate::experimental::parallel_profile — Phase 3 parallel-scaling
-//! profile entry point.
+//! crate::experimental::parallel_profile — parallel-scaling profile
+//! entry point (Phase 3, re-pipelined for the seeder timeline 2026-06-10).
 //!
-//! Mirrors `enumerate::enumerate_doubly_even_parallel` but wraps each
-//! worker's seed loop with `Instant`-based timing and snapshots the
-//! in-flight stats counters so we can recover per-seed work. The kernel
-//! is conceptually identical — every algorithmic decision (frontier_depth,
-//! per-worker inf_quota, channel cap) matches the production entry.
-//! Diverges only in the channel item type (`(u32 seed_id, SeedFrontier)`)
-//! and the extra `(WorkerProfile, Vec<SeedProfile>)` shipped back through
-//! the result channel.
+//! Mirrors `enumerate::enumerate_doubly_even_parallel_with_seeder` —
+//! workers spawn first and block on the bounded task channel, the seeder
+//! runs pipelined on the main thread with the `GlobalMassTracker` and the
+//! D16 seeder helper pool installed — and wraps each worker's seed loop
+//! with `Instant`-based timing plus snapshots of the in-flight stats
+//! counters so we can recover per-seed work. On top of the original
+//! per-worker/per-seed rows it captures the SEEDER TIMELINE: per-seed
+//! enqueue timestamps (ready/sent, exposing bounded-channel backpressure)
+//! and per-rank σ_Q call spans, all relative to one run-start epoch.
+//!
+//! HISTORY NOTE: before 2026-06-10 this harness was a two-phase shim
+//! (eager frontier collection, then dispatch; no seeder pool, no global
+//! mass tracker) — see git history. Profile payloads recorded by that
+//! shim (`d16-par-profile-*`) are NOT comparable to payloads from this
+//! pipelined driver: the old `total_wall_ns` serialized the seeder span
+//! ahead of all worker activity and recv-idle was structurally ~0.
 //!
 //! Gated behind Cargo feature `parallel_profiling` (default OFF) so the
 //! production parallel build stays byte-identical. The findings driven by
@@ -18,7 +26,8 @@
 use std::rc::Rc;
 
 use crate::enumerate::{
-    enumerate_doubly_even, merge_finalized, EnumeratedRaw, SeedFrontier, WorkerState,
+    enumerate_doubly_even, merge_finalized, EnumeratedRaw, GlobalMassTracker, SeedFrontier,
+    WorkerState,
 };
 use crate::types::BinVec;
 
@@ -34,6 +43,12 @@ pub struct WorkerProfile {
 pub struct SeedProfile {
     pub worker_id: u32,
     pub seed_id: u32,
+    /// Epoch-relative time at which this worker's `recv()` returned the
+    /// seed — the moment work on it could begin. Joined with the seeder's
+    /// `enqueues[seed_id]` this gives per-seed queue latency, and the
+    /// interval `[start_ns, start_ns + ns)` feeds the busy-worker
+    /// sweep-line that locates the starved window.
+    pub start_ns: u64,
     pub ns: u64,
     /// Stand-in for "recursion nodes visited under this seed" — the
     /// `is_canonical_augmentation` call counter, snapshotted before and
@@ -43,22 +58,40 @@ pub struct SeedProfile {
     pub emitted: u32,
 }
 
+/// Seeder-side timeline, all timestamps relative to the run-start epoch
+/// (the same epoch `total_wall_ns` and `SeedProfile::start_ns` use).
+#[derive(Default, Debug)]
+pub struct SeederTimeline {
+    /// `(ready_ns, sent_ns)` per seed, in send order; index == `seed_id`.
+    /// `sent − ready` is the bounded-channel backpressure wait — the
+    /// direct "workers saturated" signal.
+    pub enqueues: Vec<(u64, u64)>,
+    /// `(k, l, pooled, start_ns, end_ns)` per seeder σ_Q call.
+    pub sigma_spans: Vec<(u32, u32, bool, u64, u64)>,
+    /// Epoch-relative instant at which `traverse_seed` returned and the
+    /// helper pool was dropped (start of the pure drain tail).
+    pub seeder_done_ns: u64,
+}
+
 #[derive(Default, Debug)]
 pub struct ParallelProfile {
     pub workers: Vec<WorkerProfile>,
     pub seeds: Vec<SeedProfile>,
     pub frontier_depth: u32,
     pub total_wall_ns: u64,
+    pub seeder: SeederTimeline,
 }
 
 /// Profiling variant of `enumerate::enumerate_doubly_even_parallel`.
 /// Returns the usual `(output, stats_flat, per_k_stats)` plus a
 /// [`ParallelProfile`] with one row per worker (active/idle ns, seed
-/// count) and one row per seed (worker id, ns, nodes-visited proxy,
-/// classes-emitted).
+/// count), one row per seed (worker id, start, ns, nodes-visited proxy,
+/// classes-emitted), and the seeder timeline.
 ///
-/// All algorithmic decisions match the production entry so the timing
-/// data is comparable to a production run within timing-overhead noise.
+/// All algorithmic decisions match the production entry — pipelined
+/// seeder, bounded channel of the same capacity, shared mass tracker,
+/// env-resolved seeder helper pool — so the timing data reflects
+/// production overlap and contention within timing-overhead noise.
 pub fn enumerate_doubly_even_parallel_with_profile(
     n: u32,
     max_k: u32,
@@ -92,54 +125,18 @@ pub fn enumerate_doubly_even_parallel_with_profile(
             seeds: Vec::new(),
             frontier_depth,
             total_wall_ns: total_ns,
+            seeder: SeederTimeline::default(),
         };
         return (out, stats, per_k, profile);
     }
 
     let rule = crate::parent_rule::ParentRule::from_env();
-    let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n, rule);
-    // Bridge V3's channel-based seeder into this profile harness's
-    // two-phase pattern: collect the frontier eagerly via an unbounded
-    // channel, then dispatch it labelled with seed_id afterwards.
-    // (The profile harness predates the pipelined seeder; this is a
-    // shim so parallel_profiling still compiles. For the full
-    // production overlap, see `enumerate::enumerate_doubly_even_parallel`.)
-    let frontier: Vec<SeedFrontier> = {
-        let (frontier_tx, frontier_rx) = unbounded::<SeedFrontier>();
-        let zero_rref: Vec<BinVec> = Vec::new();
-        let zero_pivots: Vec<u32> = Vec::new();
-        let zero_info = seed_state.canon_info(&zero_rref);
-        seed_state.traverse_seed(
-            zero_rref,
-            zero_pivots,
-            zero_info,
-            frontier_depth,
-            &frontier_tx,
-        );
-        drop(frontier_tx);
-        frontier_rx.into_iter().collect()
-    };
-    if frontier.is_empty() {
-        let (out, stats, per_k) = seed_state.finalize();
-        let total_ns = total_t0.elapsed().as_nanos() as u64;
-        let profile = ParallelProfile {
-            workers: vec![WorkerProfile {
-                worker_id: 0,
-                active_ns: total_ns,
-                idle_ns: 0,
-                seed_count: 0,
-            }],
-            seeds: Vec::new(),
-            frontier_depth,
-            total_wall_ns: total_ns,
-        };
-        return (out, stats, per_k, profile);
-    }
 
+    // Worker pool spawns first and waits on the (initially empty) bounded
+    // channel — identical shape to the production driver, so seeder DFS
+    // overlaps worker recursion and backpressure is real.
     let cap = (num_threads * 4).max(8);
-    // Channel carries (seed_id, SeedFrontier) so workers can attribute
-    // timing back to a stable identifier across runs.
-    let (task_tx, task_rx) = bounded::<(u32, SeedFrontier)>(cap);
+    let (task_tx, task_rx) = bounded::<SeedFrontier>(cap);
     type WorkerResult = (
         Vec<EnumeratedRaw>,
         Vec<u128>,
@@ -149,6 +146,8 @@ pub fn enumerate_doubly_even_parallel_with_profile(
     );
     let (result_tx, result_rx) = unbounded::<WorkerResult>();
 
+    let global_mass = std::sync::Arc::new(GlobalMassTracker::new(quota.clone()));
+
     let mut handles = Vec::with_capacity(num_threads);
     for worker_id in 0..num_threads as u32 {
         let task_rx = task_rx.clone();
@@ -156,9 +155,12 @@ pub fn enumerate_doubly_even_parallel_with_profile(
         let mk = max_k;
         let nn = n;
         let fact = factorial_n;
+        let gm = std::sync::Arc::clone(&global_mass);
+        let epoch = total_t0; // Instant is Copy; one shared epoch.
         handles.push(std::thread::spawn(move || {
             let inf_quota = vec![u128::MAX; (mk + 1) as usize];
             let mut worker = WorkerState::new(nn, mk, inf_quota, fact, rule);
+            worker.install_global_mass(gm);
             let mut seed_profiles: Vec<SeedProfile> = Vec::new();
             let mut active_ns: u64 = 0;
             let mut idle_ns: u64 = 0;
@@ -168,10 +170,12 @@ pub fn enumerate_doubly_even_parallel_with_profile(
                 let item = task_rx.recv();
                 let idle_dt = recv_t0.elapsed().as_nanos() as u64;
                 idle_ns += idle_dt;
-                let (seed_id, seed) = match item {
+                let seed = match item {
                     Ok(x) => x,
                     Err(_) => break,
                 };
+                let start_ns = epoch.elapsed().as_nanos() as u64;
+                let seed_id = seed.seed_id;
                 let nodes_before = worker.stats_is_canon_aug_calls;
                 let emitted_before = worker.output.len() as u32;
                 let active_t0 = Instant::now();
@@ -182,6 +186,7 @@ pub fn enumerate_doubly_even_parallel_with_profile(
                 seed_profiles.push(SeedProfile {
                     worker_id,
                     seed_id,
+                    start_ns,
                     ns: active_dt,
                     nodes: worker.stats_is_canon_aug_calls - nodes_before,
                     emitted: worker.output.len() as u32 - emitted_before,
@@ -200,12 +205,32 @@ pub fn enumerate_doubly_even_parallel_with_profile(
     drop(task_rx);
     drop(result_tx);
 
-    for (seed_id, seed) in frontier.into_iter().enumerate() {
-        task_tx
-            .send((seed_id as u32, seed))
-            .expect("worker pool closed unexpectedly");
+    // Seeder on the main thread, pipelined into the bounded channel,
+    // with the epoch armed so traverse_seed records the timeline.
+    let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n, rule);
+    seed_state.install_global_mass(std::sync::Arc::clone(&global_mass));
+    let (seeder_threads, seeder_min_l) = crate::seeder_pool::SeederPool::env_defaults(num_threads);
+    if seeder_threads >= 2 {
+        seed_state.install_seeder_pool(std::sync::Arc::new(
+            crate::seeder_pool::SeederPool::new(seeder_threads, seeder_min_l),
+        ));
     }
+    seed_state.profile_epoch = Some(total_t0);
+    {
+        let zero_rref: Vec<BinVec> = Vec::new();
+        let zero_pivots: Vec<u32> = Vec::new();
+        let zero_info = seed_state.canon_info(&zero_rref);
+        seed_state.traverse_seed(zero_rref, zero_pivots, zero_info, frontier_depth, &task_tx);
+    }
+    seed_state.clear_seeder_pool();
+    let seeder_done_ns = total_t0.elapsed().as_nanos() as u64;
     drop(task_tx);
+
+    let seeder_timeline = SeederTimeline {
+        enqueues: std::mem::take(&mut seed_state.profile_enqueues),
+        sigma_spans: std::mem::take(&mut seed_state.profile_sigma_spans),
+        seeder_done_ns,
+    };
 
     let mut combined = seed_state.finalize();
     let mut worker_profiles: Vec<WorkerProfile> = Vec::with_capacity(num_threads);
@@ -231,6 +256,7 @@ pub fn enumerate_doubly_even_parallel_with_profile(
         seeds: all_seeds,
         frontier_depth,
         total_wall_ns,
+        seeder: seeder_timeline,
     };
     (combined.0, combined.1, combined.2, profile)
 }

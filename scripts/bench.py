@@ -318,7 +318,22 @@ def run_one_with_profile(N: int, num_threads: int) -> PerNResult:
         N, cap, quota_vec, factorial_N, num_threads,
     )
     wall = time.perf_counter() - t0
-    workers, seeds, frontier_depth, total_wall_ns = profile
+    if len(profile) != 7:
+        raise RuntimeError(
+            f"profile payload has {len(profile)} elements, expected 7 — "
+            "the installed wheel predates the seeder-timeline re-pipeline "
+            "(2026-06-10). Rebuild from /workspace/src: maturin build "
+            "--release --features parallel_profiling -m rust/Cargo.toml"
+        )
+    (
+        workers,
+        seeds,
+        frontier_depth,
+        total_wall_ns,
+        enqueues,
+        sigma_spans,
+        seeder_done_ns,
+    ) = profile
     result = PerNResult(N=N, seconds=wall)
     for rref, _ccol, _gens, aord_str, _orbits in raw:
         k = len(rref)
@@ -348,12 +363,30 @@ def run_one_with_profile(N: int, num_threads: int) -> PerNResult:
             {
                 "worker_id": int(s[0]),
                 "seed_id": int(s[1]),
-                "ns": int(s[2]),
-                "nodes": int(s[3]),
-                "emitted": int(s[4]),
+                "start_ns": int(s[2]),
+                "ns": int(s[3]),
+                "nodes": int(s[4]),
+                "emitted": int(s[5]),
             }
             for s in seeds
         ],
+        # Seeder timeline (2026-06-10 re-pipeline). All timestamps are
+        # ns relative to the run-start epoch (total_wall_ns's zero).
+        "seed_enqueues": [
+            {"seed_id": i, "ready_ns": int(e[0]), "sent_ns": int(e[1])}
+            for i, e in enumerate(enqueues)
+        ],
+        "sigma_spans": [
+            {
+                "k": int(sp[0]),
+                "L": int(sp[1]),
+                "pooled": bool(sp[2]),
+                "start_ns": int(sp[3]),
+                "end_ns": int(sp[4]),
+            }
+            for sp in sigma_spans
+        ],
+        "seeder_done_ns": int(seeder_done_ns),
     }
     return result
 
@@ -418,6 +451,92 @@ def render_profile_summary(r: PerNResult) -> str:
                 f"{s['ns'] / 1e6:>7.1f} ms  "
                 f"nodes={s['nodes']:>7}  emitted={s['emitted']:>5}"
             )
+    timeline = render_timeline_summary(r)
+    if timeline:
+        lines.append(timeline)
+    return "\n".join(lines)
+
+
+def render_timeline_summary(r: PerNResult) -> str:
+    """Seeder-timeline section of the profile summary (2026-06-10
+    re-pipeline). Quantifies the four things the old payload could only
+    let us infer: pre-first-seed wait, per-rank σ_Q spans on the seeder's
+    critical path, bounded-channel backpressure (workers saturated), and
+    the busy-worker profile during the seeder span (workers starved)."""
+    p = r.parallel_profile
+    if p is None or not p.get("seed_enqueues"):
+        return ""
+    nt = p["num_threads"]
+    enq = p["seed_enqueues"]
+    spans = p["sigma_spans"]
+    seeds = p["seeds"]
+    seeder_done = p["seeder_done_ns"]
+    wall = p["total_wall_ns"]
+
+    lines = ["  seeder timeline:"]
+    sent_ts = [e["sent_ns"] for e in enq]
+    first_ready = enq[0]["ready_ns"]
+    lines.append(
+        f"    seeds sent={len(enq)}  first seed ready at {first_ready / 1e6:.1f} ms"
+        f"  seeder done at {seeder_done / 1e6:.1f} ms"
+        f" ({100.0 * seeder_done / max(wall, 1):.0f} % of wall)"
+    )
+    deciles = []
+    for frac in (0.1, 0.5, 0.9):
+        idx = min(int(frac * len(sent_ts)), len(sent_ts) - 1)
+        deciles.append(f"{int(frac * 100)} %@{sent_ts[idx] / 1e6:.0f} ms")
+    backpressure_ns = sum(e["sent_ns"] - e["ready_ns"] for e in enq)
+    blocked = sum(1 for e in enq if e["sent_ns"] - e["ready_ns"] > 100_000)
+    lines.append(
+        f"    seed arrival: {'  '.join(deciles)}  |  backpressure: "
+        f"{backpressure_ns / 1e6:.1f} ms total over {blocked} blocked sends"
+    )
+
+    # Per-(k, L) σ_Q rows — the seeder's serial critical path.
+    by_kl: dict[tuple[int, int, bool], list[tuple[int, int]]] = {}
+    for sp in spans:
+        by_kl.setdefault((sp["k"], sp["L"], sp["pooled"]), []).append(
+            (sp["start_ns"], sp["end_ns"])
+        )
+    lines.append("    sigma_Q spans (k, L, pooled, calls, sum, window):")
+    for (k, L, pooled), ivs in sorted(by_kl.items()):
+        total = sum(e - s for s, e in ivs)
+        lines.append(
+            f"      k={k} L={L:>2} {'pooled' if pooled else 'serial':>6}  "
+            f"calls={len(ivs):>5}  sum={total / 1e6:>8.1f} ms  "
+            f"[{min(s for s, _ in ivs) / 1e6:>7.1f}, "
+            f"{max(e for _, e in ivs) / 1e6:>8.1f}] ms"
+        )
+
+    # Busy-worker sweep-line over seed intervals, clipped to the seeder
+    # span: how starved was the worker pool while the seeder ran?
+    events: list[tuple[int, int]] = []
+    for s in seeds:
+        a, b = s["start_ns"], s["start_ns"] + s["ns"]
+        a, b = min(a, seeder_done), min(b, seeder_done)
+        if b > a:
+            events.append((a, 1))
+            events.append((b, -1))
+    events.sort()
+    busy_integral = 0  # ns·workers
+    busy = 0
+    prev_t = 0
+    for t, d in events:
+        busy_integral += busy * (t - prev_t)
+        busy += d
+        prev_t = t
+    avg_busy = busy_integral / max(seeder_done, 1)
+    starved_ws = (nt * seeder_done - busy_integral) / 1e9
+    lines.append(
+        f"    during seeder span: avg busy workers = {avg_busy:.1f}/{nt}"
+        f"  (idle worker-seconds = {starved_ws:.2f})"
+    )
+    if seeds:
+        last_seed_end = max(s["start_ns"] + s["ns"] for s in seeds)
+        lines.append(
+            f"    drain tail: last seed ends {last_seed_end / 1e6:.1f} ms"
+            f"  (wall {wall / 1e6:.1f} ms)"
+        )
     return "\n".join(lines)
 
 

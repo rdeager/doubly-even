@@ -102,6 +102,12 @@ pub(crate) struct SeedFrontier {
     pub rref: Vec<BinVec>,
     pub pivots: Vec<u32>,
     pub info: CachedInfo,
+    /// Stable enqueue index (== index into the seeder's
+    /// `profile_enqueues`), so worker-side seed timings can be joined
+    /// with the seeder timeline. Profiling builds only; always 0 when
+    /// the epoch isn't armed.
+    #[cfg(feature = "parallel_profiling")]
+    pub seed_id: u32,
 }
 
 /// D13-V4 cut 4: shared cross-worker mass tracker for the parallel path.
@@ -181,6 +187,21 @@ pub(crate) struct WorkerState {
     /// already saturated). `None` ⇒ exact pre-D16 sequential calls.
     #[cfg(feature = "parallel")]
     seeder_pool: Option<std::sync::Arc<crate::seeder_pool::SeederPool>>,
+    /// Seeder-timeline instrumentation (profiling builds only). When the
+    /// profile driver arms `profile_epoch`, [`traverse_seed`] records
+    /// epoch-relative seed-enqueue timestamps and per-rank σ_Q call spans
+    /// into the two Vecs. `None` on workers, on the sequential path, and
+    /// on production drivers — the recording branches are never taken.
+    #[cfg(feature = "parallel_profiling")]
+    pub(crate) profile_epoch: Option<std::time::Instant>,
+    /// One `(ready_ns, sent_ns)` pair per enqueued seed, in send order;
+    /// the index is the seed's `seed_id`. `sent_ns − ready_ns` is the
+    /// bounded-channel backpressure wait (workers saturated).
+    #[cfg(feature = "parallel_profiling")]
+    pub(crate) profile_enqueues: Vec<(u64, u64)>,
+    /// One `(k, l, pooled, start_ns, end_ns)` row per seeder σ_Q call.
+    #[cfg(feature = "parallel_profiling")]
+    pub(crate) profile_sigma_spans: Vec<(u32, u32, bool, u64, u64)>,
     /// When true, the two mass-stop branches in [`traverse`] (`mass_at_k[k+1]
     /// >= quota[k+1]` checks before and inside the candidate loop) become
     /// no-ops. Read once from `DOUBLY_EVEN_NO_MASS_STOP` at construction;
@@ -455,6 +476,12 @@ impl WorkerState {
             global_mass: None,
             #[cfg(feature = "parallel")]
             seeder_pool: None,
+            #[cfg(feature = "parallel_profiling")]
+            profile_epoch: None,
+            #[cfg(feature = "parallel_profiling")]
+            profile_enqueues: Vec::new(),
+            #[cfg(feature = "parallel_profiling")]
+            profile_sigma_spans: Vec::new(),
             canon_cache: LruCache::new(canon_cache_capacity()),
             stats_is_canon_aug_calls_by_k: vec![0u64; len],
             stats_parent_eq_hits_by_k: vec![0u64; len],
@@ -1221,9 +1248,28 @@ impl WorkerState {
                 Ok(info) => info,
                 Err(rc) => (*rc).clone(),
             };
+            #[cfg(feature = "parallel_profiling")]
+            let (seed_id, ready_ns) = match self.profile_epoch {
+                Some(epoch) => (
+                    self.profile_enqueues.len() as u32,
+                    epoch.elapsed().as_nanos() as u64,
+                ),
+                None => (0, 0),
+            };
             task_tx
-                .send(SeedFrontier { rref, pivots, info: info_owned })
+                .send(SeedFrontier {
+                    rref,
+                    pivots,
+                    info: info_owned,
+                    #[cfg(feature = "parallel_profiling")]
+                    seed_id,
+                })
                 .expect("worker pool closed before seeder finished");
+            #[cfg(feature = "parallel_profiling")]
+            if let Some(epoch) = self.profile_epoch {
+                let sent_ns = epoch.elapsed().as_nanos() as u64;
+                self.profile_enqueues.push((ready_ns, sent_ns));
+            }
             return;
         }
         if let Some(w) = self.output_writer.as_mut() {
@@ -1256,6 +1302,10 @@ impl WorkerState {
         // candidates_q_ns delta records WALL time of a parallel region,
         // not CPU time — that shrinkage is the point of lever B.
         let cq_t0 = std::time::Instant::now();
+        #[cfg(feature = "parallel_profiling")]
+        let span_start_ns = self
+            .profile_epoch
+            .map(|epoch| epoch.elapsed().as_nanos() as u64);
         let candidates = match self.seeder_pool.as_deref() {
             Some(pool) => crate::candidates::doubly_even_candidates_q_pooled(
                 self.n,
@@ -1274,6 +1324,19 @@ impl WorkerState {
             ),
         };
         let cq_delta = cq_t0.elapsed().as_nanos();
+        #[cfg(feature = "parallel_profiling")]
+        if let (Some(epoch), Some(start_ns)) = (self.profile_epoch, span_start_ns) {
+            // Quotient dimension L = dim(C^⊥/C) = N − 2k; `pooled`
+            // replicates the dispatch gate in
+            // `candidates::doubly_even_candidates_q_pooled`.
+            let l = self.n.saturating_sub(2 * k);
+            let pooled = self
+                .seeder_pool
+                .as_deref()
+                .is_some_and(|p| p.size() >= 2 && l >= p.min_l);
+            let end_ns = epoch.elapsed().as_nanos() as u64;
+            self.profile_sigma_spans.push((k, l, pooled, start_ns, end_ns));
+        }
         self.stats_candidates_q_ns += cq_delta;
         self.stats_candidates_q_ns_by_k[k as usize] += cq_delta as u64;
         self.drain_cq_phase_timers();
