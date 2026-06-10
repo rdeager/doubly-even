@@ -295,6 +295,69 @@ fn bfs_m4r(reps_sorted: &[u64], gens: &[&Vec<u64>], l: u32, chunk: usize) -> Vec
     minima
 }
 
+/// Generalised m4r with a runtime chunk width `t` ∈ {4, 8, 16} — the
+/// classic M4R locality trade: per-chunk table is `2^t` u64s (t=4:
+/// 128 B, t=8: 2 KB, t=16: 512 KB — past L1), images cost
+/// `ceil(L/t)` lookups. Dynamic tables for all widths so the
+/// comparison isolates t, not the container.
+fn bfs_m4r_t(reps_sorted: &[u64], gens: &[&Vec<u64>], l: u32, chunk: usize, t: u32) -> Vec<u64> {
+    let n_chunks = (l as usize).div_ceil(t as usize);
+    let tsize = 1usize << t;
+    let tmask = (tsize - 1) as u64;
+    let tables: Vec<Vec<u64>> = gens
+        .iter()
+        .map(|g| {
+            let m: &[u64] = g.as_slice();
+            let mut tab = vec![0u64; n_chunks * tsize];
+            for c in 0..n_chunks {
+                let base = c * t as usize;
+                let width = (l as usize - base).min(t as usize);
+                let tc = &mut tab[c * tsize..(c + 1) * tsize];
+                for b in 1usize..1 << width {
+                    tc[b] = tc[b & (b - 1)] ^ m[base + b.trailing_zeros() as usize];
+                }
+            }
+            tab
+        })
+        .collect();
+    let apply = |tab: &[u64], x: u64| -> u64 {
+        let mut out = 0u64;
+        for c in 0..n_chunks {
+            out ^= tab[c * tsize + ((x >> (c as u32 * t)) & tmask) as usize];
+        }
+        out
+    };
+    let universe = 1usize << l;
+    let mut seen = BitSet::with_capacity(universe);
+    let mut minima: Vec<u64> = Vec::new();
+    let cap = reps_sorted.len();
+    let mut queue: Vec<u64> = Vec::with_capacity(cap);
+    let mut next: Vec<u64> = Vec::with_capacity(cap);
+    for &v in reps_sorted {
+        if seen.put(v as usize) {
+            continue;
+        }
+        minima.push(v);
+        queue.clear();
+        queue.push(v);
+        while !queue.is_empty() {
+            next.clear();
+            for cur_chunk in queue.chunks(chunk) {
+                for tab in &tables {
+                    for &current in cur_chunk {
+                        let new_v = apply(tab, current);
+                        if !seen.put(new_v as usize) {
+                            next.push(new_v);
+                        }
+                    }
+                }
+            }
+            std::mem::swap(&mut queue, &mut next);
+        }
+    }
+    minima
+}
+
 /// Exact, cheap generator reduction: drop duplicates and inverse-pairs.
 /// Sound because a finite group contains every element's inverse —
 /// `⟨S⟩ = ⟨S ∪ {g⁻¹}⟩` — so removing `g_j == g_i⁻¹` (or `g_j == g_i`)
@@ -510,8 +573,9 @@ fn main() {
         );
     }
 
-    // (n, k) -> [base, put, batch, bucket, m4r, m4r_red, gray, calls] cycles
-    let mut agg: std::collections::BTreeMap<(u32, u32), [u64; 8]> = Default::default();
+    // (n, k) -> [base, put, batch, bucket, m4r, m4r_red, t4, t8dyn, t16,
+    // gray, calls] cycles
+    let mut agg: std::collections::BTreeMap<(u32, u32), [u64; 11]> = Default::default();
     let mut gens_in_total = 0usize;
     let mut gens_red_total = 0usize;
 
@@ -568,6 +632,18 @@ fn main() {
             p.name
         );
 
+        // chunk-width sweep (--tsweep): t = 4 / 8 / 16, dynamic tables
+        if flag("--tsweep") {
+            for (slot, t) in [(6usize, 4u32), (7, 8), (8, 16)] {
+                let c0 = mono_cycles();
+                let m = bfs_m4r_t(&reps_sorted, &gens, p.l, chunk, t);
+                let cyc = mono_cycles().wrapping_sub(c0);
+                assert_eq!(m, minima_base, "t={t} minima diverge on {}", p.name);
+                let e = agg.entry((p.n, p.k)).or_default();
+                e[slot] += cyc;
+            }
+        }
+
         if show_stats {
             println!(
                 "{:<16} {:>2} {:>2} {:>5} {:>5} {:>9} {:>8} {:>10} {:>9.2} {:>9.1}",
@@ -591,8 +667,8 @@ fn main() {
         e[3] += bucket_cyc;
         e[4] += m4r_cyc;
         e[5] += m4r_red_cyc;
-        e[6] += gray_cyc;
-        e[7] += 1;
+        e[9] += gray_cyc;
+        e[10] += 1;
     }
 
     println!();
@@ -606,24 +682,49 @@ fn main() {
         "m4r_ms", "m4rR_ms", "put_x", "batch_x", "buckt_x", "m4r_x", "m4rR_x"
     );
     for ((n, k), e) in &agg {
-        let [base, put, batch, bucket, m4r, m4r_red, gray, calls] = *e;
+        let base = e[0];
         println!(
             "{:>3} {:>2} {:>6} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>8.2}",
             n,
             k,
-            calls,
-            cycles_to_ns(gray) / 1e6,
+            e[10],
+            cycles_to_ns(e[9]) / 1e6,
             cycles_to_ns(base) / 1e6,
-            cycles_to_ns(put) / 1e6,
-            cycles_to_ns(batch) / 1e6,
-            cycles_to_ns(bucket) / 1e6,
-            cycles_to_ns(m4r) / 1e6,
-            cycles_to_ns(m4r_red) / 1e6,
-            base as f64 / put.max(1) as f64,
-            base as f64 / batch.max(1) as f64,
-            base as f64 / bucket.max(1) as f64,
-            base as f64 / m4r.max(1) as f64,
-            base as f64 / m4r_red.max(1) as f64,
+            cycles_to_ns(e[1]) / 1e6,
+            cycles_to_ns(e[2]) / 1e6,
+            cycles_to_ns(e[3]) / 1e6,
+            cycles_to_ns(e[4]) / 1e6,
+            cycles_to_ns(e[5]) / 1e6,
+            base as f64 / e[1].max(1) as f64,
+            base as f64 / e[2].max(1) as f64,
+            base as f64 / e[3].max(1) as f64,
+            base as f64 / e[4].max(1) as f64,
+            base as f64 / e[5].max(1) as f64,
         );
+    }
+    if flag("--tsweep") {
+        println!();
+        println!(
+            "# m4r chunk-width sweep (dynamic tables; per-gen table = 2^t x 8B x ceil(L/t)/chunks)"
+        );
+        println!(
+            "{:>3} {:>2} {:>9} {:>9} {:>9} {:>9} {:>7} {:>7} {:>7}",
+            "N", "k", "base_ms", "t4_ms", "t8_ms", "t16_ms", "t4_x", "t8_x", "t16_x"
+        );
+        for ((n, k), e) in &agg {
+            let base = e[0];
+            println!(
+                "{:>3} {:>2} {:>9.1} {:>9.1} {:>9.1} {:>9.1} {:>7.2} {:>7.2} {:>7.2}",
+                n,
+                k,
+                cycles_to_ns(base) / 1e6,
+                cycles_to_ns(e[6]) / 1e6,
+                cycles_to_ns(e[7]) / 1e6,
+                cycles_to_ns(e[8]) / 1e6,
+                base as f64 / e[6].max(1) as f64,
+                base as f64 / e[7].max(1) as f64,
+                base as f64 / e[8].max(1) as f64,
+            );
+        }
     }
 }

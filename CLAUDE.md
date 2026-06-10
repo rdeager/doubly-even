@@ -190,31 +190,52 @@ Public docs **never use internal session labels (D5/D6/D10/D11/D13/V3/V4/V5)**.
 Those labels stay only in `/workspace/markdown/architecture/*.md` and in
 the section below.
 
-## Performance state (post-D17 E-chain)
+## Performance state (post-D18 m4r BFS)
 
 See `/workspace/markdown/architecture/04-optimisations.md` for the
-per-lever write-up (§D15–§D17 are the headline levers) and
+per-lever write-up (§D15–§D18 are the headline levers) and
 `architecture/05-retrospective.md` for the (now-amended) sign-off
 retrospective. The descriptive-name version of this is in
 `/workspace/src/docs/algorithm.md` (levers 6–8).
 
-Headline (post-D17, 2026-06-10 late evening, 13700K-equivalent dev
+Headline (post-D18, 2026-06-10 night session, 13700K-equivalent dev
 container; median of 3, all Table-3 cells verified per run; d = 4
-best at every benched N): **`N = 26` seq 97.2 s / par 11.5 s**
-(24t d=4 cap=500K); `N = 24` seq 7.52 s / par 1.77 s; `N = 22` seq
-0.796 s / par 0.24 s. Same-session vs D16: N=26 **1.30× seq** (φ
-itself 3.78×: 43.7 → 11.6 s; chain decides 42.9 % of ALL candidates
-O(1) at stratum ≥ 2); N=24 1.03× seq, φ 2.52×; N ≤ 24 parallel flat
-(seeder-Amdahl-bound: worker active/wall 44 % at N=26, 19 % at N=24,
-t24 d4 — same-hour D16 par controls 11.77 s / 1.77 s). Decisions
-identical to D16/D15/legacy: classes, canon calls AND phi_strata_sum
-bit-equal; audit VERDICT GO (N=22/24, ±mass-stop). Post-D17 N=26 seq
-shares: canon 44.1 / σ_Q 41.0 / φ 11.9 / other 3.0 % — residual φ is
-67 % v-half XOR+popcount sweep (the SIMD shape; sampled split
-`d17-pt2-postchain`). Kill-switches / A-B controls:
+best at every benched N): **`N = 26` seq 85.6 s / par 9.81 s**
+(24t d=4 cap=500K); `N = 24` seq 6.44 s / par ~1.7 s; `N = 22` seq
+0.698 s; `N = 27` par 66.9 s (flat vs D17 — worker-throttled, see
+the seeder-timeline note below). vs D17 same-session controls: N=26
+1.13× seq / 1.18× par, N=24 1.17× seq, N=22 1.14× seq. Decisions
+identical to D17/D16/D15/legacy: classes, canon calls AND
+phi_strata_sum bit-equal at N=22/24/26. The pre-D18 (D17) walls were:
+N=26 seq 97.2 s / par 11.5 s; N=24 seq 7.52 s; N=22 seq 0.796 s /
+par 0.24 s; full D17 history in `04-optimisations.md` §D17.
+Post-D17 N=26 seq shares were canon 44.1 / σ_Q 41.0 / φ 11.9 %;
+D18 cuts the σ_Q share (~41 → ~33 %), making canon (~50 % of the
+smaller wall) the largest consumer again. Residual φ is 67 % v-half
+XOR+popcount sweep (the SIMD shape). Kill-switches / A-B controls:
 `DOUBLY_EVEN_PARENT_RULE=legacy` (whole rule),
-`DOUBLY_EVEN_SEEDER_THREADS=0` (seeder pool only); D17 has no knob
-(exact, bit-identical). Pre-D15 records: N=22 0.691 s 20t / 6.64 s
+`DOUBLY_EVEN_SEEDER_THREADS=0` (seeder pool only); D17 and D18 have
+no knobs (exact, bit-identical; D18's m4r/walk crossover is the
+`M4R_MIN_L = 14` const in `rust/src/orbit.rs`).
+
+**2026-06-10 night session (pre-SIMD checklist, all five items done —
+see `markdown/notes/d18-wrapup-next-session-2026-06-10.md`, the
+next-session entry point):** (1) the min_l rule re-measured post-D17:
+**keep 22** (minl=20 LOSES 6–7 % at N=26, wash at N=27; the pooled
+BFS at L=20/21 never beats sequential even call-locally); (2) seeder
+timeline instrumentation shipped (`parallel_profiling` payload is now
+a 7-tuple — pre-2026-06-10 profile JSONs are from a two-phase shim
+and not comparable): workers are NOT starved during the k=3 σ_Q spans
+(13.9/24 busy at N=26, 19.1/24 at N=27; at N=27 the seeder itself is
+backpressure-blocked 30 s of its 51 s span) — **the adaptive pool
+gate is dead**; the measured next parallel lever is parallelising
+ACROSS the ~200 independent per-parent k=3 σ_Q calls, not inside one
+BFS; (3) `phi_replay` re-synced to the D16/D17 cascade + new
+`vhalf_sweep` bin (SIMD target baseline: 0.75 ns/elem ≈ 12 GB/s
+scalar, no cache cliff); (4) **D18 shipped** (lever 18 below);
+(5) PERFMON verified (perf_event_open + sampling work; samply needs
+the host's `--ulimit memlock=-1:-1` respawn — fixed in the spawn
+script, verify samply first thing next session). Pre-D15 records: N=22 0.691 s 20t / 6.64 s
 seq; N=24 8.90 s; N=26 169.8 s; N=28 61 min on c4a-72, ~$3. The cloud
 rows predate D15+D16+D17 — **a post-D17 N ≥ 28 cloud run is the
 obvious next datapoint** (N=29 count-anchored forecast: **1.0–1.5 h**
@@ -424,6 +445,26 @@ Cumulative levers, oldest first:
     have every stratum populated, so the v-only chain reject almost
     never fires in production (it dominates in random-frame tests) —
     the bound reject + parent-side filter do the work.
+18. **D18 m4r orbit-min BFS** (2026-06-10 night;
+    `04-optimisations.md` §D18). The σ_Q focused profile (real-input
+    microbench `scripts/microbench/src/orbit_probe.rs` replaying 446
+    dumped rank-2/3 parents from N=26/27) showed the orbit-min BFS is
+    COMPUTE-bound on `mat_apply` (probes are L2/L3-resident at
+    L=20–23; the singular set is group-invariant so the closure
+    visits all ~2^(L−2) reps; orbits are few and giant). Probe-side
+    restructures all failed the ship bar (put 1.03×, batch 0.98×,
+    radix-bucket 0.85×); generator dedupe+inverse-drop is sound but
+    near-empty. The winner: per-generator method-of-four-Russians
+    byte tables (`ceil(L/8)` L1 loads + XORs per image vs a
+    ~popcount-step chained walk), gen-major over 1024-element
+    frontier chunks — **1.84–1.94× on the BFS**, byte-identical
+    minima (per-level new-element set is probe-order-independent).
+    `rust/src/orbit.rs` (`m4r_build`/`orbit_minima_m4r`,
+    `M4R_MIN_L=14`); sequential + pooled arms. Wall: N=22 1.14× /
+    N=24 1.17× / N=26 1.13× seq, N=26 par 1.18×, N=27 par flat
+    (worker-throttled, as the seeder timeline predicted). Real-input
+    dumps regenerate via `cargo test --release dump_sigma_inputs --
+    --ignored` (in `rust/`).
 
 `bench.py` lives in `scripts/`; per-step JSON records are in
 `scripts/bench-results/` (gitignored). Rust microbench for
@@ -469,8 +510,13 @@ bench JSONs now persist per_k_stats with sum==aggregate asserts.
 Slot 48 is `phi_chain_fastpath` since D17 (ex `phi_killer_rejects`
 reserve). D17 chain work lands in the existing phase buckets (chain
 ops under "direct", chain builds in `phi_ctx_ns`).
-`scripts/microbench/src/phi_replay.rs` clones the PRE-D16 cascade —
-treat as historical until re-synced.
+`scripts/microbench/src/phi_replay.rs` was re-synced to the D16/D17
+split-frame + chain cascade on 2026-06-10 (validated against the
+brute-force spectrum argmin; `--mode conly` exercises the chain arms);
+`vhalf_sweep` isolates φ phase 0 (the SIMD target) and `orbit_probe`
+replays the σ_Q BFS on real dumped inputs. All three are hand-copied
+clones — mirror any kernel change to `parent_rule.rs` phase 0 or
+`orbit.rs` BFS bodies into them.
 Cache-cliff microbenches (portable x86/arm64): `scripts/microbench/`
 bins `wht_sweep`, `phi_replay`, `singular_walk`; extrapolation tool
 `scripts/experimental/post_d15_scaling_fit.py`. The dev container
