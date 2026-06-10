@@ -53,6 +53,15 @@ nauty_hist = []
 # `markdown/architecture/07-parallel-scaling-profile.md`. Implies
 # `parallel`.
 parallel_profiling = ["parallel"]
+# Post-D15 profiling instrumentation (plan
+# `last-session-we-had-sequential-fiddle.md` Phase 1.3/1.4): σ_Q 5-way
+# sub-phase split (Instant pairs against a ~70 µs call) + sampled φ
+# sub-phase split (every 64th cascade fully timed via the portable
+# cycle counter in `experimental::cycles`). Off by default; the extra
+# stats fields are always present in the vector and zero when off.
+# All production share figures come from feature-OFF builds — gate:
+# wall(on) ≤ 1.02× wall(off) at N=24 sequential.
+phase_timers = []
 
 [dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }
@@ -95,3 +104,14 @@ harness = false
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# samply / perf builds (post-D15 profiling): identical codegen to release
+# plus line tables for source attribution. Build with
+#   RUSTFLAGS="-C force-frame-pointers=yes" CFLAGS="-fno-omit-frame-pointer" \
+#     maturin build --profile profiling -m rust/Cargo.toml --features parallel
+# (the CFLAGS reaches the bundled nauty C via the cc crate — needs a clean
+# rebuild of nauty-Traces-sys to take effect).
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"

@@ -251,9 +251,19 @@ The old closure claim in `05-retrospective.md` §5 ("every alternative
 p requires canonicalising D") was wrong — McKay needs iso-invariance
 + single orbit only, canon only for ties (cf.
 Bouyukliev–Bouyuklieva 2019 §3.3) — and is amended in place.
-Post-D15 the wall is no longer canon-dominated: at N=22 seq, canon
-is 47.8 % and σ_Q candidate generation 38.3 % — re-profile before
-proposing the next lever.
+**The post-D15 re-profile is DONE (2026-06-10, same day; full writeup
+`markdown/architecture/08-post-d15-profile.md`).** Headline: the φ
+cascade itself is the new bottleneck — share ladder 4.2/5.9/11.0/
+25.5/**59.9 %** at N=18/20/22/24/26 (the earlier "48 % canon / 38 %
+σ_Q" split missed φ because those JSONs predate the phi_ns capture) —
+and it is compute-bound, NOT cache-bound: no L1 cliff exists anywhere
+in the kernel (WHT/Gray sweeps stream; hot vs cold-evicted φ replay
+differ < 2 %). 83 % of φ is the unconditional prefix (Gray sweep +
+sort + first-stratum WHT) → the ranked next lever is **φ arithmetic
+volume** (share work across sibling candidates of one parent /
+cheaper first-stratum reject; 08-doc §7). σ_Q is 89.4 % orbit-min
+BFS (latency-bound, low-rank); canon is κ ≈ 0.04-and-falling — leave
+alone.
 
 Cumulative levers, oldest first:
 
@@ -366,16 +376,39 @@ sparsenauty internals: `scripts/microbench/src/nauty_decomp.rs`.
 **The pre-D15 statement "the `N ≤ 22` frontier is saturated at the
 pure-algorithmic level with this canonicaliser" is obsolete** — it was
 true only within the fixed-parent-rule frame;
-`architecture/05-retrospective.md` §5 records the correction. Post-D15
-the N=22 sequential wall splits ~48 % canon / ~38 % σ_Q candidate
-generation, so the next lever (if any) starts from a fresh profile,
-not from nauty. D13 (outer-DFS parallelism) composes with D15
-unchanged; note the parallel speedup *ratio* at N=24 is now bounded by
-non-canon overheads (Amdahl), so frontier-depth/thread sweet spots may
-shift — re-tune before any record attempt. The two unmerged opt-in
-branches (`feature/dfs-order-by-aut`, `feature/dfs-speedup-bliss-pq`)
-were benched against the legacy rule and need re-validation on top of
-D15 before merging.
+`architecture/05-retrospective.md` §5 records the correction. The
+fresh profile landed 2026-06-10
+(`markdown/architecture/08-post-d15-profile.md`): φ cascade 59.9 % of
+N=26 seq wall and compute-bound — see the strategic note above. The
+frontier-depth re-tune ALSO landed: **post-D15 the N=26 optimum is
+d=4, not d=5** (22.2 s vs 27.1 s at t=24, −18 %), because D15
+resurrected the seeder Amdahl ceiling (worker active/wall ≈ 54 % at
+d=5; the seeder's serial ranks-0–4 walk contains the low-rank σ_Q
+spike). N=26 SEQUENTIAL also needs
+`DOUBLY_EVEN_CANON_CACHE_CAP=500000` now (uncapped run was
+OOM-killed). Post-D15 N=29 on c4a-72 is priced at 3.3–5.1 h
+(count-anchored forecast, 08-doc §6) vs 12.32 h pre-D15; N=32 on a
+single 288-core box is NOT feasible without the φ lever. The two
+unmerged opt-in branches (`feature/dfs-order-by-aut`,
+`feature/dfs-speedup-bliss-pq`) were benched against the legacy rule
+and need re-validation on top of D15 before merging.
+
+**Profiling instrumentation (2026-06-10 sprint):** the kernel stats
+vector is now 45 fields and per_k_stats 18 rows — per-rank timing rows
+`phi_ns/candidates_q_ns/nauty_ns` (rows 14–16) are ALWAYS-ON at zero
+timer cost; sub-phase splits (σ_Q 5-way, φ 5-way sampled 1-in-64 via
+portable rdtsc/cntvct in `rust/src/cycles.rs`) live behind the
+`phase_timers` Cargo feature (overhead gate 1.008×/0.998× at N=22/24 —
+PASS; sampled φ mean validates to 1 % of the always-on mean). Layout
+mirror: `scripts/bench.py::KERNEL_STATS_LAYOUT` / `PER_K_STATS_ROWS`;
+bench JSONs now persist per_k_stats with sum==aggregate asserts.
+Cache-cliff microbenches (portable x86/arm64): `scripts/microbench/`
+bins `wht_sweep`, `phi_replay`, `singular_walk`; extrapolation tool
+`scripts/experimental/post_d15_scaling_fit.py`. The dev container
+blocks `perf_event_open` via seccomp (samply/perf need it recreated
+with `--cap-add PERFMON`; host `kernel.perf_event_paranoid=1` is
+already set); `[profile.profiling]` in `rust/Cargo.toml` is ready for
+that day.
 
 ## D13 quickstart
 
@@ -408,8 +441,11 @@ the 13700K (16 physical / 24 logical) confirm:
   recalibration".
 
 `DOUBLY_EVEN_FRONTIER_DEPTH` defaults to 4 and rarely needs
-tweaking — at N ≥ 24 a value of 5 is better because the tree is
-bigger and the deeper split gives finer load balance.
+tweaking. ~~At N ≥ 24 a value of 5 is better~~ — **obsolete post-D15**:
+the 2026-06-10 re-tune measured d=4 > d=5 at N=26 (22.2 s vs 27.1 s,
+t=24) because the seeder's serial span, not load balance, is now the
+binding constraint (08-doc §5). Use d=4 until the seeder fix lands;
+re-verify d for N ≥ 28.
 
 For `N ≥ 26`, also cap the per-worker canon cache via
 `DOUBLY_EVEN_CANON_CACHE_CAP` (default 1,000,000 entries; lower if

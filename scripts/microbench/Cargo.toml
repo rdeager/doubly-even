@@ -16,8 +16,31 @@ path = "src/nauty_decomp.rs"
 name = "wl_refine"
 path = "src/wl_refine.rs"
 
-[dependencies]
+# Post-D15 cache-cliff sweeps (portable x86_64 / aarch64; see src/lib.rs).
+[[bin]]
+name = "wht_sweep"
+path = "src/wht_sweep.rs"
+
+[[bin]]
+name = "phi_replay"
+path = "src/phi_replay.rs"
+
+[[bin]]
+name = "singular_walk"
+path = "src/singular_walk.rs"
+
+[lib]
+name = "microbench"
+path = "src/lib.rs"
+
+# Target-conditional like the kernel manifest: nauty's build.rs probes
+# `popcnt` unconditionally and refuses to compile on aarch64 with the
+# feature on. Only the two x86-only bins use nauty at all.
+[target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))'.dependencies]
 nauty-Traces-sys = { version = "0.11", default-features = false, features = ["bundled", "tls", "popcnt"] }
+
+[target.'cfg(not(any(target_arch = "x86", target_arch = "x86_64")))'.dependencies]
+nauty-Traces-sys = { version = "0.11", default-features = false, features = ["bundled", "tls"] }
 
 [profile.release]
 lto = "thin"

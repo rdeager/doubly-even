@@ -162,12 +162,118 @@ thread_local! {
     static PHI_SCRATCH: RefCell<PhiScratch> = RefCell::new(PhiScratch::default());
 }
 
+/// Sampled φ sub-phase timing (`phase_timers` builds only). A φ cascade
+/// runs 1–4 µs; five `Instant` pairs per call would distort the very
+/// share being measured, so every 64th call on each thread is fully
+/// timed via the ~6–9 ns cycle counter (`crate::cycles`) and the rest
+/// pay one thread-local counter increment. The driver takes the sample
+/// via [`phi_sample::take_last`] right after the cascade returns and
+/// reweights per rank at analysis time (φ cost correlates strongly
+/// with k — see `stats_phi_sampled_calls_by_k`). Diagnostic ±10 %.
+#[cfg(feature = "phase_timers")]
+pub(crate) mod phi_sample {
+    use std::cell::Cell;
+
+    /// `call_index & SAMPLE_MASK == 0` ⇒ fully timed. 64 keeps the
+    /// expected overhead ≈ (5 × 9 ns)/64 ≈ 0.7 ns/call; drop to 255 if
+    /// the wall-overhead gate (≤ 1.02×) ever fails.
+    pub(crate) const SAMPLE_MASK: u64 = 63;
+    pub(crate) const N_PHASES: usize = 5;
+
+    thread_local! {
+        static CALL_COUNT: Cell<u64> = const { Cell::new(0) };
+        static LAST_SAMPLE: Cell<Option<[u64; N_PHASES]>> = const { Cell::new(None) };
+    }
+
+    #[inline]
+    pub(crate) fn should_sample() -> bool {
+        CALL_COUNT.with(|c| {
+            let n = c.get();
+            c.set(n.wrapping_add(1));
+            n & SAMPLE_MASK == 0
+        })
+    }
+
+    #[inline]
+    pub(crate) fn record(ns: [u64; N_PHASES]) {
+        LAST_SAMPLE.with(|c| c.set(Some(ns)));
+    }
+
+    /// Take the sub-phase ns of the most recent cascade IF it was
+    /// sampled (cleared on take, so a sample is never double-counted).
+    #[inline]
+    pub(crate) fn take_last() -> Option<[u64; N_PHASES]> {
+        LAST_SAMPLE.with(|c| c.take())
+    }
+}
+
+/// Per-cascade phase clock: no-op for unsampled calls and on
+/// non-`phase_timers` builds (zero-sized, fully compiled away).
+/// Phase indices: 0 frame+Gray sweep, 1 counting sort, 2 first-stratum
+/// argmin, 3 later-stratum WHT, 4 later-stratum direct parity.
+#[cfg(feature = "phase_timers")]
+struct PhaseClock {
+    sampled: bool,
+    t: u64,
+    acc: [u64; 5],
+}
+
+#[cfg(feature = "phase_timers")]
+impl PhaseClock {
+    #[inline]
+    fn start() -> Self {
+        let sampled = phi_sample::should_sample();
+        Self {
+            sampled,
+            t: if sampled { crate::cycles::mono_cycles() } else { 0 },
+            acc: [0; 5],
+        }
+    }
+
+    #[inline]
+    fn mark(&mut self, idx: usize) {
+        if self.sampled {
+            let now = crate::cycles::mono_cycles();
+            self.acc[idx] += now.wrapping_sub(self.t);
+            self.t = now;
+        }
+    }
+
+    /// Convert to ns and publish. Called at every cascade return point.
+    #[inline]
+    fn commit(&self) {
+        if self.sampled {
+            let mut ns = [0u64; 5];
+            for (o, &c) in ns.iter_mut().zip(self.acc.iter()) {
+                *o = crate::cycles::cycles_to_ns(c);
+            }
+            phi_sample::record(ns);
+        }
+    }
+}
+
+#[cfg(not(feature = "phase_timers"))]
+struct PhaseClock;
+
+#[cfg(not(feature = "phase_timers"))]
+impl PhaseClock {
+    #[inline(always)]
+    fn start() -> Self {
+        PhaseClock
+    }
+    #[inline(always)]
+    fn mark(&mut self, _idx: usize) {}
+    #[inline(always)]
+    fn commit(&self) {}
+}
+
 /// Evaluate the φ cascade for candidate `v` against parent RREF `c_rref`.
 pub(crate) fn phi_cascade(c_rref: &[BinVec], v: BinVec, n: u32) -> PhiResult {
     PHI_SCRATCH.with(|cell| phi_cascade_with(&mut cell.borrow_mut(), c_rref, v, n))
 }
 
 fn phi_cascade_with(s: &mut PhiScratch, c_rref: &[BinVec], v: BinVec, n: u32) -> PhiResult {
+    let mut clock = PhaseClock::start();
     let kp1 = c_rref.len() + 1;
     debug_assert!(kp1 <= 16, "φ cascade needs k+1 ≤ 16 (u16 coordinate vectors)");
     let size = 1usize << kp1;
@@ -196,6 +302,7 @@ fn phi_cascade_with(s: &mut PhiScratch, c_rref: &[BinVec], v: BinVec, n: u32) ->
         counts[0], 1,
         "dependent frame rows: candidate v must lie outside C"
     );
+    clock.mark(0);
 
     // Counting sort: stratum member lists without per-stratum rescans.
     let mut start = [0u32; 66];
@@ -210,6 +317,7 @@ fn phi_cascade_with(s: &mut PhiScratch, c_rref: &[BinVec], v: BinVec, n: u32) ->
         s.sorted_idx[cursor[w] as usize] = idx as u16;
         cursor[w] += 1;
     }
+    clock.mark(1);
 
     // Lazy lex cascade, strata ascending. (Doubly-even inputs only have
     // strata at multiples of 4; the loop is weight-agnostic so unit tests
@@ -227,14 +335,21 @@ fn phi_cascade_with(s: &mut PhiScratch, c_rref: &[BinVec], v: BinVec, n: u32) ->
 
         let u_c_in = if first {
             first = false;
-            filter_first_stratum(s, size, t_begin, t_end, u_c)
+            let r = filter_first_stratum(s, size, t_begin, t_end, u_c);
+            clock.mark(2);
+            r
         } else if s.m_buf.len() > DIRECT_THRESHOLD {
-            filter_by_wht(s, size, t_begin, t_end, u_c)
+            let r = filter_by_wht(s, size, t_begin, t_end, u_c);
+            clock.mark(3);
+            r
         } else {
-            filter_direct(s, t_begin, t_end, u_c)
+            let r = filter_direct(s, t_begin, t_end, u_c);
+            clock.mark(4);
+            r
         };
 
         if !u_c_in {
+            clock.commit();
             return PhiResult {
                 outcome: PhiOutcome::Reject,
                 strata_used,
@@ -242,6 +357,7 @@ fn phi_cascade_with(s: &mut PhiScratch, c_rref: &[BinVec], v: BinVec, n: u32) ->
             };
         }
         if s.m_buf.len() == 1 {
+            clock.commit();
             return PhiResult {
                 outcome: PhiOutcome::AcceptUnique,
                 strata_used,
@@ -249,6 +365,7 @@ fn phi_cascade_with(s: &mut PhiScratch, c_rref: &[BinVec], v: BinVec, n: u32) ->
             };
         }
     }
+    clock.commit();
     PhiResult {
         outcome: PhiOutcome::Tie(s.m_buf.clone()),
         strata_used,

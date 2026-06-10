@@ -57,7 +57,8 @@ except ImportError:  # pragma: no cover
 
 # Layout of the kernel's `stats` vector — kept in sync by hand with
 # `rust/src/enumerate.rs::enumerate_doubly_even` doc. Indices into the
-# returned 26-element list.
+# returned 45-element list. Fields 34–44 are the `phase_timers`
+# sub-phase split (zero on non-instrumented builds).
 KERNEL_STATS_LAYOUT: tuple[str, ...] = (
     "canon_calls",                # 0
     "primary_hits",               # 1
@@ -93,7 +94,77 @@ KERNEL_STATS_LAYOUT: tuple[str, ...] = (
     "phi_strata_sum",             # 31 — D15: Σ strata evaluated
     "phi_m_size_sum",             # 32 — D15: Σ |M| at decision
     "nauty_ns_kept",              # 33 — D15 audit: κ numerator
+    "cq_qbasis_ns",               # 34 — σ_Q sub-phase: q_basis
+    "cq_autimage_ns",             # 35 — σ_Q sub-phase: aut_image_on_q
+    "cq_singular_ns",             # 36 — σ_Q sub-phase: singular_reps_q
+    "cq_orbitmin_ns",             # 37 — σ_Q sub-phase: orbit-min BFS
+    "cq_lift_sort_ns",            # 38 — σ_Q sub-phase: lift + sort
+    "phi_frame_gray_ns",          # 39 — φ sampled: frame + Gray sweep
+    "phi_sort_ns",                # 40 — φ sampled: counting sort
+    "phi_first_stratum_ns",       # 41 — φ sampled: first-stratum argmin
+    "phi_wht_ns",                 # 42 — φ sampled: later-stratum WHT
+    "phi_direct_ns",              # 43 — φ sampled: direct parity
+    "phi_sampled_calls",          # 44 — φ sampling weights (1-in-64)
 )
+
+# Row names of the kernel's `per_k_stats` matrix, in fixed order — kept in
+# sync by hand with `rust/src/enumerate.rs::WorkerState::finalize` (and
+# `scripts/experimental/d15_phi_audit.py::PER_K_ROWS`). Rows 0–13 are
+# counters bucketed by PARENT rank k (rank of C; the child D has rank
+# k+1). Rows 14–16 are the post-D15 per-rank timing rows (ns, always-on);
+# rows 14–15 are bucketed by parent rank, row 16 (`nauty_ns`) by the rank
+# of the code being canonised (= parent_k + 1 for child canon calls).
+PER_K_STATS_ROWS: tuple[str, ...] = (
+    "is_canon_aug_calls",     # 0
+    "parent_eq_hits",         # 1
+    "weight_enum_filtered",   # 2
+    "bfs_calls",              # 3
+    "bfs_hits",               # 4
+    "bfs_rejects",            # 5
+    "mass_stop_pre_loop",     # 6
+    "mass_stop_in_loop",      # 7
+    "candidates_total_seen",  # 8
+    "candidates_skipped",     # 9
+    "phi_reject",             # 10 — audit mode only
+    "phi_accept_unique",      # 11 — audit mode only
+    "phi_tie_accept",         # 12 — audit mode only
+    "phi_tie_reject",         # 13 — audit mode only
+    "phi_ns",                 # 14 — per-rank φ-cascade ns
+    "candidates_q_ns",        # 15 — per-rank σ_Q candidate-generation ns
+    "nauty_ns",               # 16 — per-rank canon-dispatch ns (child rank!)
+    "phi_sampled_calls",      # 17 — per-rank φ sampling weights (phase_timers)
+)
+
+
+def per_k_stats_dict(per_k: list[list[int]]) -> dict[str, list[int]]:
+    """Name the kernel's per_k_stats rows. Tolerates a kernel that returns
+    more rows than we know about (forward-compat) but not fewer."""
+    if len(per_k) < len(PER_K_STATS_ROWS):
+        raise RuntimeError(
+            f"kernel returned {len(per_k)} per_k rows, "
+            f"expected >= {len(PER_K_STATS_ROWS)} — rebuild the wheel?"
+        )
+    return {name: [int(v) for v in per_k[i]] for i, name in enumerate(PER_K_STATS_ROWS)}
+
+
+def assert_per_k_timing_consistency(
+    kernel_stats: dict[str, int], per_k_stats: dict[str, list[int]]
+) -> None:
+    """The per-rank timing rows must sum to their aggregate stats field
+    (same Instant delta accumulated into both) — a >1% gap means a
+    bucketing site was missed in the kernel."""
+    for row, agg_name in (
+        ("phi_ns", "phi_ns"),
+        ("candidates_q_ns", "candidates_q_ns"),
+        ("nauty_ns", "nauty_ns"),
+    ):
+        row_sum = sum(per_k_stats[row])
+        agg = kernel_stats[agg_name]
+        if abs(row_sum - agg) > max(0.01 * agg, 1_000):
+            raise RuntimeError(
+                f"per_k row '{row}' sums to {row_sum} but aggregate "
+                f"{agg_name} is {agg} — kernel bucketing is inconsistent"
+            )
 
 
 # DFGHILM Appendix B Table 3 — number of permutation-equivalence classes
@@ -145,6 +216,9 @@ class PerNResult:
     # Kernel stats vector keyed by KERNEL_STATS_LAYOUT name. Empty when
     # the kernel isn't loaded.
     kernel_stats: dict[str, int] = field(default_factory=dict)
+    # Kernel per_k_stats matrix keyed by PER_K_STATS_ROWS name; each value
+    # is a list indexed by rank. Empty when the kernel isn't loaded.
+    per_k_stats: dict[str, list[int]] = field(default_factory=dict)
     # --profile-parallel payload, populated only when running through
     # the `enumerate_doubly_even_with_profile` entry (requires the
     # kernel to be built with `--features parallel_profiling`).
@@ -169,11 +243,11 @@ def run_one(N: int) -> PerNResult:
         num_threads = _parse_thread_env(_os.environ.get("DOUBLY_EVEN_THREADS"))
         t0 = time.perf_counter()
         if num_threads is not None and num_threads >= 2:
-            raw, stats, _per_k = _kernel.enumerate_doubly_even(
+            raw, stats, per_k = _kernel.enumerate_doubly_even(
                 N, cap, quota_vec, factorial_N, num_threads,
             )
         else:
-            raw, stats, _per_k = _kernel.enumerate_doubly_even(
+            raw, stats, per_k = _kernel.enumerate_doubly_even(
                 N, cap, quota_vec, factorial_N,
             )
         result.seconds = time.perf_counter() - t0
@@ -187,6 +261,8 @@ def run_one(N: int) -> PerNResult:
         result.kernel_stats = {
             name: int(stats[i]) for i, name in enumerate(KERNEL_STATS_LAYOUT)
         }
+        result.per_k_stats = per_k_stats_dict(per_k)
+        assert_per_k_timing_consistency(result.kernel_stats, result.per_k_stats)
         return result
     # Pure-Python fallback (no kernel; no stats vector available).
     t0 = time.perf_counter()
@@ -227,7 +303,7 @@ def run_one_with_profile(N: int, num_threads: int) -> PerNResult:
     dual_cache_clear()
     weight_enum_cache_clear()
     t0 = time.perf_counter()
-    raw, stats, _per_k, profile = _kernel.enumerate_doubly_even_with_profile(
+    raw, stats, per_k, profile = _kernel.enumerate_doubly_even_with_profile(
         N, cap, quota_vec, factorial_N, num_threads,
     )
     wall = time.perf_counter() - t0
@@ -242,6 +318,8 @@ def run_one_with_profile(N: int, num_threads: int) -> PerNResult:
     result.kernel_stats = {
         name: int(stats[i]) for i, name in enumerate(KERNEL_STATS_LAYOUT)
     }
+    result.per_k_stats = per_k_stats_dict(per_k)
+    assert_per_k_timing_consistency(result.kernel_stats, result.per_k_stats)
     result.parallel_profile = {
         "num_threads": int(num_threads),
         "frontier_depth": int(frontier_depth),
@@ -349,6 +427,7 @@ def write_profile_json(label: str, results: list[PerNResult]) -> Path:
                 "seconds": r.seconds,
                 "classes": r.classes,
                 "kernel_stats": r.kernel_stats,
+                "per_k_stats": r.per_k_stats,
                 "parallel_profile": r.parallel_profile,
             }
             for r in results
@@ -406,6 +485,7 @@ def write_json(label: str, results: list[PerNResult]) -> Path:
                     for pk in sorted(r.per_k.values(), key=lambda x: x.k)
                 },
                 "kernel_stats": r.kernel_stats,
+                "per_k_stats": r.per_k_stats,
             }
             for r in results
         },

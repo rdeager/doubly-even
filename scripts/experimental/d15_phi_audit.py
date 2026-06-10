@@ -60,6 +60,14 @@ PER_K_ROWS = [
     "phi_accept_unique",
     "phi_tie_accept",
     "phi_tie_reject",
+    # Post-D15 per-rank timing rows (ns; always-on). `phi_ns` and
+    # `candidates_q_ns` are bucketed by parent rank; `nauty_ns` by the
+    # rank of the code being canonised. Mirrors
+    # `scripts/bench.py::PER_K_STATS_ROWS`.
+    "phi_ns",
+    "candidates_q_ns",
+    "nauty_ns",
+    "phi_sampled_calls",
 ]
 
 

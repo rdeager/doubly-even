@@ -156,14 +156,40 @@ fn parallel_with_one_thread_falls_back_to_sequential() {
     // timers and are inherently noisy; compare the deterministic
     // counters only. (30 = phi_ns, 33 = nauty_ns_kept — both 0 unless
     // DOUBLY_EVEN_PARENT_RULE=audit, but excluded for future-proofing.)
-    let timing_idx: &[usize] = &[9, 10, 11, 18, 20, 30, 33];
+    // 34–44 are the phase_timers sub-phase fields: 34–43 are timers and
+    // 44 (phi_sampled_calls) depends on a process-lifetime thread-local
+    // call counter, so none are run-deterministic when the feature is on.
+    let timing_idx: &[usize] = &[
+        9, 10, 11, 18, 20, 30, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44,
+    ];
     for (i, (a, b)) in stats_seq.iter().zip(stats_par.iter()).enumerate() {
         if timing_idx.contains(&i) {
             continue;
         }
         assert_eq!(a, b, "stats[{i}] diverged between sequential and parallel(nt=1)");
     }
-    assert_eq!(pk_seq, pk_par);
+    // per_k rows 14–16 (phi_ns, candidates_q_ns, nauty_ns) are per-rank
+    // timers — same noise argument as the flat *_ns fields above. Compare
+    // the count rows exactly, the timing rows structurally.
+    const PER_K_TIMING_ROWS_START: usize = 14;
+    assert_eq!(pk_seq.len(), pk_par.len(), "per_k row count diverged");
+    assert_eq!(
+        pk_seq[..PER_K_TIMING_ROWS_START],
+        pk_par[..PER_K_TIMING_ROWS_START],
+        "per_k count rows diverged between sequential and parallel(nt=1)"
+    );
+    for (i, (a, b)) in pk_seq[PER_K_TIMING_ROWS_START..]
+        .iter()
+        .zip(pk_par[PER_K_TIMING_ROWS_START..].iter())
+        .enumerate()
+    {
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "per_k timing row {} length diverged",
+            PER_K_TIMING_ROWS_START + i
+        );
+    }
 }
 
 /// `max_k <= frontier_depth` (currently 3) must also fall back to the

@@ -7,6 +7,65 @@ use crate::orbit::{aut_orbit_minima_q_table, aut_orbit_minima_q_witt, singular_r
 use crate::quotient::{aut_image_on_q, lift, q_basis};
 use crate::types::{BinVec, ColPerm, Mat};
 
+/// σ_Q sub-phase accumulator (`phase_timers` builds only; post-D15
+/// profiling, plan `last-session-we-had-sequential-fiddle.md` § 1.3).
+/// The generic pipeline below is one fat call per parent; the five
+/// stages are timed with `Instant` pairs (~25 ns each against a ~70 µs
+/// call) into a per-thread accumulator that the enumerate driver drains
+/// immediately after every call, so attribution never crosses calls or
+/// threads. The k=0 / k=1 closed-form fast paths are NOT timed — their
+/// cost is negligible and lands only in the aggregate
+/// `stats_candidates_q_ns`, so sum(sub-phases) ≤ aggregate by design.
+#[cfg(feature = "phase_timers")]
+pub mod phase_timers {
+    use std::cell::Cell;
+
+    pub const N_PHASES: usize = 5;
+    pub const PHASE_NAMES: [&str; N_PHASES] = [
+        "q_basis",
+        "aut_image_on_q",
+        "singular_reps_q",
+        "orbit_min",
+        "lift_sort",
+    ];
+
+    thread_local! {
+        static CQ_PHASE_NS: Cell<[u64; N_PHASES]> = const { Cell::new([0; N_PHASES]) };
+    }
+
+    #[inline]
+    pub(crate) fn add(idx: usize, ns: u64) {
+        CQ_PHASE_NS.with(|c| {
+            let mut a = c.get();
+            a[idx] += ns;
+            c.set(a);
+        });
+    }
+
+    /// Return-and-zero the per-thread accumulator.
+    pub fn drain() -> [u64; N_PHASES] {
+        CQ_PHASE_NS.with(|c| c.replace([0; N_PHASES]))
+    }
+}
+
+/// Wrap one pipeline stage in an `Instant` pair under `phase_timers`;
+/// compiles to the bare expression otherwise.
+macro_rules! cq_timed {
+    ($idx:expr, $e:expr) => {{
+        #[cfg(feature = "phase_timers")]
+        {
+            let t0 = std::time::Instant::now();
+            let r = $e;
+            phase_timers::add($idx, t0.elapsed().as_nanos() as u64);
+            r
+        }
+        #[cfg(not(feature = "phase_timers"))]
+        {
+            $e
+        }
+    }};
+}
+
 /// `Aut(C)`-orbit reps of doubly-even 1-dim extensions of `C`, returned
 /// sorted as `F_2^N` integers.
 ///
@@ -49,18 +108,26 @@ pub fn doubly_even_candidates_q(
             return young_subgroup_k2_reps(n, w);
         }
     }
-    let (v_basis, pivots_v) = q_basis(code_rref, pivots, dual_basis, n);
-    let sigma_qs = aut_image_on_q(aut_generators, code_rref, pivots, &v_basis, &pivots_v);
+    let (v_basis, pivots_v) = cq_timed!(0, q_basis(code_rref, pivots, dual_basis, n));
+    let sigma_qs = cq_timed!(
+        1,
+        aut_image_on_q(aut_generators, code_rref, pivots, &v_basis, &pivots_v)
+    );
     let l = v_basis.len() as u32;
-    let reps_q = singular_reps_q(&v_basis);
-    let orbit_min = if use_witt_path(&sigma_qs, l) {
-        aut_orbit_minima_q_witt(&reps_q, &sigma_qs, l)
-    } else {
-        aut_orbit_minima_q_table(&reps_q, &sigma_qs, l)
-    };
-    let mut out: Vec<BinVec> = orbit_min.iter().map(|&u| lift(u, &v_basis)).collect();
-    out.sort_unstable();
-    out
+    let reps_q = cq_timed!(2, singular_reps_q(&v_basis));
+    let orbit_min = cq_timed!(
+        3,
+        if use_witt_path(&sigma_qs, l) {
+            aut_orbit_minima_q_witt(&reps_q, &sigma_qs, l)
+        } else {
+            aut_orbit_minima_q_table(&reps_q, &sigma_qs, l)
+        }
+    );
+    cq_timed!(4, {
+        let mut out: Vec<BinVec> = orbit_min.iter().map(|&u| lift(u, &v_basis)).collect();
+        out.sort_unstable();
+        out
+    })
 }
 
 /// Closed-form `Aut(⟨v_ℓ⟩)`-orbit reps of doubly-even k=2 extensions, where

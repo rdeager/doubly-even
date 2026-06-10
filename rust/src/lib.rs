@@ -20,6 +20,8 @@
 
 pub mod candidates;
 pub mod canon;
+#[cfg(feature = "phase_timers")]
+pub mod cycles;
 pub mod enumerate;
 pub mod experimental;
 pub mod linalg;
@@ -172,8 +174,10 @@ fn py_subspace_in_orbit(
 ///
 ///   `(rref, canonical_column_order, aut_generators, aut_order_decimal, column_orbits)`
 ///
-/// Plus a `stats: Vec[int]` (length 26) and a `per_k_stats: list[list[int]]`
-/// — see `enumerate::enumerate_doubly_even` doc for the field layout.
+/// Plus a `stats: Vec[int]` (length 45) and a `per_k_stats: list[list[int]]`
+/// (18 rows) — see `enumerate::enumerate_doubly_even` doc for the field
+/// layout, mirrored in `scripts/bench.py` (`KERNEL_STATS_LAYOUT`,
+/// `PER_K_STATS_ROWS`).
 /// Packed as flat lists because pyo3 0.23 caps `IntoPyObject` tuples at 12
 /// elements.
 ///

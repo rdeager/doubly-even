@@ -316,6 +316,41 @@ pub(crate) struct WorkerState {
     /// witt-path dispatch). See plan file
     /// `the-last-several-sessions-scalable-bear.md` Stage 0.
     pub stats_candidates_q_ns: u128,
+    /// Per-rank timing rows (post-D15 profile). Always-on at zero new
+    /// timer cost: each bucketed delta is an `Instant` pair that already
+    /// exists for the matching aggregate field — bucketing adds one
+    /// array store per event. `phi_ns_by_k` and `candidates_q_ns_by_k`
+    /// are indexed by PARENT rank (rank of C); `nauty_ns_by_k` is
+    /// indexed by the rank of the code being canonised (the child D, so
+    /// parent_k + 1 — off-by-one vs the other rows by design, since one
+    /// canon result is shared by every candidate probing the same D).
+    pub stats_phi_ns_by_k: Vec<u64>,
+    pub stats_candidates_q_ns_by_k: Vec<u64>,
+    pub stats_nauty_ns_by_k: Vec<u64>,
+    /// σ_Q sub-phase ns (`phase_timers` builds; always-present fields,
+    /// zero otherwise — the `verifier_ns` precedent). Sum over the five
+    /// stages ≤ `stats_candidates_q_ns`: the k=0/k=1 closed-form fast
+    /// paths and inter-stage glue are untimed. See
+    /// `candidates::phase_timers`.
+    pub stats_cq_qbasis_ns: u128,
+    pub stats_cq_autimage_ns: u128,
+    pub stats_cq_singular_ns: u128,
+    pub stats_cq_orbitmin_ns: u128,
+    pub stats_cq_lift_sort_ns: u128,
+    /// Sampled φ sub-phase ns (`phase_timers` builds; every 64th cascade
+    /// per thread is fully timed via the cycle counter). Scale by the
+    /// sampling factor at analysis time, reweighting per rank via
+    /// `stats_phi_sampled_calls_by_k` (φ cost grows with k, so uniform
+    /// scaling would bias low). Diagnostic ±10 %. See
+    /// `parent_rule::phi_sample`.
+    pub stats_phi_frame_gray_ns: u128,
+    pub stats_phi_sort_ns: u128,
+    pub stats_phi_first_stratum_ns: u128,
+    pub stats_phi_wht_ns: u128,
+    pub stats_phi_direct_ns: u128,
+    /// How many cascades were fully timed (the sampling weights).
+    pub stats_phi_sampled_calls: u64,
+    pub stats_phi_sampled_calls_by_k: Vec<u64>,
     /// Sums of nauty `statsblk` tree-shape counters across all
     /// `canon_info_*_native` calls. Each summand is one call; divide by
     /// `stats_canon_calls` for per-call averages. Recorded to decompose
@@ -440,6 +475,21 @@ impl WorkerState {
             stats_phi_tie_reject_by_k: vec![0u64; len],
             stats_candidates_q_calls: 0,
             stats_candidates_q_ns: 0,
+            stats_phi_ns_by_k: vec![0u64; len],
+            stats_candidates_q_ns_by_k: vec![0u64; len],
+            stats_nauty_ns_by_k: vec![0u64; len],
+            stats_cq_qbasis_ns: 0,
+            stats_cq_autimage_ns: 0,
+            stats_cq_singular_ns: 0,
+            stats_cq_orbitmin_ns: 0,
+            stats_cq_lift_sort_ns: 0,
+            stats_phi_frame_gray_ns: 0,
+            stats_phi_sort_ns: 0,
+            stats_phi_first_stratum_ns: 0,
+            stats_phi_wht_ns: 0,
+            stats_phi_direct_ns: 0,
+            stats_phi_sampled_calls: 0,
+            stats_phi_sampled_calls_by_k: vec![0u64; len],
             stats_nauty_numnodes: 0,
             stats_nauty_tctotal: 0,
             stats_nauty_maxlevel_sum: 0,
@@ -593,7 +643,9 @@ impl WorkerState {
             self.n,
             self.factorial_n,
         );
-        self.stats_nauty_ns += nauty_t0.elapsed().as_nanos();
+        let nauty_delta = nauty_t0.elapsed().as_nanos();
+        self.stats_nauty_ns += nauty_delta;
+        self.stats_nauty_ns_by_k[rref.len()] += nauty_delta as u64;
         self.stats_nauty_numnodes += native.numnodes;
         self.stats_nauty_tctotal += native.tctotal;
         self.stats_nauty_maxlevel_sum += native.maxlevel.max(0) as u64;
@@ -754,6 +806,46 @@ impl WorkerState {
         hit
     }
 
+    /// Drain the σ_Q sub-phase accumulator after a
+    /// `doubly_even_candidates_q` call (`phase_timers` builds; no-op
+    /// otherwise). Per-call drain keeps attribution on the right thread
+    /// and WorkerState.
+    #[cfg(feature = "phase_timers")]
+    #[inline]
+    fn drain_cq_phase_timers(&mut self) {
+        let ph = crate::candidates::phase_timers::drain();
+        self.stats_cq_qbasis_ns += ph[0] as u128;
+        self.stats_cq_autimage_ns += ph[1] as u128;
+        self.stats_cq_singular_ns += ph[2] as u128;
+        self.stats_cq_orbitmin_ns += ph[3] as u128;
+        self.stats_cq_lift_sort_ns += ph[4] as u128;
+    }
+
+    #[cfg(not(feature = "phase_timers"))]
+    #[inline(always)]
+    fn drain_cq_phase_timers(&mut self) {}
+
+    /// Collect the sampled φ sub-phase split of the cascade that just
+    /// returned, if that call was the 1-in-64 fully-timed one
+    /// (`phase_timers` builds; no-op otherwise).
+    #[cfg(feature = "phase_timers")]
+    #[inline]
+    fn drain_phi_sample(&mut self, parent_k: usize) {
+        if let Some(ph) = crate::parent_rule::phi_sample::take_last() {
+            self.stats_phi_frame_gray_ns += ph[0] as u128;
+            self.stats_phi_sort_ns += ph[1] as u128;
+            self.stats_phi_first_stratum_ns += ph[2] as u128;
+            self.stats_phi_wht_ns += ph[3] as u128;
+            self.stats_phi_direct_ns += ph[4] as u128;
+            self.stats_phi_sampled_calls += 1;
+            self.stats_phi_sampled_calls_by_k[parent_k] += 1;
+        }
+    }
+
+    #[cfg(not(feature = "phase_timers"))]
+    #[inline(always)]
+    fn drain_phi_sample(&mut self, _parent_k: usize) {}
+
     /// Decide one candidate augmentation `(C → D = ⟨C, v⟩)` under the
     /// active parent rule. Returns the child's `(rref, pivots, canon
     /// info)` when the augmentation is canonical; `None` to skip. On the
@@ -777,7 +869,10 @@ impl WorkerState {
         if use_phi {
             let t0 = std::time::Instant::now();
             let res = phi_cascade(rref, v, self.n);
-            self.stats_phi_ns += t0.elapsed().as_nanos();
+            let phi_delta = t0.elapsed().as_nanos();
+            self.stats_phi_ns += phi_delta;
+            self.stats_phi_ns_by_k[parent_k] += phi_delta as u64;
+            self.drain_phi_sample(parent_k);
             self.stats_phi_strata_sum += res.strata_used as u64;
             self.stats_phi_m_size_sum += res.m_size_at_decision as u64;
             return match res.outcome {
@@ -809,7 +904,9 @@ impl WorkerState {
                     );
                     let accept =
                         subspace_in_orbit(self.n, rref, &target, &info_d.aut_generators);
-                    self.stats_phi_ns += t1.elapsed().as_nanos();
+                    let tie_delta = t1.elapsed().as_nanos();
+                    self.stats_phi_ns += tie_delta;
+                    self.stats_phi_ns_by_k[parent_k] += tie_delta as u64;
                     if accept {
                         self.stats_phi_tie_accept += 1;
                         self.stats_phi_tie_accept_by_k[parent_k] += 1;
@@ -824,7 +921,7 @@ impl WorkerState {
         }
         // Legacy path (also taken by CosetSpectrum above its rank cap);
         // Audit additionally tallies the φ outcome post-hoc.
-        let phi_res = self.phi_audit_evaluate(rref, v);
+        let phi_res = self.phi_audit_evaluate(parent_k, rref, v);
         let (d_rref, d_pivots) = extend_rref(rref, v, self.n);
         let nauty_ns_before = self.stats_nauty_ns;
         let info_d = self.canon_info(&d_rref);
@@ -844,13 +941,21 @@ impl WorkerState {
     /// `None` unless audit mode is on. Behaviour-neutral — the result is
     /// only tallied by [`Self::phi_audit_resolve`] after the legacy path.
     #[inline]
-    fn phi_audit_evaluate(&mut self, c_rref: &[BinVec], v: BinVec) -> Option<PhiResult> {
+    fn phi_audit_evaluate(
+        &mut self,
+        parent_k: usize,
+        c_rref: &[BinVec],
+        v: BinVec,
+    ) -> Option<PhiResult> {
         if self.parent_rule != ParentRule::Audit {
             return None;
         }
         let t0 = std::time::Instant::now();
         let res = phi_cascade(c_rref, v, self.n);
-        self.stats_phi_ns += t0.elapsed().as_nanos();
+        let phi_delta = t0.elapsed().as_nanos();
+        self.stats_phi_ns += phi_delta;
+        self.stats_phi_ns_by_k[parent_k] += phi_delta as u64;
+        self.drain_phi_sample(parent_k);
         Some(res)
     }
 
@@ -892,7 +997,9 @@ impl WorkerState {
                 );
                 let accept =
                     subspace_in_orbit(self.n, c_rref, &target, &info_d.aut_generators);
-                self.stats_phi_ns += t0.elapsed().as_nanos();
+                let tie_delta = t0.elapsed().as_nanos();
+                self.stats_phi_ns += tie_delta;
+                self.stats_phi_ns_by_k[parent_k] += tie_delta as u64;
                 if accept {
                     self.stats_phi_tie_accept += 1;
                     self.stats_phi_tie_accept_by_k[parent_k] += 1;
@@ -979,7 +1086,10 @@ impl WorkerState {
             &dual,
             &info.aut_generators,
         );
-        self.stats_candidates_q_ns += cq_t0.elapsed().as_nanos();
+        let cq_delta = cq_t0.elapsed().as_nanos();
+        self.stats_candidates_q_ns += cq_delta;
+        self.stats_candidates_q_ns_by_k[k as usize] += cq_delta as u64;
+        self.drain_cq_phase_timers();
         self.stats_candidates_q_calls += 1;
         let total = candidates.len() as u64;
         self.stats_candidates_total_seen_by_k[k as usize] += total;
@@ -1071,7 +1181,10 @@ impl WorkerState {
             &dual,
             &info.aut_generators,
         );
-        self.stats_candidates_q_ns += cq_t0.elapsed().as_nanos();
+        let cq_delta = cq_t0.elapsed().as_nanos();
+        self.stats_candidates_q_ns += cq_delta;
+        self.stats_candidates_q_ns_by_k[k as usize] += cq_delta as u64;
+        self.drain_cq_phase_timers();
         self.stats_candidates_q_calls += 1;
         let total = candidates.len() as u64;
         self.stats_candidates_total_seen_by_k[k as usize] += total;
@@ -1133,6 +1246,17 @@ impl WorkerState {
             self.stats_phi_strata_sum as u128,
             self.stats_phi_m_size_sum as u128,
             self.stats_nauty_ns_kept,
+            self.stats_cq_qbasis_ns,
+            self.stats_cq_autimage_ns,
+            self.stats_cq_singular_ns,
+            self.stats_cq_orbitmin_ns,
+            self.stats_cq_lift_sort_ns,
+            self.stats_phi_frame_gray_ns,
+            self.stats_phi_sort_ns,
+            self.stats_phi_first_stratum_ns,
+            self.stats_phi_wht_ns,
+            self.stats_phi_direct_ns,
+            self.stats_phi_sampled_calls as u128,
         ];
         let per_k_stats: Vec<Vec<u64>> = vec![
             self.stats_is_canon_aug_calls_by_k,
@@ -1149,6 +1273,10 @@ impl WorkerState {
             self.stats_phi_accept_unique_by_k,
             self.stats_phi_tie_accept_by_k,
             self.stats_phi_tie_reject_by_k,
+            self.stats_phi_ns_by_k,
+            self.stats_candidates_q_ns_by_k,
+            self.stats_nauty_ns_by_k,
+            self.stats_phi_sampled_calls_by_k,
         ];
         (self.output, stats, per_k_stats)
     }
@@ -1163,19 +1291,25 @@ impl WorkerState {
 /// Returns `(output, stats, per_k_stats)`:
 ///
 /// - `output` — `Vec<EnumeratedRaw>` in DFS order.
-/// - `stats` — flat vector (22 u128 fields). See layout below.
-/// - `per_k_stats` — rectangular `[14][max_k+1]` matrix of u64 counters
+/// - `stats` — flat vector (45 u128 fields). See layout below; the
+///   canonical Python mirror is `scripts/bench.py::KERNEL_STATS_LAYOUT`.
+/// - `per_k_stats` — rectangular `[18][max_k+1]` matrix of u64 counters
 ///   bucketed by the *parent* rank k (i.e., the rank of C; D has rank
-///   k+1). Rows in fixed order:
+///   k+1), EXCEPT row 16 (`nauty_ns_by_k`) which is bucketed by the rank
+///   of the code being canonised. Rows in fixed order:
 ///   `[is_canon_aug_calls, parent_eq_hits, weight_enum_filtered,
 ///   bfs_calls, bfs_hits, bfs_rejects, mass_stop_pre_loop,
 ///   mass_stop_in_loop, candidates_total_seen, candidates_skipped,
-///   phi_reject, phi_accept_unique, phi_tie_accept, phi_tie_reject]`.
+///   phi_reject, phi_accept_unique, phi_tie_accept, phi_tie_reject,
+///   phi_ns, candidates_q_ns, nauty_ns, phi_sampled_calls]`.
 ///   Rows 0–5 from Phase 1 of `for-complete-enumeration-of-proud-meerkat.md`
 ///   (σ_Q-orbit-min rejection-rate audit). Rows 6–9 from the mass-stop
 ///   audit (same plan, Conway–Pless gluing follow-up). Rows 10–13 from
 ///   the D15 coset-spectrum parent-rule audit (zero unless
-///   `DOUBLY_EVEN_PARENT_RULE=audit`).
+///   `DOUBLY_EVEN_PARENT_RULE=audit`). Rows 14–16 are the post-D15
+///   per-rank timing rows (ns; always-on — they bucket deltas the
+///   aggregate fields already pay for); row 17 counts the 1-in-64
+///   sampled φ cascades per rank (`phase_timers` builds only).
 ///
 /// Stats vector layout (34 u128 fields, packed for pyo3 tuple-arity
 /// limits — pyo3 0.23 caps `IntoPyObject` tuples at 12 elements):
