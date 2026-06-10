@@ -2,24 +2,35 @@
 
 This doc walks through what `doubly-even` adds on top of the DFGHILM
 Appendix B canonical-augmentation recipe to make the enumeration tractable
-on a desktop or modest cloud VM. Six levers carry the load; each delivered
+on a desktop or modest cloud VM. Eight levers carry the load; each delivered
 a measurable wall-time reduction on its own, and they compose to roughly
 ~640× over the pure-Python baseline at `N = 22` and ~1500× over Sage's
 `self_orthogonal_binary_codes` at the same length.
 
 Cumulative wall-time ablation on the 13700K development host (sequential
-unless noted; the coset-spectrum row is a 13700K-equivalent container,
-same-session A/B against the row above it):
+unless noted; rows from the coset-spectrum rule down are a
+13700K-equivalent container, each a same-session A/B against the row
+above it):
 
-| stage                                                | N = 20  | N = 22  | N = 24 |
-|------------------------------------------------------|--------:|--------:|-------:|
-| pure Python, full BFS over `C⊥`                      |   235 s | > 600 s |   —    |
-| + quotient-space orbit-min in `C⊥/C`                 |  13.8 s |   152 s |   —    |
-| + degree-based initial nauty partition               |  2.00 s |  18.8 s |   —    |
-| + native Rust kernel (no Python↔Rust crossings)      |  1.46 s |  14.5 s |   —    |
-| + low-weight-incidence canonicaliser                 |  1.07 s |  7.57 s |  107 s |
-| + outer-DFS pipelined-seeder parallel kernel (24t)   |  0.22 s |  0.69 s |  8.90 s |
-| + coset-spectrum parent rule (parallel, same knobs)  | 0.053 s | **0.24 s** | **2.60 s** |
+| stage                                                | N = 20  | N = 22  | N = 24 | N = 26 |
+|------------------------------------------------------|--------:|--------:|-------:|-------:|
+| pure Python, full BFS over `C⊥`                      |   235 s | > 600 s |   —    |   —    |
+| + quotient-space orbit-min in `C⊥/C`                 |  13.8 s |   152 s |   —    |   —    |
+| + degree-based initial nauty partition               |  2.00 s |  18.8 s |   —    |   —    |
+| + native Rust kernel (no Python↔Rust crossings)      |  1.46 s |  14.5 s |   —    |   —    |
+| + low-weight-incidence canonicaliser                 |  1.07 s |  7.57 s |  107 s |   —    |
+| + outer-DFS pipelined-seeder parallel kernel (24t)   |  0.22 s |  0.69 s |  8.90 s | 170 s  |
+| + coset-spectrum parent rule (parallel, same knobs)  | 0.053 s |  0.24 s |  2.60 s | 21.4 s |
+| + split-frame φ sharing + one-comparison reject      | 0.051 s | **0.245 s** | **1.67 s** | 13.2 s |
+| + pair-structure chain (O(1) later strata)           | 0.051 s |  0.24 s |  1.77 s | **11.5 s** |
+
+The last row's `N ≤ 24` cells are within noise of the row above (its
+same-hour control re-measured 1.77 s / 11.8 s at `N = 24` / `26` — the
+earlier cells were a cooler-machine session): parallel `N ≤ 26` is
+bounded by the serial seeder, not by per-candidate work. The chain's
+win is sequential and grows with `N` — `N = 26` sequential drops
+126.6 → **97.2 s** (1.30×) and the spectrum-evaluation time itself
+3.78×.
 
 The remainder of this doc explains what each lever does and why it works.
 
@@ -355,15 +366,74 @@ helper-vs-worker contention.
 Measured same-session A/B against the coset-spectrum baseline (mean of
 3, all DFGHILM Table 3 cells verified per run): `N = 24` sequential
 9.34 → 7.80 s; `N = 26` sequential 207.1 → **126.6 s** (1.64×);
-`N = 26` parallel (t=24, d=4) 21.4 → **13.2 s** (1.62×). The
-count-anchored `N = 29` forecast drops to **1.4–2.2 h** on the same
-72-core cloud box that took 12.32 h pre-coset-spectrum.
+`N = 26` parallel (t=24, d=4) 21.4 → **13.2 s** (1.62×). With lever 8
+on top, the count-anchored `N = 29` forecast drops to **1.0–1.5 h** on
+the same 72-core cloud box that took 12.32 h pre-coset-spectrum.
 
 Knobs: `DOUBLY_EVEN_SEEDER_THREADS` (helper-pool size; default =
 worker count, `0`/`1` disables), `DOUBLY_EVEN_SEEDER_PAR_MIN_L`
 (default 22). Code: `rust/src/parent_rule.rs` (`PhiParentCtx`, the
 amax bound), `rust/src/seeder_pool.rs`, pooled variants in
 `rust/src/orbit.rs` / `rust/src/candidates.rs`.
+
+### 8. The pair-structure chain: O(1) later strata
+
+After the one-comparison reject, a fresh sub-phase profile showed
+**76 %** of the remaining spectrum-evaluation time at `N = 26` sat in
+*later* strata — the per-candidate transforms and parity counts paid by
+candidates that survive their first stratum. Almost all of those
+candidates enter stratum 2 by the same door: a first stratum lying
+entirely in the parent half (`tv = 0`), which leaves the running argmin
+set in the special form `E ∪ {u_C} ∪ (u_C + E)` — every functional
+`u′ ∈ E` present as its full pair `(u′, 0), (u′, 1)`.
+
+That **pair structure** is an invariant: any further parent-only
+stratum filters both halves of a pair together (the candidate-half
+spectrum is identically zero there), so the structure survives. And
+while it holds, every stratum decides in O(1) per candidate from
+parent-only data:
+
+- a stratum with no parent-half words rejects outright — the better
+  half of any pair scores `|Ĝ_v[u′]| ≥ 0`, while the candidate's own
+  functional scores `−tv < 0`;
+- a mixed stratum applies the one-comparison reject *restricted to the
+  running E-set*: a per-parent bound `max_{u′∈E} F̂_C[u′]` beating
+  `tc − tv` proves some hyperplane wins; an inconclusive bound falls
+  back to the generic machinery at exactly the same stratum it would
+  have reached anyway;
+- a parent-only stratum shrinks `E` by a parent-side filter; an empty
+  result proves the candidate's own hyperplane is the unique argmin —
+  accept.
+
+Every sibling candidate of one parent walks the parent's strata in the
+same ascending order, so the per-position E-sets and bounds form a
+single lazy per-parent **chain**, built once and read O(1) by all later
+siblings. The argmin set is never materialised while on the chain, so
+the per-candidate stratum transforms and the per-candidate counting
+sort disappear with it.
+
+The chain is the same argmin cascade evaluated against cached
+parent-side data — decisions are provably identical, and the A/B run
+confirms it the hard way: class counts, canonicalisation-call counts
+and even the total number of strata visited are bit-equal to the
+control at every benched `N`. The audit harness re-verifies the
+per-rank accept identity against the legacy rule on full `N = 22` / `24`
+runs, mass-stop on and off.
+
+Measured same-session A/B (median of 3, all DFGHILM Table 3 cells
+verified per run): the chain decides **34 / 41 / 43 %** of *all*
+candidates at `N = 22 / 24 / 26` in O(1) at stratum ≥ 2; spectrum
+evaluation drops 3.78× at `N = 26` (43.7 → 11.6 s of a 126.6 s
+sequential wall → **97.2 s**, 1.30×); `N = 24` sequential 7.75 →
+7.52 s. What remains of the spectrum evaluation is ~67 % the
+unconditional XOR + popcount sweep over the shared codeword table —
+a pure SIMD target, deliberately left for a vectorisation pass.
+
+No knobs (exact, bit-identical; `DOUBLY_EVEN_PARENT_RULE=legacy`
+bypasses the whole spectrum rule if ever needed). Code:
+`rust/src/parent_rule.rs` (`ensure_chain`, the chain arm of the
+cascade); deterministic-witness and brute-force-sweep tests in the
+same file.
 
 ## Cumulative result
 
@@ -398,11 +468,14 @@ parent rule (lever 6) then did: ~94–97 % of candidates now resolve
 without any canon call, and the per-class call multiplicity collapses
 (87× fewer calls at `N = 26`).
 
-What remains after that lever, at `N = 22` sequential: canon is 47.8 %
-of the (7.6×-smaller) wall and quotient-space candidate generation is
-38.3 %. Neither dominates outright anymore — future levers have to
-re-profile first, and the σ_Q candidate machinery is for the first
-time a co-equal target.
+What remains after that lever and the two spectrum-evaluation passes
+that followed it (levers 7–8), at `N = 26` sequential: canon 44 %,
+quotient-space candidate generation 41 %, spectrum evaluation 12 %.
+Neither canon nor σ_Q dominates outright — future levers have to
+re-profile first. The spectrum evaluation is at its popcount floor
+(a SIMD pass is the planned next step), and the parallel kernel's
+frontier at `N ≤ 26` is the serial seeder span, not per-candidate
+work.
 
 Three classes of further improvement were investigated and closed during
 the 2026-05-15 → 2026-05-23 optimisation sprint:

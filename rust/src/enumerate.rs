@@ -372,9 +372,11 @@ pub(crate) struct WorkerState {
     /// Cascades whose first-stratum decision needed no per-candidate
     /// WHT (coset-only / C-only stratum fast paths, k = 0 frames).
     pub stats_phi_s1_fastpath: u64,
-    /// Rejects proven by the killer pre-check (`DOUBLY_EVEN_PHI_KILLER`;
-    /// 0 unless that flag is on — reserved by D16, wired in A4).
-    pub stats_phi_killer_rejects: u64,
+    /// Cascades decided O(1) on the D17 E-chain at stratum ≥ 2 (v-only
+    /// reject, E-restricted amax reject, or chain-filter unique accept).
+    /// Slot 48 — formerly the never-wired `phi_killer_rejects` reserve
+    /// (the D16 amax reject made the killer pre-check moot).
+    pub stats_phi_chain_fastpath: u64,
     /// Sums of nauty `statsblk` tree-shape counters across all
     /// `canon_info_*_native` calls. Each summand is one call; divide by
     /// `stats_canon_calls` for per-call averages. Recorded to decompose
@@ -520,7 +522,7 @@ impl WorkerState {
             stats_phi_ctx_ns_by_k: vec![0u64; len],
             stats_phi_ctx_builds: 0,
             stats_phi_s1_fastpath: 0,
-            stats_phi_killer_rejects: 0,
+            stats_phi_chain_fastpath: 0,
             stats_nauty_numnodes: 0,
             stats_nauty_tctotal: 0,
             stats_nauty_maxlevel_sum: 0,
@@ -1012,6 +1014,9 @@ impl WorkerState {
         if res.s1_fastpath {
             self.stats_phi_s1_fastpath += 1;
         }
+        if res.chain_fastpath {
+            self.stats_phi_chain_fastpath += 1;
+        }
     }
 
     /// D15 Phase 1 audit: tally a cascade result against the per-candidate
@@ -1348,7 +1353,7 @@ impl WorkerState {
             self.stats_phi_ctx_ns,
             self.stats_phi_ctx_builds as u128,
             self.stats_phi_s1_fastpath as u128,
-            self.stats_phi_killer_rejects as u128,
+            self.stats_phi_chain_fastpath as u128,
         ];
         let per_k_stats: Vec<Vec<u64>> = vec![
             self.stats_is_canon_aug_calls_by_k,
@@ -1461,7 +1466,7 @@ impl WorkerState {
 ///  45   phi_ctx_ns                     (D16; always-on; SUBSET of phi_ns)
 ///  46   phi_ctx_builds                 (D16; always-on)
 ///  47   phi_s1_fastpath                (D16; always-on)
-///  48   phi_killer_rejects             (D16; 0 unless DOUBLY_EVEN_PHI_KILLER)
+///  48   phi_chain_fastpath             (D17; O(1) E-chain decisions at stratum >= 2)
 /// ```
 ///
 /// Fields 4–10 came from the Engine B BFS-cost profile (see

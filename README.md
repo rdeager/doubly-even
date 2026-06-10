@@ -97,11 +97,13 @@ Single platform for reproducibility: **GCP `c4a-standard-72`** (Axion /
 Arm Neoverse V2, aarch64, 72 physical cores, 288 GB), parallel Rust
 kernel at `t=72 d=5`. All wall times below are kernel-only:
 
-All cloud rows below predate the **coset-spectrum parent rule**
-(2026-06-10, now the default — see [Algorithmic levers](#algorithmic-levers)),
-which cuts canonicalisation calls a further 15–87× at `N = 22–26` and
-walls 3–7.6× on the development host; a re-run of the large-`N` rows is
-pending.
+All cloud rows below predate the **coset-spectrum parent rule** and its
+two follow-on spectrum-evaluation levers (2026-06-10, now the default —
+see [Algorithmic levers](#algorithmic-levers)), which together cut
+canonicalisation calls 15–87× at `N = 22–26` and walls ~9–15× on the
+development host; a re-run of the large-`N` rows is pending (the
+count-anchored `N = 29` forecast is **1.0–1.5 h** on the same box that
+took 12.3 h below).
 
 | `N` | wall                        | classes       |
 |----:|----------------------------:|--------------:|
@@ -124,10 +126,13 @@ The scaling bottleneck at this length is the number of calls, not the
 per-call cost — which is precisely what the coset-spectrum parent rule
 now attacks: most candidates are rejected by an exact weight-spectrum
 comparison before any canonicalisation (canon calls drop 87× at
-`N = 26`, wall 169.8 s → 26.4 s on the development host). Desktop
-measurements (`N = 22` in 0.237 s parallel / 0.848 s sequential,
-`N = 26` in 26.4 s) and the cross-platform Sage comparison (~1535× at
-`N = 22`) live in [`docs/performance.md`](docs/performance.md).
+`N = 26`), and two follow-on levers cut the spectrum evaluation itself
+~7× per candidate (split-frame sharing with a one-comparison reject,
+then a pair-structure chain that decides ~43 % of all candidates in
+O(1) past the first stratum). Desktop measurements (`N = 22` in 0.24 s
+parallel / 0.80 s sequential, `N = 26` in **11.5 s** parallel / 97.2 s
+sequential) and the cross-platform Sage comparison (~1500× at `N = 22`)
+live in [`docs/performance.md`](docs/performance.md).
 
 ### `N = 29` per-rank class counts
 
@@ -170,7 +175,7 @@ Four independent checks back every emitted class:
 The enumerator implements DFGHILM Appendix B end-to-end: Gaborit's mass
 formula, a bipartite-graph encoding fed to `sparsenauty`, the
 doubly-even linear-algebra optimisations of Corollary B.1, and McKay
-1998 canonical augmentation. The production kernel adds six
+1998 canonical augmentation. The production kernel adds eight
 engineering changes on top of that recipe. The per-lever multipliers
 below are desktop measurements (the development platform used for
 ablation); the cumulative effect is roughly 640× over the
@@ -207,12 +212,27 @@ pure-Python baseline at `N = 22` and ~1535× faster than Sage
   sequential at `N = 22`, `3.1×` at `N = 24` parallel, `6.5×` at
   `N = 26` parallel — growing with `N` (canon-call count −15×/−32×/−87×).
   Kill-switch: `DOUBLY_EVEN_PARENT_RULE=legacy`.
+- **Split-frame spectrum sharing + one-comparison reject** — all
+  parent-half spectrum work is computed once per parent and shared
+  across its sibling candidates (the full-frame Walsh–Hadamard
+  transform factors exactly as its last butterfly stage), and a
+  per-parent bound decides ~99 % of first strata in a single integer
+  compare. Spectrum evaluation `2.8×`; `N = 26` sequential
+  207 → 127 s over the plain rule.
+- **Pair-structure chain** — candidates surviving a parent-only first
+  stratum carry an argmin set with an exploitable pair structure that
+  survives every further parent-only stratum; per-parent cached
+  E-sets and bounds then decide ~43 % of *all* candidates at `N = 26`
+  in O(1) past the first stratum. Spectrum evaluation a further
+  `3.8×` at `N = 26`; sequential 126.6 → **97.2 s**.
 
 The cumulative ablation table and per-lever writeup are in
 [`docs/algorithm.md`](docs/algorithm.md). Before the coset-spectrum
 rule, ~90 % of the `N = 22` parallel wall was inside `sparsenauty`'s C
-code; after it, canon is ~48 % of a 7.6×-smaller sequential wall, with
-quotient-space candidate generation (~38 %) the other major slice.
+code; after the three parent-rule levers, the `N = 26` sequential wall
+splits canon ~44 % / quotient-space candidate generation ~41 % /
+spectrum evaluation ~12 % — and the remaining spectrum time is almost
+entirely a popcount stream, i.e. SIMD-shaped.
 
 ## Long-running jobs (local or cloud)
 

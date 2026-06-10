@@ -4,31 +4,40 @@ Single home for the measured wall-time numbers and tuning knobs. The
 algorithmic *why* lives in [`algorithm.md`](algorithm.md); this doc is
 tables.
 
-## Headline (split-frame φ + pooled seeder, parallel kernel, mean of 3 runs)
+## Headline (pair-structure chain, parallel kernel, median of 3 runs)
 
 Measured 2026-06-10 on a 13700K-equivalent dev container (its
 same-session legacy controls reproduce the 13700K records within 1–10 %,
 e.g. `N = 26` 168.3 s vs the recorded 169.8 s). Each run starts from a
 cold canon cache; all DFGHILM Table 3 cells verified per run. The
-"split-frame" column is the same-session gain over the plain
-coset-spectrum rule (see [`algorithm.md`](algorithm.md) lever 7);
-`d = 4` is now the best frontier depth at every benched `N`.
+"vs split-frame" column is the same-session gain over
+[`algorithm.md`](algorithm.md) lever 7 (its parallel control was
+re-measured in the same hour — see the lever 8 note); `d = 4` is the
+best frontier depth at every benched `N`.
 
-| N  | classes  | sequential | parallel best           | vs plain coset-spectrum | vs legacy rule |
+| N  | classes  | sequential | parallel best           | vs split-frame | vs legacy rule |
 |----|---------:|-----------:|-------------------------|------------------------:|---------------:|
-| 18 |      341 |    0.029 s | —                       | 1.0× (seq) |  4.8× (seq)  |
-| 20 |    1,211 |    0.145 s | 0.051 s (t=16, d=4)     | 1.04× (seq) |  6.2× (seq)  |
-| 22 |    5,118 |    0.788 s | **0.245 s** (t=24, d=4) | 1.07× (seq) |  8.2× (seq), 2.8× (par) |
-| 24 |   37,496 |     7.80 s | **1.67 s** (t=24, d=4)  | 1.20× (seq), 1.56× (par) | 12.4× (seq), 4.8× (par) |
-| 26 |  494,272 |    126.6 s | **13.2 s** (t=24, d=4)  | 1.64× (seq), 1.62× (par) | 12.7× (par)  |
+| 18 |      341 |    0.030 s | —                       | 1.0× (seq) |  4.7× (seq)  |
+| 20 |    1,211 |    0.147 s | 0.051 s (t=16, d=4)     | 1.0× (seq) |  6.1× (seq)  |
+| 22 |    5,118 |    0.796 s | **0.24 s** (t=24, d=4)  | 1.0× (seq) |  8.3× (seq), 2.9× (par) |
+| 24 |   37,496 |     7.52 s | **1.77 s** (t=24, d=4)  | 1.03× (seq) | 12.9× (seq), 5.0× (par) |
+| 26 |  494,272 |   **97.2 s** | **11.5 s** (t=24, d=4) | **1.30× (seq)**, 1.03× (par) | 14.8× (par)  |
 
-The plain coset-spectrum numbers (2026-06-10, same container, kept for
-cross-reference): `N = 22` 0.848 s seq / 0.237 s par; `N = 24` 9.40 s
-seq / 2.60 s par; `N = 26` 207.1 s seq / 21.4 s par (t=24 d=4). The
-legacy σ-based parent rule remains available as
-`DOUBLY_EVEN_PARENT_RULE=legacy`; its 13700K record numbers: `N = 22`
-6.64 s seq / 0.691 s t=20 d=4; `N = 24` 8.90 s t=24 d=5; `N = 26`
-169.8 s t=24 d=5.
+The split-frame numbers (2026-06-10, same container, kept for
+cross-reference): `N = 24` 7.75 s seq / 1.77 s par (same-hour
+control); `N = 26` 126.6 s seq / 11.8 s par (same-hour control; 13.2 s
+in its own cooler session). Plain coset-spectrum: `N = 22` 0.848 s
+seq / 0.237 s par; `N = 24` 9.40 s seq / 2.60 s par; `N = 26` 207.1 s
+seq / 21.4 s par (t=24 d=4). The legacy σ-based parent rule remains
+available as `DOUBLY_EVEN_PARENT_RULE=legacy`; its 13700K record
+numbers: `N = 22` 6.64 s seq / 0.691 s t=20 d=4; `N = 24` 8.90 s
+t=24 d=5; `N = 26` 169.8 s t=24 d=5.
+
+Parallel `N ≤ 26` is bounded by the serial seeder span (worker
+active/wall is 44 % at `N = 26`, 19 % at `N = 24`, t=24 d=4), which is
+why the chain's 1.30× sequential win shows up as only ~1.03× parallel
+on the desktop — on a many-core cloud run the sequential per-candidate
+saving carries into the core-hours directly.
 
 ## Cloud runs
 
@@ -179,6 +188,12 @@ canon-call reduction: 15× at `N = 22`, 32× at `N = 24`, **87× at
 `N = 26`** — growing with `N` because it cancels precisely the
 calls-per-class explosion in the table above. The table's per-call
 column still describes the calls that remain (accepts + rare φ-ties).
+The two spectrum-evaluation passes that followed (levers 7–8) then cut
+the per-candidate cost of the new parent test itself ~7× end-to-end
+(1.82 µs → 257 ns per candidate at `N = 24–26`); the count-anchored
+`N = 29` forecast on the same 72-core box that took 12.32 h pre-rule
+is now **1.0–1.5 h** (~$3–5) — the cheapest high-value validation run
+on the books.
 
 ## Full `c4a-standard-72` sweep — DFGHILM Table 3 reproduction
 

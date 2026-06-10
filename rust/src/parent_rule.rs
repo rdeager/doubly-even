@@ -83,6 +83,34 @@
 //!   and the surviving argmin set is `E_w ∪ {u_C} ∪ (u_C + E_w)` with
 //!   `E_w = {u' ≠ 0 : F̂_C[u'] = |T_w ∩ C|}` precomputed per parent.
 //!   Empty `E_w` ⇒ ACCEPT-UNIQUE in O(1).
+//!
+//! ### The E-chain (D17): O(1) later strata while the pair structure holds
+//!
+//! A candidate that survives a C-only first stratum enters stratum 2 with
+//! `M = E ∪ {u_C} ∪ (u_C + E)` — every nonzero `u' ∈ E` present as the
+//! full pair `(u', 0), (u', 1)`. That **pair structure** is preserved by
+//! every further C-only stratum (`Ĝ_v ≡ 0` filters both halves of a pair
+//! together), and while it holds each stratum resolves in O(1) per
+//! candidate from parent-only data:
+//!
+//! - **v-only stratum** (`tc = 0`, `tv > 0`): `max(±Ĝ_v[u']) = |Ĝ_v[u']|
+//!   ≥ 0 > tc − tv = f̂[u_C]` — some pair member always beats `u_C`.
+//!   REJECT, no parent data needed at all.
+//! - **mixed stratum** (`tc, tv > 0`): `max` over a pair is
+//!   `F̂_C[u'] + |Ĝ_v[u']| ≥ F̂_C[u']`, so the per-parent
+//!   `max_{u' ∈ E_cur} F̂_C^{(w)}[u'] > tc − tv` proves REJECT in one
+//!   integer compare — the amax theorem restricted to the running E-set.
+//!   Otherwise the candidate materialises `M` and falls back to the
+//!   generic stratum machinery (pair structure ends here).
+//! - **C-only stratum**: `E_cur ← {u' ∈ E_cur : F̂_C^{(w)}[u'] = tc}`;
+//!   empty ⇒ ACCEPT-UNIQUE. The filter depends only on the parent.
+//!
+//! The walk is identical for every sibling — the C-strata of one parent
+//! arrive in the same ascending order — so the per-position E-sets and
+//! bounds form a single per-parent **chain**, built lazily once and read
+//! O(1) by every later sibling ([`PhiParentCtx::ensure_chain`]).
+//! Decisions are exactly those of the generic machinery (the chain is the
+//! same argmin cascade evaluated against parent-side data only).
 
 use std::cell::RefCell;
 
@@ -173,14 +201,19 @@ pub(crate) struct PhiResult {
     pub(crate) strata_used: u32,
     /// `|M|` at the decision point (1 for AcceptUnique; the surviving
     /// tie-set size for Tie). For REJECTS decided at the first stratum
-    /// the early-exit scan no longer materialises the beating argmin
-    /// set, so a witness count of 1 is reported (pre-D16 this was the
-    /// full beating-set size). Diagnostic mean only — nothing gates on
-    /// it.
+    /// (D16 early exit) or on the E-chain (D17 — the argmin set is never
+    /// materialised) a witness count of 1 is reported (pre-D16 this was
+    /// the full beating-set size). Diagnostic mean only — nothing gates
+    /// on it.
     pub(crate) m_size_at_decision: u32,
     /// True when the first-stratum decision needed no per-candidate WHT
     /// (k = 0 frame, coset-only stratum, or C-only stratum fast path).
     pub(crate) s1_fastpath: bool,
+    /// True when the FINAL decision came from the D17 E-chain at stratum
+    /// ≥ 2 (O(1) per-candidate: v-only reject, mixed-stratum bound
+    /// reject, or chain-filter accept) — i.e. the cascade ran to
+    /// completion without materialising a per-candidate argmin set.
+    pub(crate) chain_fastpath: bool,
 }
 
 /// Per-parent shared φ context (D16). Holds everything that depends only
@@ -224,6 +257,24 @@ pub(crate) struct PhiParentCtx {
     amax: Vec<i32>,
     /// Bit `w` set ⇔ `fhat_c[w]` / `e_set[w]` are valid for this parent.
     fhat_built: u128,
+    /// D17 E-chain (see module doc): entry `j` is the state after a
+    /// candidate has passed the parent's first `j + 1` C-strata all
+    /// C-only. `chain_e[0]` is a copy of `E_{w₁}`; `chain_e[j]` is the
+    /// `F̂ = tc` filter of `chain_e[j−1]` at the (j+1)-th C-stratum.
+    /// Storage is grow-only across parents; `chain_len` is the valid
+    /// prefix. Entries build sequentially and lazily — a sibling can
+    /// only reach chain position j by passing positions 0..j first.
+    chain_e: Vec<Vec<u16>>,
+    /// `chain_bound[j]` (j ≥ 1) = `max_{u' ∈ chain_e[j−1]} F̂_C^{(w_j)}`
+    /// where `w_j` is the weight of the (j+1)-th C-stratum: the one
+    /// integer the O(1) mixed-stratum reject compares against `tc − tv`.
+    /// `chain_bound[0]` is unused (i32::MIN).
+    chain_bound: Vec<i32>,
+    /// Weight at which chain entry `j` was built (debug invariant: every
+    /// sibling must present the same C-stratum weight at position `j`).
+    chain_w: Vec<u8>,
+    /// Number of valid chain entries for the current parent.
+    chain_len: usize,
     /// Build time (eager + lazy) accumulated since the last drain, and
     /// the number of eager builds. Drained by `WorkerState` into
     /// `stats_phi_ctx_ns` / `stats_phi_ctx_builds`.
@@ -245,6 +296,10 @@ impl Default for PhiParentCtx {
             e_set: Vec::new(),
             amax: Vec::new(),
             fhat_built: 0,
+            chain_e: Vec::new(),
+            chain_bound: Vec::new(),
+            chain_w: Vec::new(),
+            chain_len: 0,
             ns: 0,
             builds: 0,
         }
@@ -299,6 +354,7 @@ impl PhiParentCtx {
             cursor[w] += 1;
         }
         self.fhat_built = 0;
+        self.chain_len = 0;
         if self.fhat_c.is_empty() {
             self.fhat_c = vec![Vec::new(); 65];
             self.e_set = vec![Vec::new(); 65];
@@ -336,6 +392,55 @@ impl PhiParentCtx {
         }
         self.amax[w] = amax;
         self.fhat_built |= 1 << w;
+        self.ns += t0.elapsed().as_nanos() as u64;
+    }
+
+    /// Ensure D17 chain entry `j` exists, built at C-stratum weight `w`
+    /// (see the `chain_e` field doc). Entry 0 copies `E_w`; entry `j ≥ 1`
+    /// scans `chain_e[j−1]` once against `F̂_C^{(w)}`, producing the
+    /// `F̂ = tc` filter and the bound `max F̂` together. Amortised: built
+    /// once per parent per position, read O(1) by every later sibling.
+    fn ensure_chain(&mut self, j: usize, w: usize) {
+        if j < self.chain_len {
+            debug_assert_eq!(
+                self.chain_w[j], w as u8,
+                "chain position {j} revisited at a different weight"
+            );
+            return;
+        }
+        debug_assert_eq!(j, self.chain_len, "chain entries build sequentially");
+        self.ensure_fhat(w); // accounts its own ns; time only the scan below
+        let t0 = std::time::Instant::now();
+        let mut out = if self.chain_e.len() > j {
+            std::mem::take(&mut self.chain_e[j])
+        } else {
+            Vec::new()
+        };
+        out.clear();
+        let mut bound = i32::MIN;
+        if j == 0 {
+            out.extend_from_slice(&self.e_set[w]);
+        } else {
+            let fc = self.fhat_c[w].as_slice();
+            let tc = self.counts_c[w] as i32;
+            for &u in &self.chain_e[j - 1] {
+                let f = fc[u as usize];
+                bound = bound.max(f);
+                if f == tc {
+                    out.push(u);
+                }
+            }
+        }
+        if self.chain_e.len() > j {
+            self.chain_e[j] = out;
+            self.chain_bound[j] = bound;
+            self.chain_w[j] = w as u8;
+        } else {
+            self.chain_e.push(out);
+            self.chain_bound.push(bound);
+            self.chain_w.push(w as u8);
+        }
+        self.chain_len = j + 1;
         self.ns += t0.elapsed().as_nanos() as u64;
     }
 }
@@ -640,6 +745,10 @@ fn phi_cascade_split(
     let mut strata_used = 0u32;
     let mut first = true;
     let mut s1_fastpath = false;
+    // D17 E-chain position: `Some(j)` ⇔ the pair structure is alive and
+    // the running argmin set is `chain_e[j] ∪ {u_C} ∪ (u_C + chain_e[j])`
+    // — NOT materialised in m_buf (that is the point).
+    let mut chain: Option<usize> = None;
     let n_cap = (n as usize).min(64);
     for w in 1..=n_cap {
         let tc = ctx.counts_c[w];
@@ -660,6 +769,7 @@ fn phi_cascade_split(
                     strata_used,
                     m_size_at_decision: 1,
                     s1_fastpath: true,
+                    chain_fastpath: false,
                 };
             }
             // Coset-only first stratum: O(1) exact reject (see module
@@ -672,15 +782,17 @@ fn phi_cascade_split(
                     strata_used,
                     m_size_at_decision: 1,
                     s1_fastpath: true,
+                    chain_fastpath: false,
                 };
             }
             // C-only first stratum: u_C always survives; the argmin set
-            // comes from the per-parent E_w. Empty ⇒ unique accept.
+            // comes from the per-parent E_w. Empty ⇒ unique accept;
+            // otherwise enter the E-chain at position 0 (the argmin set
+            // stays implicit — no m_buf materialisation).
             if tv == 0 {
                 s1_fastpath = true;
                 ctx.ensure_fhat(w);
-                let e = &ctx.e_set[w];
-                if e.is_empty() {
+                if ctx.e_set[w].is_empty() {
                     clock.mark(2);
                     clock.commit();
                     return PhiResult {
@@ -688,36 +800,100 @@ fn phi_cascade_split(
                         strata_used,
                         m_size_at_decision: 1,
                         s1_fastpath: true,
+                        chain_fastpath: false,
                     };
                 }
-                // Ascending-u order: (u', 0) for u' ∈ E, then u_C, then
-                // (u', 1) — byte-identical to the pre-D16 argmin set.
-                s.m_buf.clear();
-                s.m_buf.extend_from_slice(e);
-                s.m_buf.push(u_c);
-                for &u in e.iter() {
-                    s.m_buf.push(u_c + u);
-                }
+                ctx.ensure_chain(0, w);
+                chain = Some(0);
                 clock.mark(2);
-                true
-            } else {
-                // General first stratum (tc ≥ 1, tv ≥ 1). O(1) exact
-                // reject first: max over the pair (u',0)/(u',1) is
-                // F̂_C[u'] + |Ĝ_v[u']| ≥ F̂_C[u'], so a per-parent amax
-                // beating f̂[u_C] = tc − tv settles the candidate with
-                // no v-half spectral work.
-                ctx.ensure_fhat(w);
-                if ctx.amax[w] > tc as i32 - tv as i32 {
-                    clock.mark(2);
+                continue;
+            }
+            // General first stratum (tc ≥ 1, tv ≥ 1). O(1) exact
+            // reject first: max over the pair (u',0)/(u',1) is
+            // F̂_C[u'] + |Ĝ_v[u']| ≥ F̂_C[u'], so a per-parent amax
+            // beating f̂[u_C] = tc − tv settles the candidate with
+            // no v-half spectral work.
+            ctx.ensure_fhat(w);
+            if ctx.amax[w] > tc as i32 - tv as i32 {
+                clock.mark(2);
+                clock.commit();
+                return PhiResult {
+                    outcome: PhiOutcome::Reject,
+                    strata_used,
+                    m_size_at_decision: 1,
+                    s1_fastpath: true,
+                    chain_fastpath: false,
+                };
+            }
+            first_stratum_split(s, ctx, &mut clock, w, tc, tv, u_c)
+        } else if let Some(j) = chain {
+            // D17 E-chain stratum (see module doc): pair structure
+            // alive, argmin set implicit. Each arm is O(1) per
+            // candidate; only leaving the chain materialises m_buf.
+            if tc == 0 {
+                // v-only stratum: |Ĝ_v[u']| ≥ 0 > tc − tv for any pair
+                // in the set — some pair member always beats u_C.
+                clock.mark(4);
+                clock.commit();
+                return PhiResult {
+                    outcome: PhiOutcome::Reject,
+                    strata_used,
+                    m_size_at_decision: 1,
+                    s1_fastpath,
+                    chain_fastpath: true,
+                };
+            }
+            ctx.ensure_chain(j + 1, w);
+            if tv == 0 {
+                // C-only stratum: filter is parent-side; pair structure
+                // survives. Empty filter ⇒ argmin set is exactly {u_C}.
+                if ctx.chain_e[j + 1].is_empty() {
+                    clock.mark(4);
                     clock.commit();
                     return PhiResult {
-                        outcome: PhiOutcome::Reject,
+                        outcome: PhiOutcome::AcceptUnique,
                         strata_used,
                         m_size_at_decision: 1,
-                        s1_fastpath: true,
+                        s1_fastpath,
+                        chain_fastpath: true,
                     };
                 }
-                first_stratum_split(s, ctx, &mut clock, w, tc, tv, u_c)
+                chain = Some(j + 1);
+                clock.mark(4);
+                continue;
+            }
+            // Mixed stratum: the E-restricted amax reject (one compare).
+            if ctx.chain_bound[j + 1] > tc as i32 - tv as i32 {
+                clock.mark(4);
+                clock.commit();
+                return PhiResult {
+                    outcome: PhiOutcome::Reject,
+                    strata_used,
+                    m_size_at_decision: 1,
+                    s1_fastpath,
+                    chain_fastpath: true,
+                };
+            }
+            // Bound inconclusive: leave the chain. Materialise the
+            // argmin set in ascending-u order — byte-identical to what
+            // the generic machinery would have carried here — and
+            // process THIS stratum generically.
+            let e = &ctx.chain_e[j];
+            s.m_buf.clear();
+            s.m_buf.extend_from_slice(e);
+            s.m_buf.push(u_c);
+            for &u in e.iter() {
+                s.m_buf.push(u_c + u);
+            }
+            chain = None;
+            if s.m_buf.len() > DIRECT_THRESHOLD {
+                let r = later_stratum_wht_split(s, ctx, w, tc, tv, u_c);
+                clock.mark(3);
+                r
+            } else {
+                let r = later_stratum_direct_split(s, ctx, w, &counts_v, u_c);
+                clock.mark(4);
+                r
             }
         } else if s.m_buf.len() > DIRECT_THRESHOLD {
             let r = later_stratum_wht_split(s, ctx, w, tc, tv, u_c);
@@ -738,6 +914,7 @@ fn phi_cascade_split(
                 // report the witness count (see field doc).
                 m_size_at_decision: s.m_buf.len().max(1) as u32,
                 s1_fastpath,
+                chain_fastpath: false,
             };
         }
         if s.m_buf.len() == 1 {
@@ -747,7 +924,19 @@ fn phi_cascade_split(
                 strata_used,
                 m_size_at_decision: 1,
                 s1_fastpath,
+                chain_fastpath: false,
             };
+        }
+    }
+    // Strata exhausted. If the chain is still alive the tie set was never
+    // materialised — do it now, in the same ascending-u order.
+    if let Some(j) = chain {
+        let e = &ctx.chain_e[j];
+        s.m_buf.clear();
+        s.m_buf.extend_from_slice(e);
+        s.m_buf.push(u_c);
+        for &u in e.iter() {
+            s.m_buf.push(u_c + u);
         }
     }
     clock.commit();
@@ -756,6 +945,7 @@ fn phi_cascade_split(
         strata_used,
         m_size_at_decision: s.m_buf.len() as u32,
         s1_fastpath,
+        chain_fastpath: false,
     }
 }
 
@@ -1335,6 +1525,142 @@ mod tests {
             assert!(done > 0, "no independent samples at kp1={kp1}");
         }
         assert!(checked > 500, "property test too small: {checked}");
+    }
+
+    /// D17 E-chain test: a parent whose C-strata force multi-position
+    /// chains (E⁰ = {2,4,6} at w=4 → E¹ = {4} at w=8 → ∅ at w=12), swept
+    /// with random candidates through ONE shared slot, each checked
+    /// against the brute-force reference AND a fresh cascade. Tallies
+    /// assert every chain arm actually fired: v-only O(1) reject,
+    /// E-restricted amax reject / chain-exit at mixed strata, and the
+    /// O(1) unique accept at chain position 2.
+    #[test]
+    fn e_chain_multi_stratum_matches_brute_force() {
+        let n = 24u32;
+        // Block design: r1 w4, r2 w8, r3 w12; every r3-involving word has
+        // weight ≥ 12, so strata w4 {r1} and w8 {r2} are pure-C for any
+        // candidate coset of min weight ≥ 13.
+        let c: Vec<BinVec> = vec![
+            0b1111_0000_0000_0000_0000_0000,
+            0b0000_1111_1111_0000_0000_0000,
+            0b0000_0000_0000_1111_1111_1111,
+        ];
+        let mut slot = PhiParentSlot::new();
+        let mut rng = XorShift(0xE5E7_C8A1);
+        let mask = (1u64 << n) - 1;
+        let in_span = |v: BinVec| -> bool {
+            (0..8u32).any(|m| {
+                let mut w = 0;
+                for (j, &r) in c.iter().enumerate() {
+                    if (m >> j) & 1 == 1 {
+                        w ^= r;
+                    }
+                }
+                w == v
+            })
+        };
+        let (mut chain_rejects, mut others) = (0u32, 0u32);
+        let mut tested = 0u32;
+        while tested < 30_000 {
+            let v = rng.next() & mask;
+            if v == 0 || in_span(v) {
+                continue;
+            }
+            tested += 1;
+            let shared = phi_cascade_shared(&mut slot, &c, v, n);
+            let chain_fp = shared.chain_fastpath;
+            let key = |r: PhiResult| match r.outcome {
+                PhiOutcome::Reject => (0u8, Vec::new()),
+                PhiOutcome::AcceptUnique => (1u8, Vec::new()),
+                PhiOutcome::Tie(m) => (2u8, m),
+            };
+            let fresh = phi_cascade(&c, v, n);
+            assert_eq!(shared.strata_used, fresh.strata_used);
+            assert_eq!(key(shared), key(fresh));
+            check_against_reference(&c, v, n);
+            if chain_fp {
+                chain_rejects += 1;
+            } else {
+                others += 1;
+            }
+        }
+        assert!(chain_rejects > 1000, "chain rejects never fired: {chain_rejects}");
+        assert!(others > 100, "generic/non-chain paths starved: {others}");
+    }
+
+    /// D17 deterministic chain witnesses. Parent (N = 34, weight-agnostic
+    /// frame): r1/r2 are disjoint w4 blocks, r3 a w12 block, so the chain
+    /// is provably E⁰ = {100} at w4 → E¹ = {100} at w8 (r1+r2 ⊥ 100) →
+    /// ∅ at w12 (r3 ⊥̸ 100). Candidates are all-ones tails outside the
+    /// row support, shifting the whole coset up by e: each arm of the
+    /// chain (v-only reject, O(1) unique accept at position 2, mixed-
+    /// stratum chain exit into the generic machinery) fires exactly
+    /// where computed by hand, through ONE shared slot, in an order that
+    /// exercises both the build and the read path of every chain entry.
+    #[test]
+    fn e_chain_deterministic_witnesses() {
+        let n = 34u32;
+        let r1: BinVec = 0b1111;
+        let r2: BinVec = 0b1111_0000;
+        let r3: BinVec = 0b1111_1111_1111_0000_0000;
+        let c: Vec<BinVec> = vec![r1, r2, r3];
+        let tail = |e: u32| -> BinVec { ((1u64 << e) - 1) << 20 };
+        let mut slot = PhiParentSlot::new();
+
+        // e = 9: coset min weight 9 ⇒ strata w4, w8 C-only (chain builds
+        // entries 0, 1), then w9 is v-only ⇒ O(1) chain reject.
+        let res_a = phi_cascade_shared(&mut slot, &c, tail(9), n);
+        assert!(matches!(res_a.outcome, PhiOutcome::Reject));
+        assert!(res_a.chain_fastpath, "v-only mid-chain reject must be O(1)");
+        assert_eq!(res_a.strata_used, 3);
+        check_against_reference(&c, tail(9), n);
+
+        // e = 13: coset min weight 13 ⇒ w4, w8, w12 all C-only; the w12
+        // filter empties E (r3 has odd parity against 100) ⇒ O(1) unique
+        // accept at chain position 2 (extends the chain built above).
+        let res_b = phi_cascade_shared(&mut slot, &c, tail(13), n);
+        assert!(matches!(res_b.outcome, PhiOutcome::AcceptUnique));
+        assert!(res_b.chain_fastpath, "chain-filter accept must be O(1)");
+        assert_eq!(res_b.strata_used, 3);
+        check_against_reference(&c, tail(13), n);
+
+        // e = 12: coset min weight 12 collides with the w12 C-stratum ⇒
+        // mixed stratum, bound = −1 ≤ tc − tv = 0 is inconclusive ⇒ the
+        // candidate leaves the chain (reads the cached entries built by
+        // the siblings above) and resolves generically further down.
+        let res_c = phi_cascade_shared(&mut slot, &c, tail(12), n);
+        assert!(
+            !res_c.chain_fastpath,
+            "inconclusive bound must fall back to the generic machinery"
+        );
+        assert!(res_c.strata_used > 3, "generic resolution continues past w12");
+        check_against_reference(&c, tail(12), n);
+
+        // Random sweep over the same shared slot: chain caches must stay
+        // coherent for arbitrary siblings of this parent.
+        let mut rng = XorShift(0xD17_ACCE57);
+        let mask = (1u64 << n) - 1;
+        let mut tested = 0;
+        while tested < 2_000 {
+            let v = rng.next() & mask;
+            let mut probe = c.clone();
+            probe.push(v);
+            let (pr, _) = row_reduce(&probe, n);
+            if pr.len() < 4 {
+                continue;
+            }
+            tested += 1;
+            let shared = phi_cascade_shared(&mut slot, &c, v, n);
+            let fresh = phi_cascade(&c, v, n);
+            assert_eq!(shared.strata_used, fresh.strata_used);
+            let key = |r: PhiResult| match r.outcome {
+                PhiOutcome::Reject => (0u8, Vec::new()),
+                PhiOutcome::AcceptUnique => (1u8, Vec::new()),
+                PhiOutcome::Tie(m) => (2u8, m),
+            };
+            assert_eq!(key(shared), key(fresh));
+            check_against_reference(&c, v, n);
+        }
     }
 
     /// D16 staleness test: many sibling candidates evaluated through ONE

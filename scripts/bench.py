@@ -111,7 +111,9 @@ KERNEL_STATS_LAYOUT: tuple[str, ...] = (
     #                                    (always-on; SUBSET of phi_ns)
     "phi_ctx_builds",             # 46 — D16: # of φ-tested parents
     "phi_s1_fastpath",            # 47 — D16: stratum-1 fast-path cascades
-    "phi_killer_rejects",         # 48 — D16: DOUBLY_EVEN_PHI_KILLER rejects
+    "phi_chain_fastpath",         # 48 — D17: O(1) E-chain decisions at
+    #                                    stratum ≥ 2 (formerly the unwired
+    #                                    phi_killer_rejects reserve)
 )
 
 # Row names of the kernel's `per_k_stats` matrix, in fixed order — kept in
