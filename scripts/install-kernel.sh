@@ -23,7 +23,9 @@ fi
 .venv/bin/maturin "${MATURIN_ARGS[@]}"
 
 WHEEL=$(ls -t rust/target/wheels/doubly_even_kernel-*.whl | head -1)
-.venv/bin/python -m pip install --quiet --force-reinstall --no-deps "$WHEEL"
+# uv-managed venvs ship without pip; `uv pip` targets ./.venv from the repo
+# root (project convention: uv for everything).
+uv pip install --quiet --reinstall --no-deps "$WHEEL"
 
 echo "Installed: $WHEEL"
 .venv/bin/python -c '
