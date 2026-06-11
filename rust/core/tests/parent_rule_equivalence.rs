@@ -18,8 +18,8 @@
 
 use std::collections::BTreeMap;
 
-use doubly_even_kernel::enumerate::{enumerate_doubly_even_with_rule, EnumeratedRaw};
-use doubly_even_kernel::parent_rule::ParentRule;
+use doubly_even_core::enumerate::{enumerate_doubly_even_with_rule, EnumeratedRaw};
+use doubly_even_core::parent_rule::ParentRule;
 
 const SIGMA_N10: [u128; 6] = [1, 255, 5355, 11475, 2295, 0];
 const FACT_N10: u128 = 3_628_800;
@@ -150,7 +150,7 @@ fn rank_cap_mixing_is_sound() {
 #[cfg(feature = "parallel")]
 #[test]
 fn coset_spectrum_parallel_matches_sequential() {
-    use doubly_even_kernel::enumerate::enumerate_doubly_even_parallel_with_rule;
+    use doubly_even_core::enumerate::enumerate_doubly_even_parallel_with_rule;
     let rule = ParentRule::CosetSpectrum { max_rank: 13 };
     let seq = run(16, &SIGMA_N16, FACT_N16, rule);
     let (par, _, _) = enumerate_doubly_even_parallel_with_rule(

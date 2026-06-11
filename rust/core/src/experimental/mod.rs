@@ -15,9 +15,10 @@
 //! - `invariants`  — WL + T11/T12/T13 collision-experiment substrate.
 //!
 //! Production builds compile these unconditionally (the pyfunctions that
-//! expose them are useful for ad-hoc audit scripts), but no hot-path
-//! module imports from them — the `experimental` namespace is a one-way
-//! barrier the reader can ignore when tracing the active flow.
+//! expose them — `py_exports` in the wrapper crate — are useful for
+//! ad-hoc audit scripts), but no hot-path module imports from them — the
+//! `experimental` namespace is a one-way barrier the reader can ignore
+//! when tracing the active flow.
 
 #[cfg(feature = "dense_qd")]
 pub mod canon_dense_qd;
@@ -31,6 +32,5 @@ pub mod invariants;
 pub mod paired_iso;
 #[cfg(feature = "parallel_profiling")]
 pub mod parallel_profile;
-pub mod py_exports;
 #[cfg(feature = "equivalence_verifier")]
 pub mod verifier_dispatch;

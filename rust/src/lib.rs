@@ -13,28 +13,16 @@
 //!   parallel-16 entry when built with `--features parallel`.
 //! - `kernel_build_info` — A/B harness identifier.
 //!
-//! Dormant Python-facing wrappers (debug submodule, Feulner port, WL +
-//! T11/T12/T13 invariants, parallel_profiling, nauty_hist) live in
-//! `crate::experimental::py_exports` and are registered at module init via
-//! `experimental::py_exports::register(m)`.
+//! This crate is the thin pyo3 wrapper (FFI conversion + the mimalloc
+//! global allocator); every algorithm lives in the workspace member
+//! `core/` (`doubly_even_core`). Dormant Python-facing wrappers (debug
+//! submodule, Feulner port, WL + T11/T12/T13 invariants,
+//! parallel_profiling, nauty_hist) live in `crate::py_exports` and are
+//! registered at module init via `py_exports::register(m)`.
 
-pub mod candidates;
-pub mod canon;
-#[cfg(feature = "phase_timers")]
-pub mod cycles;
-pub mod enumerate;
-pub mod experimental;
-pub mod linalg;
-pub mod orbit;
-pub mod parent_rule;
-pub mod permutations;
-pub mod qd_graph;
-pub mod quotient;
-#[cfg(feature = "parallel")]
-pub mod seeder_pool;
-pub mod streaming;
-pub mod subspace_orbit;
-pub mod types;
+mod py_exports;
+
+use doubly_even_core::{candidates, canon, enumerate, qd_graph, subspace_orbit, types};
 
 // D13-V4: see Cargo.toml mimalloc dep for rationale. Per-thread arena
 // allocator; replaces glibc ptmalloc which becomes the contention surface
@@ -44,7 +32,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use pyo3::prelude::*;
 
-use crate::types::{BinVec, ColPerm};
+use doubly_even_core::types::{BinVec, ColPerm};
 
 // --------------------------------------------------- main FFI entry point
 
@@ -176,8 +164,8 @@ fn py_subspace_in_orbit(
 ///
 ///   `(rref, canonical_column_order, aut_generators, aut_order_decimal, column_orbits)`
 ///
-/// Plus a `stats: Vec[int]` (length 45) and a `per_k_stats: list[list[int]]`
-/// (18 rows) — see `enumerate::enumerate_doubly_even` doc for the field
+/// Plus a `stats: Vec[int]` (length 49) and a `per_k_stats: list[list[int]]`
+/// (19 rows) — see `enumerate::enumerate_doubly_even` doc for the field
 /// layout, mirrored in `scripts/bench.py` (`KERNEL_STATS_LAYOUT`,
 /// `PER_K_STATS_ROWS`).
 /// Packed as flat lists because pyo3 0.23 caps `IntoPyObject` tuples at 12
@@ -239,7 +227,7 @@ fn py_enumerate_doubly_even(
         let _ = py;
         enumerate::enumerate_doubly_even(n, max_k, quota, factorial_n)
     };
-    debug_assert_eq!(stats.len(), 26, "stats vector length mismatch");
+    debug_assert_eq!(stats.len(), 49, "stats vector length mismatch");
     let result: Vec<_> = out
         .into_iter()
         .map(|e| {
@@ -331,7 +319,7 @@ fn py_enumerate_doubly_even_streaming(
     // without u128 -> int conversion losing precision at N >= 21.
     let mass_strs: Vec<String> = result.mass.iter().map(|m| m.to_string()).collect();
     dict.set_item("mass", mass_strs)?;
-    // stats vector: same 26-field layout as the in-memory entry. Convert
+    // stats vector: same 49-field layout as the in-memory entry. Convert
     // to decimal strings for the same precision reason (some fields are
     // cumulative ns — easily > 2^53 at N = 26).
     let stats_strs: Vec<String> = result.stats.iter().map(|s| s.to_string()).collect();
@@ -366,7 +354,7 @@ fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_kernel_build_info, m)?)?;
 
     // Dormant wrappers (debug submodule, Feulner, invariants, audit features).
-    experimental::py_exports::register(m)?;
+    py_exports::register(m)?;
 
     Ok(())
 }

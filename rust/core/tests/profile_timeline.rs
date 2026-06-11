@@ -13,8 +13,8 @@
 
 #![cfg(feature = "parallel_profiling")]
 
-use doubly_even_kernel::enumerate::enumerate_doubly_even;
-use doubly_even_kernel::experimental::parallel_profile::enumerate_doubly_even_parallel_with_profile;
+use doubly_even_core::enumerate::enumerate_doubly_even;
+use doubly_even_core::experimental::parallel_profile::enumerate_doubly_even_parallel_with_profile;
 
 /// σ(14, k) for k = 0..7.
 const SIGMA_N14: [u128; 8] = [
@@ -29,7 +29,7 @@ const SIGMA_N14: [u128; 8] = [
 ];
 const FACT_N14: u128 = 87_178_291_200;
 
-fn per_rank_counts(out: &[doubly_even_kernel::enumerate::EnumeratedRaw]) -> Vec<usize> {
+fn per_rank_counts(out: &[doubly_even_core::enumerate::EnumeratedRaw]) -> Vec<usize> {
     let max_k = out.iter().map(|e| e.rref.len()).max().unwrap_or(0);
     let mut counts = vec![0usize; max_k + 1];
     for e in out {

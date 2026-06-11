@@ -22,18 +22,18 @@
 
 #![cfg(feature = "parallel")]
 
-use doubly_even_kernel::enumerate::{
+use doubly_even_core::enumerate::{
     enumerate_doubly_even, enumerate_doubly_even_parallel,
     enumerate_doubly_even_parallel_with_seeder,
 };
-use doubly_even_kernel::parent_rule::ParentRule;
+use doubly_even_core::parent_rule::ParentRule;
 
 type Row = (Vec<u64>, u128);
 
 /// Reduce the rich `EnumeratedRaw` rows to `(rref, aut_order)` and sort by
 /// `rref` so set equality compares cleanly across runs.
 fn canonical_rows(
-    out: Vec<doubly_even_kernel::enumerate::EnumeratedRaw>,
+    out: Vec<doubly_even_core::enumerate::EnumeratedRaw>,
 ) -> Vec<Row> {
     let mut rows: Vec<Row> = out
         .into_iter()
