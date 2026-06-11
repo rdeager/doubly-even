@@ -82,6 +82,12 @@ practically):
 |----|-----------:|------------------:|-----------------------:|
 | 22 |   363.85 s |            6.64 s |                0.691 s |
 
+(Epoch note: the `doubly-even` columns are the *legacy-parent-rule*
+walls, retained because they isolate the canonicaliser-and-kernel
+comparison like-for-like; the current kernel — coset-spectrum parent
+rule and the levers after it — is faster still, `N = 22` in 0.24 s
+parallel.)
+
 Sage's enumeration in `sage/coding/binary_code.pyx` (Miller 2007,
 NICE-based partition refinement) is **column-augmentation**: it adds
 one column at a time to an existing code, the dual of our row-by-row
@@ -136,10 +142,12 @@ Symbolic Computation **60** (2014), 94–112.
 
 The modern reference for `nauty` and Traces. We use the sparse variant
 (`sparsenauty`) via Rust's [`nauty-Traces-sys`](https://crates.io/crates/nauty-Traces-sys)
-crate. At `N = 22`, roughly **90 % of the parallel-kernel wall** is
-inside `sparsenauty`'s C code; the per-call cost of ~80 µs is the
-algorithmic floor at our graph shape (see
-[`algorithm.md` §"What we did not beat"](algorithm.md#what-we-did-not-beat)
+crate. Under the legacy parent rule, roughly **90 % of the `N = 22`
+parallel-kernel wall** was inside `sparsenauty`'s C code; the per-call
+cost of ~80 µs remains the algorithmic floor at our graph shape — the
+coset-spectrum parent rule cut the number of calls, not the cost per
+call (see
+[`algorithm.md` §"What we beat last, and what is left"](algorithm.md#what-we-beat-last-and-what-is-left)
 for the audit details).
 
 McKay's earlier *Practical graph isomorphism* (Congr. Numer. **30**
@@ -169,9 +177,9 @@ reproducible result at that length, mass-formula certified (see
 
 We reproduce DFGHILM Table 3 with:
 
-- A single 13700K desktop (cumulative ~525× faster than Sage at
-  `N = 22`) for `N ≤ 26` in seconds-to-minutes; `N = 27` in tens of
-  minutes.
+- A single 13700K desktop (cumulative ~1500× faster than Sage at
+  `N = 22`) for `N ≤ 26` in seconds-to-minutes; `N = 27` in about a
+  minute (63 s parallel).
 - A single GCP `c4a-standard-72` cloud VM (~$3 of on-demand compute,
   72 Neoverse V2 cores) for `N = 28` in 61 min and (~$35) for
   `N = 29` in 12.3 hr.

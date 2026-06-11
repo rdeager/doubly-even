@@ -4,48 +4,57 @@ Single home for the measured wall-time numbers and tuning knobs. The
 algorithmic *why* lives in [`algorithm.md`](algorithm.md); this doc is
 tables.
 
-## Headline (pair-structure chain, parallel kernel, median of 3 runs)
+## Headline (method-of-four-Russians BFS + x86-64-v3 codegen, parallel kernel, median of 3)
 
-Measured 2026-06-10 on a 13700K-equivalent dev container (its
+Measured 2026-06-11 on a 13700K-equivalent dev container (its
 same-session legacy controls reproduce the 13700K records within 1–10 %,
 e.g. `N = 26` 168.3 s vs the recorded 169.8 s). Each run starts from a
 cold canon cache; all DFGHILM Table 3 cells verified per run. The
-"vs split-frame" column is the same-session gain over
-[`algorithm.md`](algorithm.md) lever 7 (its parallel control was
-re-measured in the same hour — see the lever 8 note); `d = 4` is the
-best frontier depth at every benched `N`.
+"vs pair-structure chain" column is the four-Russians orbit BFS's
+same-session A/B over [`algorithm.md`](algorithm.md) lever 8; the
+x86-64-v3 codegen flag adds a further 1.01–1.05× sequential on top
+(same-session A/B: `N = 26` 85.0 → 81.4 s), already included in the
+wall columns. `d = 4` is the best frontier depth at every benched `N`.
 
-| N  | classes  | sequential | parallel best           | vs split-frame | vs legacy rule |
-|----|---------:|-----------:|-------------------------|------------------------:|---------------:|
-| 18 |      341 |    0.030 s | —                       | 1.0× (seq) |  4.7× (seq)  |
-| 20 |    1,211 |    0.147 s | 0.051 s (t=16, d=4)     | 1.0× (seq) |  6.1× (seq)  |
-| 22 |    5,118 |    0.796 s | **0.24 s** (t=24, d=4)  | 1.0× (seq) |  8.3× (seq), 2.9× (par) |
-| 24 |   37,496 |     7.52 s | **1.77 s** (t=24, d=4)  | 1.03× (seq) | 12.9× (seq), 5.0× (par) |
-| 26 |  494,272 |   **97.2 s** | **11.5 s** (t=24, d=4) | **1.30× (seq)**, 1.03× (par) | 14.8× (par)  |
+| N  | classes   | sequential | parallel best           | vs pair-structure chain |
+|----|----------:|-----------:|-------------------------|------------------------:|
+| 18 |       341 |    0.029 s | —                       | ~1.0× (seq) |
+| 20 |     1,211 |    0.147 s | 0.051 s (t=16, d=4)     | 1.0× (unchanged since the split-frame epoch) |
+| 22 |     5,118 |    0.685 s | **0.24 s** (t=24, d=4)  | 1.14× (seq) |
+| 24 |    37,496 |     6.26 s | **~1.7 s** (t=24, d=4)  | 1.17× (seq) |
+| 26 |   494,272 | **81.4 s** | **9.70 s** (t=24, d=4)  | 1.13× (seq), 1.18× (par) |
+| 27 | 2,673,492 |          — | **63.0 s** (t=24, d=4, cap=500K; single rep) | ~1.05× (par) |
 
-The split-frame numbers (2026-06-10, same container, kept for
-cross-reference): `N = 24` 7.75 s seq / 1.77 s par (same-hour
-control); `N = 26` 126.6 s seq / 11.8 s par (same-hour control; 13.2 s
-in its own cooler session). Plain coset-spectrum: `N = 22` 0.848 s
-seq / 0.237 s par; `N = 24` 9.40 s seq / 2.60 s par; `N = 26` 207.1 s
-seq / 21.4 s par (t=24 d=4). The legacy σ-based parent rule remains
-available as `DOUBLY_EVEN_PARENT_RULE=legacy`; its 13700K record
-numbers: `N = 22` 6.64 s seq / 0.691 s t=20 d=4; `N = 24` 8.90 s
-t=24 d=5; `N = 26` 169.8 s t=24 d=5.
+`N = 26` sequential needs `DOUBLY_EVEN_CANON_CACHE_CAP=500000` (the
+uncapped run OOMs). The pair-structure-chain numbers (2026-06-10, same
+container, kept for cross-reference): `N = 22` 0.796 s seq / 0.24 s
+par; `N = 24` 7.52 s seq / 1.77 s par; `N = 26` 97.2 s seq / 11.5 s
+par; `N = 27` 66.1 s par. The split-frame numbers (2026-06-10):
+`N = 24` 7.75 s seq / 1.77 s par (same-hour control); `N = 26`
+126.6 s seq / 11.8 s par (same-hour control; 13.2 s in its own cooler
+session). Plain coset-spectrum: `N = 22` 0.848 s seq / 0.237 s par;
+`N = 24` 9.40 s seq / 2.60 s par; `N = 26` 207.1 s seq / 21.4 s par
+(t=24 d=4). The legacy σ-based parent rule remains available as
+`DOUBLY_EVEN_PARENT_RULE=legacy`; its 13700K record numbers: `N = 22`
+6.64 s seq / 0.691 s t=20 d=4; `N = 24` 8.90 s t=24 d=5; `N = 26`
+169.8 s t=24 d=5.
 
-Parallel `N ≤ 26` is bounded by the serial seeder span (worker
+Parallel `N ≤ 24` is bounded by the serial seeder span (worker
 active/wall is 44 % at `N = 26`, 19 % at `N = 24`, t=24 d=4), which is
-why the chain's 1.30× sequential win shows up as only ~1.03× parallel
-on the desktop at those sizes. One step up the win emerges: at
-**`N = 27`** (same-hour A/B, median of 3, t=24 d=4 cap=500K) the
-chain takes the parallel wall from 94.1 s to **66.1 s (1.42×)** —
-total work grows ~6× per step while the seeder span only roughly
-doubles, so the worker share recovers and the per-candidate saving
-(4.6× on spectrum evaluation at `N = 27`) lands on the wall. The
-2,673,492 classes reproduce the `c4a-standard-72` record exactly —
-a 24-thread desktop now beats that pre-parent-rule 72-core cloud row
-5.7×. On a many-core cloud run the sequential saving carries into
-the core-hours directly.
+why the chain's 1.30× sequential win showed up as only ~1.03× parallel
+on the desktop at those sizes — and why the four-Russians orbit BFS,
+which shortens the seeder span itself, *does* land 1.18× parallel at
+`N = 26`. One step up the chain's win emerged in full: at **`N = 27`**
+(same-hour A/B, median of 3, t=24 d=4 cap=500K) it took the parallel
+wall from 94.1 s to **66.1 s (1.42×)** — total work grows ~6× per step
+while the seeder span only roughly doubles, so the worker share
+recovers and the per-candidate saving (4.6× on spectrum evaluation at
+`N = 27`) lands on the wall. The orbit BFS left `N = 27` flat (that
+wall is worker-bound, not seeder-bound); the codegen flag brings the
+current record to **63.0 s**. The 2,673,492 classes reproduce the
+`c4a-standard-72` record exactly — a 24-thread desktop now beats that
+pre-parent-rule 72-core cloud row (374 s) ~5.9×. On a many-core cloud
+run the sequential savings carry into the core-hours directly.
 
 ## Cloud runs
 
@@ -56,10 +65,10 @@ the core-hours directly.
 | GCP `c4a-standard-72` (Axion, aarch64) | 72 phys | 288 GB | 29 | **44 356 s (12.3 hr)** | **first publicly reproducible N=29 enumeration**; mass-formula certified; ~$35 of compute; `CAP=200K` (cgroup-tight) |
 
 The Emerald-Rapids cross-port has zero per-IPC penalty; the Axion
-port needs a one-line `Cargo.toml` patch to disable the x86-only
-`popcnt` feature of `nauty-Traces-sys` (see the
-[`reproducing.md`](reproducing.md) ARM section), after which builds
-work unchanged. At `N = 29` on c4a-72 the per-worker LRU times 72
+port builds unchanged — the x86-only `popcnt` feature of
+`nauty-Traces-sys` is target-conditional in the manifest
+(`rust/core/Cargo.toml`; see the [`reproducing.md`](reproducing.md)
+ARM section). At `N = 29` on c4a-72 the per-worker LRU times 72
 workers grew tighter against the 288 GB headroom, so we ran with
 `DOUBLY_EVEN_CANON_CACHE_CAP = 200000` rather than the 300 K used at
 `N = 28` — this likely costs ~5–10 % wall to canon-cache thrash but
@@ -256,14 +265,14 @@ confirmed that Sage's `binary_code.pyx` already has the quotient-space
 prefilter, the Gray-walked lift, the weight-mod-4 filter, and a
 visited-set bitmap to skip processed cosets. The honest decomposition
 of the wall-time gap is a stack of compounding wins, approximately:
-~6× from D6's precomputed `σ_Q` action tables + global single-sweep
+~6× from the precomputed `σ_Q` action tables + global single-sweep
 orbit decomposition (O(1) table lookup vs Sage's O(N) per-candidate
 word-permutation hop, `binary_code.pyx:4109–4121`); ~10–20× from the
 Rust kernel + native sparsenauty replacing per-candidate Python
 canonicalisation under the GIL; ~5–9× from the outer-DFS worker
-parallelism with pipelined seeder (`DOUBLY_EVEN_THREADS=20`, V3 +
-V4); ~2× from the Q_D low-weight-incidence canonicaliser handing
-nauty smaller graphs at high `k`. No single mythical lever.
+parallelism with pipelined seeder (`DOUBLY_EVEN_THREADS=20`); ~2×
+from the Q_D low-weight-incidence canonicaliser handing nauty
+smaller graphs at high `k`. No single mythical lever.
 
 Sage is inherently single-threaded as shipped:
 `sage.coding.binary_code.BinaryCodeClassifier.generate_children` is
@@ -312,14 +321,22 @@ under the default `CANON_CACHE_CAP = 500,000`. Drop to `200,000` to
 fit, or run on a memory-larger machine. The c4a-72 run used
 `CAP = 300,000` against 288 GB RAM and peaked at 71 GB.
 
+**Build note (x86 codegen).** x86 wheels are built with
+`-C target-cpu=x86-64-v3` via `rust/.cargo/config.toml` — cargo's
+config discovery is working-directory-based, so the flag only applies
+to builds run from inside `rust/`; `scripts/install-kernel.sh` does
+this for you. Verify a wheel with
+`doubly_even_kernel.kernel_target_features()` — `avx2` must be `True`
+on x86. The resulting wheel **requires AVX2** (any x86 CPU since
+~2013; both GCP x86 families qualify). aarch64 builds are unaffected.
+
 ## How to reproduce these numbers
 
 See [`reproducing.md`](reproducing.md). The short version:
 
 ```sh
 uv sync --all-extras --dev
-maturin build --release --features parallel -m rust/Cargo.toml
-uv pip install --force-reinstall rust/target/wheels/doubly_even_kernel-*.whl
+scripts/install-kernel.sh parallel   # builds from inside rust/ so the x86-64-v3 flag applies
 DOUBLY_EVEN_THREADS=20 uv run python scripts/bench.py --label local-22 --N 22
 ```
 

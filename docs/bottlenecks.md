@@ -1,9 +1,9 @@
 # Current bottleneck profile (living document)
 
-> **As of:** 2026-06-11 · **kernel:** `b81b74c` (+ this session's workspace
-> restructure and x86-64-v3 codegen flag, pending re-bench) · **wheel:**
-> `--features parallel` · **box:** 13700K-equivalent dev container
-> (24 logical, AVX2, no AVX-512), 62 GB.
+> **As of:** 2026-06-11 (consolidation session: workspace restructure +
+> x86-64-v3 codegen flag, both shipped and re-benched) · **wheel:**
+> `--features parallel`, AVX2 build · **box:** 13700K-equivalent dev
+> container (24 logical, AVX2, no AVX-512), 62 GB.
 >
 > **Maintenance checklist — when a lever ships, touch these in order:**
 > 1. The internal maintainers' writeup (see the note at the bottom of this
@@ -39,26 +39,28 @@ produced: [`benchmarking.md`](benchmarking.md). Why the levers work:
 
 | N  | sequential | parallel (t=24, d=4) | classes |
 |----|-----------:|---------------------:|--------:|
-| 22 | 0.698 s    | 0.24 s               | 5,118 |
-| 24 | 6.44 s     | ~1.7 s               | 37,496 |
-| 26 | 85.6 s     | 9.81 s               | 494,272 |
-| 27 | —          | 66.9 s               | 2,673,492 |
+| 22 | 0.685 s    | 0.24 s               | 5,118 |
+| 24 | 6.26 s     | ~1.7 s               | 37,496 |
+| 26 | 81.4 s     | 9.70 s               | 494,272 |
+| 27 | —          | 63.0 s               | 2,673,492 |
 
-<!-- v3: refresh after ship bench -->
-The x86-64-v3 codegen flag (shipping this session) was A/B-measured at
-**1.06× (N=22/24 seq) / 1.09× (N=26 seq, N=27 par) / 1.11× (N=26 par)**
-with bit-identical decisions; same-hour ratios are trustworthy, the
-absolute walls above predate the flag. N=26 sequential needs
-`DOUBLY_EVEN_CANON_CACHE_CAP=500000` (uncapped OOMs); even capped it is
-OOM-adjacent on a 62 GB box (one silent mid-run SIGKILL per three runs
-observed — use an RSS poller if it recurs).
+Medians of 3 (N=27 par: single rep) on the v3 wheel, 2026-06-11. Two
+structural changes shipped the same session, both decision-bit-identical:
+the **Cargo workspace restructure** (perf-neutral, 0.98–0.99× control
+A/B) and the **x86-64-v3 codegen flag** (same-session A/B: N=26 seq
+1.044×, N=24 seq 1.014×, N≤22 and N=26 par flat; an earlier warmer-box
+session recorded up to 1.09–1.11× — treat 1.01–1.05× as the cool-box
+value, with the N=27 row suggesting more at larger N). N=26 sequential
+needs `DOUBLY_EVEN_CANON_CACHE_CAP=500000` (uncapped OOMs); even capped
+it is OOM-adjacent on a 62 GB box (silent mid-run SIGKILLs observed —
+use an RSS poller if a rep goes missing).
 
 Cloud records (both predate every lever shipped since 2026-06-10, so a
 re-run is cheap): N=28 in 61 min on GCP c4a-standard-72 (~$3); N=29 in
 12.32 h on the same platform (~$35), 239,465,540 classes, certificate at
 [`results/n29.json`](results/n29.json).
 
-## 2. Phase shares (sequential N=26, post-orbit-BFS lever, 85.6 s)
+## 2. Phase shares (sequential N=26; shares from the pre-v3 85.6 s profile, shape unchanged at 81.4 s)
 
 | phase | seconds | share | trend |
 |---|---:|---:|---|
@@ -107,9 +109,9 @@ k=3 σ_Q calls** (~20–30 ms each), not parallelising inside one BFS.
 
 ## 4. Ranked next levers
 
-1. **x86-64-v3 codegen flag — shipping this session.** 1.06–1.11×
-   kernel-wide for one config line; decisions bit-identical. aarch64
-   needs nothing (NEON is baseline and already auto-vectorised).
+1. ~~x86-64-v3 codegen flag~~ — **SHIPPED 2026-06-11**
+   (`rust/.cargo/config.toml`; 1.01–1.05× sequential on a cool box,
+   decisions bit-identical; aarch64 unaffected, NEON is baseline).
 2. **N ≥ 28 cloud re-run** — the highest-value datapoint. N=29
    count-anchored forecast: **1.0–1.5 h on c4a-72** (~$3–5) vs the
    12.32 h actually paid pre-levers; the forecast predates the codegen
