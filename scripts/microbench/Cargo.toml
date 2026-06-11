@@ -54,3 +54,7 @@ path = "src/orbit_probe.rs"
 [[bin]]
 name = "vhalf_sweep"
 path = "src/vhalf_sweep.rs"
+
+[[bin]]
+name = "simd_probe"
+path = "src/simd_probe.rs"
