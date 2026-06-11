@@ -28,8 +28,7 @@ ends with the expected output so you can confirm you're on track.
 uv sync --all-extras --dev
 
 # 2. Build the Rust kernel (parallel feature) and install the wheel
-maturin build --release --features parallel -m rust/Cargo.toml
-uv pip install --force-reinstall rust/target/wheels/doubly_even_kernel-*.whl
+scripts/install-kernel.sh parallel
 ```
 
 The parallel feature is opt-in; without it, the kernel still works
@@ -41,13 +40,29 @@ If you only want to run the spec-side Python code (no kernel), skip
 step 2 — the package will fall back to `pynauty` and pure-Python
 recursion, ~50× slower but correct.
 
+### Build requirements (x86)
+
+x86 builds use `-C target-cpu=x86-64-v3` via `rust/.cargo/config.toml`,
+so the wheel **requires AVX2** — any x86 CPU since ~2013 qualifies,
+including both GCP x86 families. Cargo's config discovery is
+working-directory-based: the flag only applies to builds run from
+inside `rust/`, which `scripts/install-kernel.sh` handles for you.
+Verify an installed wheel with
+
+```sh
+uv run python -c 'import doubly_even_kernel as k; print(dict(k.kernel_target_features()))'
+```
+
+— `avx2` must be `True` on x86. aarch64 builds are unaffected (NEON
+is baseline; no config needed).
+
 ## Reproduce the validation table
 
 ```sh
-# Fast tests (568 collected, ~7 s)
+# Fast tests (590 collected: 549 pass + 41 slow-skipped, ~7 s)
 uv run pytest
 
-# All tests including N=17, N=18 Table-3 cells (~10 s)
+# All tests including N=17, N=18 Table-3 cells (580 pass / 10 skipped)
 uv run pytest --run-slow
 ```
 
@@ -58,29 +73,32 @@ oracle at every `(N, k)` pair through `N = 22`.
 ## Reproduce the headline wall times
 
 Each invocation writes a JSON record to `scripts/bench-results/`
-(gitignored). Class counts in the output should match
-[`performance.md`](performance.md#headline-13700k-parallel-kernel-mean-of-3-runs).
+(gitignored). Class counts in the output should match the headline
+table in [`performance.md`](performance.md).
 
 ```sh
-# Sequential baseline at N=22 (~6.6 s on a 13700K)
-uv run python scripts/bench.py --label seq-baseline --N 22
+# Sequential at N=22 (~0.7 s on a 13700K)
+uv run python scripts/bench.py --label seq-n22 --N 22
 
-# Parallel at N=22 (~0.69 s on a 13700K with 16 physical cores)
-DOUBLY_EVEN_THREADS=20 \
-    uv run python scripts/bench.py --label par-t20 --N 22
+# Parallel at N=22 (~0.24 s on a 13700K, 16 physical / 24 logical)
+DOUBLY_EVEN_THREADS=24 \
+    uv run python scripts/bench.py --label par-t24-n22 --N 22
 
-# Parallel at N=24 (~9 s on a 13700K — deeper cut depth helps here)
-DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
-    uv run python scripts/bench.py --label par-t24-d5 --N 24
+# Parallel at N=24 (~1.7 s)
+DOUBLY_EVEN_THREADS=24 \
+    uv run python scripts/bench.py --label par-t24-n24 --N 24
 
-# Parallel at N=26 (~170 s on a 13700K with cache cap)
-DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
-    DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
-    uv run python scripts/bench.py --label par-t24-d5-n26 --N 26
+# Parallel at N=26 (~10 s with the canon-cache cap)
+DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
+    uv run python scripts/bench.py --label par-t24-n26 --N 26
 ```
 
-Each run prints the wall time, the per-`k` class count, and (after
-the run) cross-checks DFGHILM Table 3. The expected class counts:
+The default frontier depth (`DOUBLY_EVEN_FRONTIER_DEPTH=4`) is the
+measured best at every benched `N` — the older "raise to 5 at
+`N ≥ 24`" advice predates the coset-spectrum parent rule and is
+obsolete. Each run prints the wall time, the per-`k` class count, and
+(after the run) cross-checks DFGHILM Table 3. The expected class
+counts:
 
 | N  | classes  |
 |----|---------:|
@@ -216,8 +234,7 @@ The streaming pipeline isn't cloud-specific. For local `N = 26` /
 
 ```sh
 # Terminal 1 — long-running kernel:
-DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
-    DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
+DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
     uv run python scripts/run_streaming.py --N 26 \
     --output-dir /tmp/n26-local
 
@@ -233,8 +250,9 @@ runs automatically against DFGHILM Table 3.
 
 `nauty-Traces-sys 0.11`'s `popcnt` feature is x86-only. On aarch64
 hosts (Graviton, Axion, Raspberry Pi 5, M-series under Linux) the
-build fails with a `is_x86_feature_detected!` macro error. The
-target-conditional patch is already in tree on `main`:
+build would fail with a `is_x86_feature_detected!` macro error. The
+target-conditional dependency is already in the manifest
+(`rust/core/Cargo.toml`), so no patch is needed:
 
 ```toml
 [target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))'.dependencies]
@@ -256,13 +274,16 @@ zero perf cost on ARM.
 fallback Python wheel: `uv pip install libclang` then
 `LIBCLANG_PATH=$(python -c 'import clang, os; print(os.path.join(os.path.dirname(clang.__file__), "native"))') maturin build --release …`.
 
-**Wall time at `N = 22` parallel is much worse than 0.69 s.** Check:
+**Wall time at `N = 22` parallel is much worse than 0.24 s.** Check:
 
 - The kernel was built `--release` (not debug). `maturin develop`
   without `--release` is ~20× slower.
-- `--features parallel` was passed and the wheel was reinstalled
-  with `--force-reinstall` (else the unchanged debug wheel from a
-  previous build wins).
+  `scripts/install-kernel.sh parallel` builds release with the
+  parallel feature and force-reinstalls the wheel (else a stale wheel
+  from a previous build wins).
+- On x86, the x86-64-v3 flag took effect:
+  `kernel_target_features()` must report `avx2` as `True` (see
+  "Build requirements (x86)" above).
 - mimalloc is the allocator. Check the build info via
   `python -c 'import doubly_even_kernel; print(doubly_even_kernel.kernel_build_info())'`.
 - `DOUBLY_EVEN_THREADS` is set ≥ 2; the sequential path is taken

@@ -182,7 +182,7 @@ impl ParentRule {
 const DIRECT_THRESHOLD: usize = 64;
 
 /// Outcome of the φ cascade for one candidate augmentation `(C, v)`.
-pub(crate) enum PhiOutcome {
+pub enum PhiOutcome {
     /// `u_C` left the running argmin set: `C` is provably not the
     /// φ-selected parent. Sound reject — no canon call needed.
     Reject,
@@ -195,25 +195,25 @@ pub(crate) enum PhiOutcome {
     Tie(Vec<u16>),
 }
 
-pub(crate) struct PhiResult {
-    pub(crate) outcome: PhiOutcome,
+pub struct PhiResult {
+    pub outcome: PhiOutcome,
     /// Number of weight strata evaluated before the cascade resolved.
-    pub(crate) strata_used: u32,
+    pub strata_used: u32,
     /// `|M|` at the decision point (1 for AcceptUnique; the surviving
     /// tie-set size for Tie). For REJECTS decided at the first stratum
     /// (D16 early exit) or on the E-chain (D17 — the argmin set is never
     /// materialised) a witness count of 1 is reported (pre-D16 this was
     /// the full beating-set size). Diagnostic mean only — nothing gates
     /// on it.
-    pub(crate) m_size_at_decision: u32,
+    pub m_size_at_decision: u32,
     /// True when the first-stratum decision needed no per-candidate WHT
     /// (k = 0 frame, coset-only stratum, or C-only stratum fast path).
-    pub(crate) s1_fastpath: bool,
+    pub s1_fastpath: bool,
     /// True when the FINAL decision came from the D17 E-chain at stratum
     /// ≥ 2 (O(1) per-candidate: v-only reject, mixed-stratum bound
     /// reject, or chain-filter accept) — i.e. the cascade ran to
     /// completion without materialising a per-candidate argmin set.
-    pub(crate) chain_fastpath: bool,
+    pub chain_fastpath: bool,
 }
 
 /// Per-parent shared φ context (D16). Holds everything that depends only
@@ -456,12 +456,12 @@ thread_local! {
 /// by `&mut` into `test_candidate`; the ctx materialises lazily on the
 /// first φ-tested candidate (so legacy-rule runs and mass-stopped loops
 /// never pay a build) and returns to the thread-local pool on drop.
-pub(crate) struct PhiParentSlot {
+pub struct PhiParentSlot {
     ctx: Option<Box<PhiParentCtx>>,
 }
 
 impl PhiParentSlot {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self { ctx: None }
     }
 
@@ -577,14 +577,14 @@ thread_local! {
 /// time (φ cost correlates strongly with k — see
 /// `stats_phi_sampled_calls_by_k`). Diagnostic ±10 %.
 #[cfg(feature = "phase_timers")]
-pub(crate) mod phi_sample {
+pub mod phi_sample {
     use std::cell::Cell;
 
     /// `call_index & SAMPLE_MASK == 0` ⇒ fully timed. 64 keeps the
     /// expected overhead ≈ (5 × 9 ns)/64 ≈ 0.7 ns/call; drop to 255 if
     /// the wall-overhead gate (≤ 1.02×) ever fails.
     pub(crate) const SAMPLE_MASK: u64 = 63;
-    pub(crate) const N_PHASES: usize = 5;
+    pub const N_PHASES: usize = 5;
 
     thread_local! {
         static CALL_COUNT: Cell<u64> = const { Cell::new(0) };
@@ -608,8 +608,17 @@ pub(crate) mod phi_sample {
     /// Take the sub-phase ns of the most recent cascade IF it was
     /// sampled (cleared on take, so a sample is never double-counted).
     #[inline]
-    pub(crate) fn take_last() -> Option<[u64; N_PHASES]> {
+    pub fn take_last() -> Option<[u64; N_PHASES]> {
         LAST_SAMPLE.with(|c| c.take())
+    }
+
+    /// Reset the thread-local call counter so the NEXT cascade on this
+    /// thread is fully timed. Microbench-only entry point
+    /// (`scripts/microbench/phi_replay` drives its per-phase rows with
+    /// force + [`take_last`] pairs); cold code, never on the
+    /// enumeration path.
+    pub fn force_next_sample() {
+        CALL_COUNT.with(|c| c.set(0));
     }
 }
 
@@ -689,7 +698,7 @@ pub(crate) fn phi_cascade(c_rref: &[BinVec], v: BinVec, n: u32) -> PhiResult {
 /// Evaluate the φ cascade for candidate `v` of the parent owning `slot`
 /// (D16 split-frame path). The slot's ctx is built on first use and
 /// shared by every sibling candidate tested through the same slot.
-pub(crate) fn phi_cascade_shared(
+pub fn phi_cascade_shared(
     slot: &mut PhiParentSlot,
     c_rref: &[BinVec],
     v: BinVec,
@@ -1138,7 +1147,10 @@ fn later_stratum_direct_split(
 /// literally the last butterfly stage (`h = 2^k`) factored out — the
 /// split path computes the identical integers the full-frame transform
 /// would.
-fn wht_in_place(f: &mut [i32]) {
+///
+/// `pub` for the `scripts/microbench/` sweep bins (`wht_sweep`), which
+/// time this exact production body rather than a hand-copied clone.
+pub fn wht_in_place(f: &mut [i32]) {
     let size = f.len();
     let mut h = 1;
     while h < size {

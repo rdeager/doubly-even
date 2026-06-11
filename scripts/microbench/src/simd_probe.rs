@@ -25,12 +25,15 @@
 //!     --bin simd_probe -- --sigma
 //! Pin it: `taskset -c 4 ...`.
 
+use doubly_even_core::orbit::{m4r_build, orbit_minima_m4r, singular_reps_q};
 use microbench::timing::{cycles_to_ns, mono_cycles, ns_per_cycle};
 use microbench::XorShift64;
 use std::env;
 use std::hint::black_box;
 
-// ----- shared with orbit_probe (hand-copied, exploratory clone)
+// ----- production-shape reference arms (ground-truth minima, baseline
+// ----- timing) come straight from doubly-even-core; the local M4rGen /
+// ----- BitSet below exist only for the EXPERIMENTAL split-timed body.
 
 struct BitSet(Vec<u64>);
 
@@ -50,27 +53,6 @@ impl BitSet {
 
 fn is_identity_mat(m: &[u64]) -> bool {
     m.iter().enumerate().all(|(i, &c)| c == 1u64 << i)
-}
-
-fn singular_reps_q(v_basis: &[u64]) -> Vec<u64> {
-    let l = v_basis.len();
-    let mut out: Vec<u64> = Vec::new();
-    if l == 0 {
-        return out;
-    }
-    let size: u64 = 1u64 << l;
-    out.reserve(size as usize / 2);
-    let mut u: u64 = 0;
-    let mut v: u64 = 0;
-    for i in 1..size {
-        let flip = i.trailing_zeros() as usize;
-        u ^= 1u64 << flip;
-        v ^= v_basis[flip];
-        if v.count_ones() & 3 == 0 {
-            out.push(u);
-        }
-    }
-    out
 }
 
 struct M4rGen {
@@ -103,41 +85,6 @@ impl M4rGen {
 }
 
 const CHUNK: usize = 1024;
-
-/// Production-shape m4r BFS (gen-major, fused apply+probe) — ground
-/// truth minima + the single-number baseline.
-fn bfs_m4r(reps_sorted: &[u64], gens: &[&Vec<u64>], l: u32) -> Vec<u64> {
-    let m4r: Vec<M4rGen> = gens.iter().map(|g| M4rGen::build(g)).collect();
-    let universe = 1usize << l;
-    let mut seen = BitSet::with_capacity(universe);
-    let mut minima: Vec<u64> = Vec::new();
-    let cap = reps_sorted.len();
-    let mut queue: Vec<u64> = Vec::with_capacity(cap);
-    let mut next: Vec<u64> = Vec::with_capacity(cap);
-    for &v in reps_sorted {
-        if seen.put(v as usize) {
-            continue;
-        }
-        minima.push(v);
-        queue.clear();
-        queue.push(v);
-        while !queue.is_empty() {
-            next.clear();
-            for cur_chunk in queue.chunks(CHUNK) {
-                for g in &m4r {
-                    for &current in cur_chunk {
-                        let new_v = g.apply(current);
-                        if !seen.put(new_v as usize) {
-                            next.push(new_v);
-                        }
-                    }
-                }
-            }
-            std::mem::swap(&mut queue, &mut next);
-        }
-    }
-    minima
-}
 
 /// m4r BFS with apply and probe phases timed separately (two passes per
 /// chunk through a flat image buffer). Per-level new-element set is
@@ -364,8 +311,11 @@ fn sigma_mode(dir: &str, filter: &str) {
         let mut reps_sorted = reps;
         reps_sorted.sort_unstable();
 
+        // Production fused body (doubly-even-core), build included in
+        // the timed region — ground truth minima + baseline number.
         let c0 = mono_cycles();
-        let minima_fused = bfs_m4r(&reps_sorted, &gens, p.l);
+        let tables = m4r_build(&gens, p.l);
+        let minima_fused = orbit_minima_m4r(&reps_sorted, &tables, p.l);
         let fused_cyc = mono_cycles().wrapping_sub(c0);
 
         let (minima_split, apply_cyc, probe_cyc, images) =

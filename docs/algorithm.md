@@ -2,7 +2,7 @@
 
 This doc walks through what `doubly-even` adds on top of the DFGHILM
 Appendix B canonical-augmentation recipe to make the enumeration tractable
-on a desktop or modest cloud VM. Eight levers carry the load; each delivered
+on a desktop or modest cloud VM. Nine levers carry the load; each delivered
 a measurable wall-time reduction on its own, and they compose to roughly
 ~640× over the pure-Python baseline at `N = 22` and ~1500× over Sage's
 `self_orthogonal_binary_codes` at the same length.
@@ -21,16 +21,22 @@ above it):
 | + low-weight-incidence canonicaliser                 |  1.07 s |  7.57 s |  107 s |   —    |
 | + outer-DFS pipelined-seeder parallel kernel (24t)   |  0.22 s |  0.69 s |  8.90 s | 170 s  |
 | + coset-spectrum parent rule (parallel, same knobs)  | 0.053 s |  0.24 s |  2.60 s | 21.4 s |
-| + split-frame φ sharing + one-comparison reject      | 0.051 s | **0.245 s** | **1.67 s** | 13.2 s |
-| + pair-structure chain (O(1) later strata)           | 0.051 s |  0.24 s |  1.77 s | **11.5 s** |
+| + split-frame φ sharing + one-comparison reject      | 0.051 s | 0.245 s |  1.67 s | 13.2 s |
+| + pair-structure chain (O(1) later strata)           | 0.051 s |  0.24 s |  1.77 s | 11.5 s |
+| + method-of-four-Russians orbit BFS                  | 0.051 s |  0.24 s |  1.7 s  | 9.8 s  |
+| + x86-64-v3 codegen (and workspace split)            | 0.051 s | **0.24 s** | **1.7 s** | **9.7 s** |
 
-The last row's `N ≤ 24` cells are within noise of the row above (its
-same-hour control re-measured 1.77 s / 11.8 s at `N = 24` / `26` — the
-earlier cells were a cooler-machine session): parallel `N ≤ 26` is
-bounded by the serial seeder, not by per-candidate work. The chain's
-win is sequential and grows with `N` — `N = 26` sequential drops
-126.6 → **97.2 s** (1.30×) and the spectrum-evaluation time itself
-3.78×.
+The parallel `N ≤ 24` cells stopped moving at the chain row (each
+row's same-hour control re-measures within noise of the row above):
+parallel `N ≤ 26` is bounded by the serial seeder, not by
+per-candidate work, so the last three levers' wins are clearest
+sequentially. The chain takes `N = 26` sequential from 126.6 to
+97.2 s (1.30×, spectrum evaluation itself 3.78×), the four-Russians
+orbit BFS to 85.6 s (1.13×; 1.17× at `N = 24`), and the codegen flag
+to **81.4 s** (1.044× on a cool box). The orbit BFS is the one
+post-chain lever that also moves the parallel wall at `N = 26`
+(11.5 → 9.8 s, 1.18×), because the serial seeder span it shortens is
+exactly the parallel bottleneck.
 
 The remainder of this doc explains what each lever does and why it works.
 
@@ -106,7 +112,7 @@ enumerator already uses the quotient-space coordinates
 complement (`binary_code.pyx:4123–4133`), a weight-mod-4 filter on
 the lift (`binary_code.pyx:4016`), and a visited-set bitmap to skip
 already-processed cosets (`binary_code.pyx:4001, 4018`). What is
-specifically novel in our D6 is the combination of (a) precomputed
+specifically novel in our lever is the combination of (a) precomputed
 `σ_Q ∈ End(Q_C)` action tables built incrementally in Gray-code
 order at one XOR per entry per generator, and (b) a single global
 O(2^L) sweep that decomposes all orbits at once via these tables —
@@ -119,7 +125,7 @@ in full `F_q^n`), or Sage `binary_code.pyx`. Full audit at
 [`/workspace/markdown/notes/qc-sage-audit-2026-05-23.md`](../../markdown/notes/qc-sage-audit-2026-05-23.md).
 
 Code: `src/doubly_even/enumerate/quotient.py` (Python spec), wrapped by
-the Rust kernel via `rust/src/candidates.rs`.
+the Rust kernel via `rust/core/src/candidates.rs`.
 
 ### 2. Low-weight-incidence canonicaliser
 
@@ -142,7 +148,7 @@ enforces exactly. So `H = Aut(C)` and the canonical column order from
 Measured wall reduction at the time this lever shipped, single-threaded:
 **1.91× at N = 22** (14.48 s → 7.57 s); **≥2.5× at N = 24**.
 
-Code: `rust/src/canon.rs::collect_low_weight_codewords`,
+Code: `rust/core/src/canon.rs::collect_low_weight_codewords`,
 `build_low_weight_sparsegraph`, `canon_info_qd_native`. The
 threshold sweep landed at "always dispatch" (no `k` gate). The fall-back
 to the full-bipartite path is one branch in the same file.
@@ -157,11 +163,11 @@ info, once for candidate generation).
 
 The native kernel ports the entire recursion to Rust:
 
-- `rust/src/enumerate.rs` owns the LRU cache (keyed by the RREF basis,
+- `rust/core/src/enumerate/` owns the LRU cache (keyed by the RREF basis,
   with `Rc<CachedInfo>` values so cache hits don't clone aut-generator
   payloads), the mass accumulator, the depth-first traversal, and a
   Rust port of `canonical_parent` and `is_canonical_augmentation`.
-- `rust/src/permutations.rs` ports the Schreier–Sims fallback used when
+- `rust/core/src/permutations.rs` ports the Schreier–Sims fallback used when
   nauty's `grpsize1 × 10^grpsize2` overflows float64's exact-integer
   range (which happens at the zero code for `N ≥ 19`).
 
@@ -207,11 +213,14 @@ the full table):
 
 - `N ≤ 22`: `DOUBLY_EVEN_THREADS = logical_cores − 2` (leave 2 cores
   for the scheduler).
-- `N ≥ 24`: `DOUBLY_EVEN_THREADS = logical_cores`, `DOUBLY_EVEN_FRONTIER_DEPTH=5`.
+- `N ≥ 24`: `DOUBLY_EVEN_THREADS = logical_cores`. (The
+  `FRONTIER_DEPTH=5` advice from this lever's era is obsolete — the
+  default `d = 4` is the measured best everywhere since the
+  coset-spectrum rule.)
 - `N ≥ 26`: also `DOUBLY_EVEN_CANON_CACHE_CAP` — the per-worker LRU is
   load-bearing for memory ceiling.
 
-Code: `rust/src/enumerate.rs::enumerate_doubly_even_parallel`. The
+Code: `rust/core/src/enumerate/drivers.rs::enumerate_doubly_even_parallel`. The
 parallel build is an opt-in Cargo feature (`parallel`) so the sequential
 path stays byte-identical when unset.
 
@@ -236,9 +245,12 @@ described under "Opt-in branches" in the project README.
 The `σ(N, k)` itself is implemented in
 `src/doubly_even/spec/mass.py::gaborit_sigma` (closed-form, verified
 against `sigma_brute` for `N ≤ 8`). The quota check is in
-`rust/src/enumerate.rs`.
+`rust/core/src/enumerate/`.
 
 ### 6. Coset-spectrum parent rule
+
+Formal statements and proofs: [`theory.md`](theory.md) §2–§3 (the rule,
+its McKay soundness, the spectral calculus).
 
 The biggest lever, and the only one that attacks canon **call count**
 rather than per-call cost. Background: in McKay's canonical-augmentation
@@ -317,12 +329,15 @@ Knobs: `DOUBLY_EVEN_PARENT_RULE` = `coset-spectrum` (default) |
 `legacy` (kill-switch / A-B control) | `audit` (instrumented legacy);
 `DOUBLY_EVEN_PHI_MAX_RANK` (default 13).
 
-Code: `rust/src/parent_rule.rs` (cascade + tie-break),
-`rust/src/enumerate.rs::test_candidate` (dispatch); Python prototype
+Code: `rust/core/src/parent_rule.rs` (cascade + tie-break),
+`rust/core/src/enumerate/worker.rs::test_candidate` (dispatch); Python prototype
 `scripts/experimental/d15_phi_rule_check.py`; measurement harness
 `scripts/experimental/d15_phi_audit.py`.
 
 ### 7. Split-frame spectrum sharing and the one-comparison reject
+
+Formal statements and proofs: [`theory.md`](theory.md) §3–§4 (the
+split-frame factorisation, the pair-max bound and its corollaries).
 
 Once the coset-spectrum rule became the default, the φ evaluation
 itself became the bottleneck — 60 % of the `N = 26` sequential wall,
@@ -372,11 +387,14 @@ the same 72-core cloud box that took 12.32 h pre-coset-spectrum.
 
 Knobs: `DOUBLY_EVEN_SEEDER_THREADS` (helper-pool size; default =
 worker count, `0`/`1` disables), `DOUBLY_EVEN_SEEDER_PAR_MIN_L`
-(default 22). Code: `rust/src/parent_rule.rs` (`PhiParentCtx`, the
-amax bound), `rust/src/seeder_pool.rs`, pooled variants in
-`rust/src/orbit.rs` / `rust/src/candidates.rs`.
+(default 22). Code: `rust/core/src/parent_rule.rs` (`PhiParentCtx`, the
+amax bound), `rust/core/src/seeder_pool.rs`, pooled variants in
+`rust/core/src/orbit.rs` / `rust/core/src/candidates.rs`.
 
 ### 8. The pair-structure chain: O(1) later strata
+
+Formal statements and proofs: [`theory.md`](theory.md) §5 (the E-set
+chain invariant and its three decision arms).
 
 After the one-comparison reject, a fresh sub-phase profile showed
 **76 %** of the remaining spectrum-evaluation time at `N = 26` sat in
@@ -429,14 +447,75 @@ sequential wall → **97.2 s**, 1.30×) and 4.62× at `N = 27`, where the
 24-thread desktop beats the pre-parent-rule 72-core cloud `N = 27` row
 5.7×); `N = 24` sequential 7.75 → 7.52 s. What remains of the spectrum
 evaluation is ~67 % the unconditional XOR + popcount sweep over the
-shared codeword table — a pure SIMD target, deliberately left for a
-vectorisation pass.
+shared codeword table — a pure SIMD shape. The vectorisation question
+that raised was settled afterwards by compiler codegen, not hand
+intrinsics — see lever 9's coda.
 
 No knobs (exact, bit-identical; `DOUBLY_EVEN_PARENT_RULE=legacy`
 bypasses the whole spectrum rule if ever needed). Code:
-`rust/src/parent_rule.rs` (`ensure_chain`, the chain arm of the
+`rust/core/src/parent_rule.rs` (`ensure_chain`, the chain arm of the
 cascade); deterministic-witness and brute-force-sweep tests in the
 same file.
+
+### 9. Method-of-four-Russians orbit BFS
+
+Formal statements and proofs: [`theory.md`](theory.md) §6 (linearity
+of the byte-table decomposition; BFS schedule-independence).
+
+With the spectrum cascade tamed, quotient-space candidate generation
+was the next-largest consumer (~41 % of the `N = 26` sequential wall,
+89 % of it the orbit-min BFS that closes each candidate orbit under
+the `σ_Q` generator matrices). A focused profile — replaying 446
+rank-2/3 parents dumped from real `N = 26 / 27` runs, not synthetic
+inputs — showed the BFS is **compute-bound on image generation**, not
+memory-bound: the seen-bitset is L2/L3-resident at quotient dimensions
+`L = 20–23`, the singular set is group-invariant so the closure visits
+all ~`2^(L−2)` representatives, and the orbits are few and giant.
+Probe-side restructures (deferred probing, batched lookups,
+radix-bucketed frontiers) all failed a 1.15× ship bar; the image
+computation itself was the cost.
+
+The fix is the classic method of four Russians. For each generator
+matrix, precompute 256-entry byte tables `tables[j][b] = σ·(b ≪ 8j)`
+for each of the `⌈L/8⌉` byte positions; by linearity, one image is
+then `⌈L/8⌉` L1 table loads + XORs instead of a chained per-set-bit
+walk. The BFS applies tables generator-major over 1024-element
+frontier chunks, so one generator's ≤ 8 KB of tables stays L1-resident
+across the whole chunk. The table build amortises whenever the
+universe is large; below the crossover the original walk is kept.
+
+Measured: **1.84–1.94×** on the BFS itself on the real-input replay;
+on the wall, vs the pair-structure-chain epoch: `N = 22` sequential
+0.796 → 0.698 s (1.14×), `N = 24` 7.52 → 6.44 s (1.17×), `N = 26`
+97.2 → 85.6 s (1.13×), and `N = 26` *parallel* 11.5 → 9.81 s (1.18× —
+the low-rank BFS lives in the serial seeder span, which is the
+parallel bottleneck). `N = 27` parallel is flat: that wall is
+worker-bound, not seeder-bound, so a seeder-side lever cannot move it.
+
+Exactness is structural: the byte-table image is the same linear map
+(linearity), and the per-level new-element set of the BFS is
+independent of the order in which images are generated or probed, so
+the emitted orbit minima are **byte-identical** to the original walk's
+([`theory.md`](theory.md) §6, Lemmas 7–8). The A/B run confirms
+classes, canon-call counts and strata sums bit-equal to the control.
+
+No knobs (exact; the table/walk crossover is the `M4R_MIN_L = 14`
+const). Code: `rust/core/src/orbit.rs` (`m4r_build`,
+`orbit_minima_m4r`); the sequential and pooled BFS bodies share it.
+
+**Codegen coda.** The vectorisation pass that lever 8 left on the
+table was made moot by a one-line compiler flag:
+`-C target-cpu=x86-64-v3` (in `rust/.cargo/config.toml`) lets LLVM
+auto-vectorise the v-half popcount sweep (`vpshufb`/`vpsadbw`), the
+Gray sweeps and the WHT butterflies, worth 1.01–1.05× sequential on a
+cool box with decisions bit-identical — and hand intrinsics beyond
+the flag measured dead. (The flag was measured as noise in 2026-05;
+that was true while ~90 % of the wall was nauty's C, and reversed
+once the parent-rule levers made Rust-side code ~50 % of the wall.)
+x86 wheels consequently require AVX2 — any x86 CPU since ~2013;
+aarch64 builds are unaffected (NEON is baseline and already
+auto-vectorised). The live ranked-lever list is
+[`bottlenecks.md`](bottlenecks.md).
 
 ## Cumulative result
 
@@ -456,7 +535,11 @@ same-session A/B against the legacy rule):
 The "≥" is because the pure-Python BFS was killed by timeout — we never
 let it run to completion at `N = 22`, only at `N = 20` (235 s). The
 ratio `0.237 / 363.85 ≈ 1535×` against Sage is anchored to a measured
-run.
+run. The three levers shipped since (split-frame sharing, the
+pair-structure chain, the four-Russians orbit BFS) plus the codegen
+flag leave the `N = 22` parallel wall essentially unchanged at 0.24 s —
+they bind at `N ≥ 24`, where the ablation table at the top of this doc
+tracks them — though `N = 22` *sequential* did drop 0.85 → 0.69 s.
 
 ## What we beat last, and what is left
 
@@ -471,14 +554,16 @@ parent rule (lever 6) then did: ~94–97 % of candidates now resolve
 without any canon call, and the per-class call multiplicity collapses
 (87× fewer calls at `N = 26`).
 
-What remains after that lever and the two spectrum-evaluation passes
-that followed it (levers 7–8), at `N = 26` sequential: canon 44 %,
-quotient-space candidate generation 41 %, spectrum evaluation 12 %.
-Neither canon nor σ_Q dominates outright — future levers have to
-re-profile first. The spectrum evaluation is at its popcount floor
-(a SIMD pass is the planned next step), and the parallel kernel's
-frontier at `N ≤ 26` is the serial seeder span, not per-candidate
-work.
+What remains after that lever and the three passes that followed it
+(levers 7–9), at `N = 26` sequential: canon ~50 %, quotient-space
+candidate generation ~33 %, spectrum evaluation ~13.5 %. Canon is the
+largest consumer again, but nothing dominates outright — future levers
+have to re-profile first. The spectrum evaluation is at its popcount
+floor: the x86-64-v3 codegen flag banked what vectorisation had to
+offer (lever 9's coda), and hand SIMD beyond it measured dead. The
+parallel kernel's frontier at `N ≤ 26` is the serial seeder span, not
+per-candidate work. The live ranked-lever list is
+[`bottlenecks.md`](bottlenecks.md).
 
 Three classes of further improvement were investigated and closed during
 the 2026-05-15 → 2026-05-23 optimisation sprint:

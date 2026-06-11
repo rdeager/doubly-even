@@ -17,11 +17,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use doubly_even_kernel::enumerate::{
+use doubly_even_core::enumerate::{
     enumerate_doubly_even, enumerate_doubly_even_parallel_streaming,
     enumerate_doubly_even_streaming,
 };
-use doubly_even_kernel::streaming::{HEADER_LEN, MAGIC, VERSION};
+use doubly_even_core::streaming::{HEADER_LEN, MAGIC, VERSION};
 
 type Row = (Vec<u64>, u128);
 

@@ -16,8 +16,8 @@
 //! at `rust/target/criterion/report/index.html`).
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use doubly_even_kernel::orbit::{aut_orbit_minima_q_table, aut_orbit_minima_q_witt};
-use doubly_even_kernel::types::{BinVec, Mat};
+use doubly_even_core::orbit::{aut_orbit_minima_q_table, aut_orbit_minima_q_witt};
+use doubly_even_core::types::{BinVec, Mat};
 
 /// Deterministic xorshift64 — keeps the benches reproducible across runs
 /// without pulling in `rand`.

@@ -267,7 +267,7 @@ mod tests {
         use std::io::Write;
 
         let out_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../scripts/bench-results/sigma-inputs");
+            .join("../../scripts/bench-results/sigma-inputs");
         std::fs::create_dir_all(&out_dir).expect("create sigma-inputs dir");
 
         let cases: [(u32, [u128; 4], u128); 2] = [

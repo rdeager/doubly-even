@@ -13,28 +13,16 @@
 //!   parallel-16 entry when built with `--features parallel`.
 //! - `kernel_build_info` — A/B harness identifier.
 //!
-//! Dormant Python-facing wrappers (debug submodule, Feulner port, WL +
-//! T11/T12/T13 invariants, parallel_profiling, nauty_hist) live in
-//! `crate::experimental::py_exports` and are registered at module init via
-//! `experimental::py_exports::register(m)`.
+//! This crate is the thin pyo3 wrapper (FFI conversion + the mimalloc
+//! global allocator); every algorithm lives in the workspace member
+//! `core/` (`doubly_even_core`). Dormant Python-facing wrappers (debug
+//! submodule, Feulner port, WL + T11/T12/T13 invariants,
+//! parallel_profiling, nauty_hist) live in `crate::py_exports` and are
+//! registered at module init via `py_exports::register(m)`.
 
-pub mod candidates;
-pub mod canon;
-#[cfg(feature = "phase_timers")]
-pub mod cycles;
-pub mod enumerate;
-pub mod experimental;
-pub mod linalg;
-pub mod orbit;
-pub mod parent_rule;
-pub mod permutations;
-pub mod qd_graph;
-pub mod quotient;
-#[cfg(feature = "parallel")]
-pub mod seeder_pool;
-pub mod streaming;
-pub mod subspace_orbit;
-pub mod types;
+mod py_exports;
+
+use doubly_even_core::{candidates, canon, enumerate, qd_graph, subspace_orbit, types};
 
 // D13-V4: see Cargo.toml mimalloc dep for rationale. Per-thread arena
 // allocator; replaces glibc ptmalloc which becomes the contention surface
@@ -44,7 +32,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use pyo3::prelude::*;
 
-use crate::types::{BinVec, ColPerm};
+use doubly_even_core::types::{BinVec, ColPerm};
 
 // --------------------------------------------------- main FFI entry point
 
@@ -176,8 +164,8 @@ fn py_subspace_in_orbit(
 ///
 ///   `(rref, canonical_column_order, aut_generators, aut_order_decimal, column_orbits)`
 ///
-/// Plus a `stats: Vec[int]` (length 45) and a `per_k_stats: list[list[int]]`
-/// (18 rows) — see `enumerate::enumerate_doubly_even` doc for the field
+/// Plus a `stats: Vec[int]` (length 49) and a `per_k_stats: list[list[int]]`
+/// (19 rows) — see `enumerate::enumerate_doubly_even` doc for the field
 /// layout, mirrored in `scripts/bench.py` (`KERNEL_STATS_LAYOUT`,
 /// `PER_K_STATS_ROWS`).
 /// Packed as flat lists because pyo3 0.23 caps `IntoPyObject` tuples at 12
@@ -239,7 +227,11 @@ fn py_enumerate_doubly_even(
         let _ = py;
         enumerate::enumerate_doubly_even(n, max_k, quota, factorial_n)
     };
-    debug_assert_eq!(stats.len(), 26, "stats vector length mismatch");
+    debug_assert_eq!(
+        stats.len(),
+        doubly_even_core::enumerate::KERNEL_STATS_LAYOUT.len(),
+        "stats vector length mismatch"
+    );
     let result: Vec<_> = out
         .into_iter()
         .map(|e| {
@@ -331,7 +323,7 @@ fn py_enumerate_doubly_even_streaming(
     // without u128 -> int conversion losing precision at N >= 21.
     let mass_strs: Vec<String> = result.mass.iter().map(|m| m.to_string()).collect();
     dict.set_item("mass", mass_strs)?;
-    // stats vector: same 26-field layout as the in-memory entry. Convert
+    // stats vector: same 49-field layout as the in-memory entry. Convert
     // to decimal strings for the same precision reason (some fields are
     // cumulative ns — easily > 2^53 at N = 26).
     let stats_strs: Vec<String> = result.stats.iter().map(|s| s.to_string()).collect();
@@ -341,6 +333,37 @@ fn py_enumerate_doubly_even_streaming(
     dict.set_item("max_k", max_k)?;
     dict.set_item("num_threads", nt)?;
     Ok(dict.into())
+}
+
+/// Names of the kernel stats vector / per-rank rows, in kernel order.
+/// The Rust consts in `core::enumerate::stats` are the single source of
+/// truth; `scripts/bench.py` consumes this at import (with a frozen
+/// fallback for pre-workspace wheels). Doubles as a "new wheel actually
+/// installed" probe for the bench harness.
+#[pyfunction]
+#[pyo3(name = "kernel_stats_layout")]
+fn py_kernel_stats_layout() -> (Vec<&'static str>, Vec<&'static str>) {
+    (
+        doubly_even_core::enumerate::KERNEL_STATS_LAYOUT.to_vec(),
+        doubly_even_core::enumerate::PER_K_STATS_ROWS.to_vec(),
+    )
+}
+
+/// Compile-time target features of the installed wheel. The gate for the
+/// x86-64-v3 codegen ship: after an install, `avx2` must be `true` on a
+/// v3 build (cargo config discovery is cwd-based, so a silently-ignored
+/// `.cargo/config.toml` would otherwise produce an unflagged wheel that
+/// looks identical).
+#[pyfunction]
+#[pyo3(name = "kernel_target_features")]
+fn py_kernel_target_features() -> Vec<(&'static str, bool)> {
+    vec![
+        ("x86_64", cfg!(target_arch = "x86_64")),
+        ("aarch64", cfg!(target_arch = "aarch64")),
+        ("avx2", cfg!(target_feature = "avx2")),
+        ("bmi2", cfg!(target_feature = "bmi2")),
+        ("popcnt", cfg!(target_feature = "popcnt")),
+    ]
 }
 
 /// Build identifier — `"verifier"` when compiled with the
@@ -364,9 +387,11 @@ fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_enumerate_doubly_even, m)?)?;
     m.add_function(wrap_pyfunction!(py_enumerate_doubly_even_streaming, m)?)?;
     m.add_function(wrap_pyfunction!(py_kernel_build_info, m)?)?;
+    m.add_function(wrap_pyfunction!(py_kernel_stats_layout, m)?)?;
+    m.add_function(wrap_pyfunction!(py_kernel_target_features, m)?)?;
 
     // Dormant wrappers (debug submodule, Feulner, invariants, audit features).
-    experimental::py_exports::register(m)?;
+    py_exports::register(m)?;
 
     Ok(())
 }

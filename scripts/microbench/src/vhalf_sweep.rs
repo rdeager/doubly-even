@@ -2,9 +2,9 @@
 //! (pre-SIMD checklist item 3, 2026-06-10).
 //!
 //! Replays φ phase 0 exactly as production runs it
-//! (`parent_rule.rs::phi_cascade_split` lines "Phase 0"): per candidate
-//! `v`, over the parent's shared C-half codeword table of `h = 2^k`
-//! u64 words,
+//! (`doubly-even-core/src/parent_rule.rs::phi_cascade_split` "Phase 0"):
+//! per candidate `v`, over the parent's shared C-half codeword table of
+//! `h = 2^k` u64 words,
 //!
 //!   wt_v[x'] = popcount(cwords[x'] ^ v)            (XOR + popcount)
 //!   counts4[x' & 3][wt_v[x']] += 1                 (4-way split hist)
@@ -21,6 +21,12 @@
 //!                  loop sits (= the SIMD headroom)
 //!
 //! hot = table L1/L2-resident; cold = 4 MB eviction between candidates.
+//!
+//! Unlike the other bins (which link `doubly-even-core` for their
+//! production arms), this bin DELIBERATELY keeps a local copy of the
+//! phase-0 loop: the loop SHAPE is the experiment — SIMD candidates are
+//! diffed against it — and phase 0 is not separately callable from the
+//! production cascade. Mirror any kernel change to phase 0 here.
 //!
 //! Run (from /workspace/src):
 //!   cargo run --release --manifest-path scripts/microbench/Cargo.toml \

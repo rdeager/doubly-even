@@ -67,11 +67,11 @@ even codes. The relevant target is `N ≤ 32`, with on the order of
 # Python deps
 uv sync --all-extras --dev
 
-# Rust kernel (parallel)
-maturin build --release --features parallel -m rust/Cargo.toml
-uv pip install --force-reinstall rust/target/wheels/doubly_even_kernel-*.whl
+# Rust kernel (parallel; builds from inside rust/ so the x86-64-v3
+# codegen flag in rust/.cargo/config.toml applies)
+scripts/install-kernel.sh parallel
 
-# Test suite (568 tests, ~7 s default; ~10 s with --run-slow)
+# Test suite (590 collected: 549 pass + 41 slow-skipped by default)
 uv run pytest
 
 # Benchmark at N = 22, parallel
@@ -126,13 +126,17 @@ The scaling bottleneck at this length is the number of calls, not the
 per-call cost — which is precisely what the coset-spectrum parent rule
 now attacks: most candidates are rejected by an exact weight-spectrum
 comparison before any canonicalisation (canon calls drop 87× at
-`N = 26`), and two follow-on levers cut the spectrum evaluation itself
+`N = 26`), two follow-on levers cut the spectrum evaluation itself
 ~7× per candidate (split-frame sharing with a one-comparison reject,
 then a pair-structure chain that decides ~43 % of all candidates in
-O(1) past the first stratum). Desktop measurements (`N = 22` in 0.24 s
-parallel / 0.80 s sequential, `N = 26` in **11.5 s** parallel / 97.2 s
-sequential) and the cross-platform Sage comparison (~1500× at `N = 22`)
-live in [`docs/performance.md`](docs/performance.md).
+O(1) past the first stratum), a method-of-four-Russians rewrite of
+the orbit-min BFS makes candidate generation ~1.9× faster at its
+core, and an x86-64-v3 codegen flag lets LLVM auto-vectorise the
+popcount loops. Desktop measurements (`N = 22` in 0.24 s parallel /
+0.69 s sequential, `N = 26` in **9.7 s** parallel / 81 s sequential,
+`N = 27` in 63 s parallel) and the cross-platform Sage comparison
+(~1500× at `N = 22`) live in
+[`docs/performance.md`](docs/performance.md).
 
 ### `N = 29` per-rank class counts
 
@@ -175,7 +179,7 @@ Four independent checks back every emitted class:
 The enumerator implements DFGHILM Appendix B end-to-end: Gaborit's mass
 formula, a bipartite-graph encoding fed to `sparsenauty`, the
 doubly-even linear-algebra optimisations of Corollary B.1, and McKay
-1998 canonical augmentation. The production kernel adds eight
+1998 canonical augmentation. The production kernel adds nine
 engineering changes on top of that recipe. The per-lever multipliers
 below are desktop measurements (the development platform used for
 ablation); the cumulative effect is roughly 640× over the
@@ -225,14 +229,24 @@ pure-Python baseline at `N = 22` and ~1535× faster than Sage
   E-sets and bounds then decide ~43 % of *all* candidates at `N = 26`
   in O(1) past the first stratum. Spectrum evaluation a further
   `3.8×` at `N = 26`; sequential 126.6 → **97.2 s**.
+- **Method-of-four-Russians orbit BFS** — per-generator byte tables
+  make each image in the orbit-min BFS `⌈L/8⌉` L1 loads + XORs
+  instead of a chained bit-walk, applied generator-major over
+  frontier chunks so the tables stay L1-resident. `1.84–1.94×` on
+  the BFS itself; `N = 26` sequential 97.2 → 85.6 s, parallel
+  11.5 → 9.8 s. An x86-64-v3 codegen flag (one config line — LLVM
+  auto-vectorises the popcount sweeps and transform butterflies)
+  adds a further `1.01–1.05×` sequential on top.
 
 The cumulative ablation table and per-lever writeup are in
 [`docs/algorithm.md`](docs/algorithm.md). Before the coset-spectrum
 rule, ~90 % of the `N = 22` parallel wall was inside `sparsenauty`'s C
-code; after the three parent-rule levers, the `N = 26` sequential wall
-splits canon ~44 % / quotient-space candidate generation ~41 % /
-spectrum evaluation ~12 % — and the remaining spectrum time is almost
-entirely a popcount stream, i.e. SIMD-shaped.
+code; after the levers above, the `N = 26` sequential wall splits
+canon ~50 % / quotient-space candidate generation ~33 % / spectrum
+evaluation ~13.5 %. The remaining spectrum time is a popcount stream
+that the codegen flag already auto-vectorises — hand intrinsics beyond
+it measured dead; [`docs/bottlenecks.md`](docs/bottlenecks.md) is the
+live bottleneck profile.
 
 ## Long-running jobs (local or cloud)
 
@@ -244,8 +258,7 @@ per-worker canon caches.
 
 ```sh
 # Long-running kernel (locally or in a cloud VM):
-DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
-    DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
+DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
     uv run python scripts/run_streaming.py --N 26 \
     --output-dir /tmp/n26-out
 
@@ -282,10 +295,11 @@ implementation.
   (`c4-standard-288-metal` or similar) or a small cluster. The per-node
   streaming-output path is shipped; the cross-node coordinator is not.
 
-At `N ≤ 22` the wall-time frontier is exhausted at the algorithmic
-level with this canonicaliser. Roughly 90 % of the parallel wall sits
-inside `sparsenauty`'s C code, which is the per-call floor at this
-graph shape.
+The `N ≤ 22` wall-time frontier was long believed saturated at the
+algorithmic level (~90 % of the parallel wall inside `sparsenauty`'s
+C code); the coset-spectrum parent rule broke that claim by removing
+most canonicalisation calls altogether. The live bottleneck profile
+is [`docs/bottlenecks.md`](docs/bottlenecks.md).
 
 ## Project layout
 
@@ -299,9 +313,10 @@ kernel:
 - `src/doubly_even/enumerate/` — canonical-augmentation search loop
   and quotient-space pre-canonical filters. When the Rust kernel is
   installed, the entire recursion runs in Rust.
-- `rust/` — Rust kernel (built with `maturin`). Sparsenauty via
-  `nauty-Traces-sys`; the producer-consumer parallel kernel via
-  `crossbeam-channel`.
+- `rust/` — Rust kernel, a Cargo workspace: `rust/core/` is the
+  algorithm crate (sparsenauty via `nauty-Traces-sys`; the
+  producer-consumer parallel kernel via `crossbeam-channel`), and the
+  workspace root is the thin pyo3 wrapper crate built with `maturin`.
 
 Dormant and experimental audit-substrate code is quarantined under
 `*/experimental/` subpackages — indexed in

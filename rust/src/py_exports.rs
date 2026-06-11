@@ -1,4 +1,4 @@
-//! crate::experimental::py_exports — dormant Python-facing wrappers.
+//! crate::py_exports — dormant Python-facing wrappers.
 //!
 //! Quarantined out of `lib.rs` (Phase 2 Cut 1, 2026-05-20). None of these
 //! wrappers are on the production hot path; they exist as differential-test
@@ -16,8 +16,8 @@
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
-use crate::types::{BinVec, ColPerm, Mat};
-use crate::{experimental, orbit, quotient, types};
+use doubly_even_core::types::{BinVec, ColPerm, Mat};
+use doubly_even_core::{experimental, orbit, quotient, types};
 
 // ----------------------------------------- debug-submodule wrappers
 //
@@ -108,7 +108,7 @@ fn py_aut_orbit_minima_q_witt(
 //
 // Dormant since 2026-05-20. The Feulner port (D9) remains in tree as a
 // differential / diff-oracle substrate; the production canonicaliser is
-// the Q_D-graph (D10) in `crate::canon`. See
+// the Q_D-graph (D10) in `doubly_even_core::canon`. See
 // `memory/project_feulner_dispatch_closed.md`.
 
 /// Feulner-style canonicaliser — column-side partition refinement, no nauty.
@@ -372,7 +372,7 @@ fn py_enumerate_doubly_even_with_profile(
         )));
     }
     let (out, stats, per_k, profile) = py.allow_threads(|| {
-        crate::experimental::parallel_profile::enumerate_doubly_even_parallel_with_profile(
+        doubly_even_core::experimental::parallel_profile::enumerate_doubly_even_parallel_with_profile(
             n,
             max_k,
             quota,

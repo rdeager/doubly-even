@@ -1,0 +1,22 @@
+# Per-target codegen for the kernel workspace.
+#
+# x86-64-v3 (AVX2/BMI2/FMA baseline, any x86 CPU since ~2013) was measured
+# 1.06-1.11x kernel-wide with bit-identical decisions on 2026-06-11: LLVM
+# auto-vectorises the phi v-half popcount loop (vpshufb/vpsadbw), the Gray
+# sweeps and the WHT butterflies — the planned hand-intrinsics sprint was
+# made moot by this one flag (see docs/bottlenecks.md "measured dead").
+# aarch64 needs nothing: NEON is baseline and already auto-vectorised.
+#
+# CAVEATS:
+# - Cargo config discovery is CWD-based, not manifest-based: builds must
+#   run from inside rust/ (scripts/install-kernel.sh does). Verify any
+#   wheel with doubly_even_kernel.kernel_target_features() — "avx2" must
+#   be True on x86 builds; a silently-ignored config produces an unflagged
+#   wheel that looks identical.
+# - The wheel REQUIRES AVX2 on x86 as a result (documented in
+#   docs/reproducing.md).
+# - scripts/microbench/ is intentionally NOT covered (own project, own
+#   cwd): its A/B sweeps control -C target-cpu explicitly via RUSTFLAGS.
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]

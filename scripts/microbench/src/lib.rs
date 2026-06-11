@@ -1,12 +1,20 @@
 //! Shared helpers for the microbench bins.
 //!
-//! `timing` mirrors `doubly_even_kernel::cycles` (kept in copy-sync by
-//! hand — the kernel crate can't be linked here because pyo3's
-//! `extension-module` feature breaks bin linking). Portable across
-//! x86_64 (`rdtsc`) and aarch64 (`cntvct_el0`) so the post-D15
-//! cache-cliff sweeps (`wht_sweep`, `phi_replay`, `singular_walk`)
-//! rerun unmodified on GCP Axion. The two pre-D15 bins
-//! (`popcount_probe`, `nauty_decomp`) remain x86-only.
+//! Since the workspace restructure the bins link `doubly-even-core`
+//! (the pure-Rust algorithm crate; pyo3 lives only in the wrapper
+//! crate) directly, so every "production arm" in the bins IS
+//! production code — the historical hand-copied kernel clones are
+//! retired. Only experimental variants, synthetic-input generators and
+//! brute-force oracles remain local to the bins.
+//!
+//! `timing` mirrors `doubly_even_core::cycles` but stays local: it
+//! calibrates over 50 ms (vs the kernel's 5 ms — microbenches report
+//! absolute ns, so the error budget is tighter) and must exist without
+//! the `phase_timers` feature gate. Portable across x86_64 (`rdtsc`)
+//! and aarch64 (`cntvct_el0`) so the post-D15 cache-cliff sweeps
+//! (`wht_sweep`, `phi_replay`, `singular_walk`) rerun unmodified on
+//! GCP Axion. The two pre-D15 bins (`popcount_probe`, `nauty_decomp`)
+//! remain x86-only.
 
 pub mod timing {
     use std::sync::OnceLock;

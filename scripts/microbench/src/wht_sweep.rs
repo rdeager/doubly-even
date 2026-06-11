@@ -25,33 +25,16 @@
 //!     --bin wht_sweep -- --min-log2 8 --max-log2 17
 //! Pin it: `taskset -c 4 cargo run ...` (x86 dev box).
 
+use doubly_even_core::parent_rule::wht_in_place;
 use microbench::timing::{cycles_to_ns, mono_cycles, ns_per_cycle};
 use microbench::{evict_l1_l2, XorShift64};
 use std::env;
 use std::hint::black_box;
 
-/// Verbatim clone of `parent_rule::wht_in_place` (kept in copy-sync by
-/// hand; ~15 lines — divergence risk accepted, this is a cost model
-/// not a correctness oracle).
-fn wht_in_place(f: &mut [i32]) {
-    let size = f.len();
-    let mut h = 1;
-    while h < size {
-        let mut i = 0;
-        while i < size {
-            for j in i..i + h {
-                let x = f[j];
-                let y = f[j + h];
-                f[j] = x + y;
-                f[j + h] = x - y;
-            }
-            i += h << 1;
-        }
-        h <<= 1;
-    }
-}
+// `wht_in_place` is the production transform, linked directly from
+// `doubly-even-core` (the hand-copied clone is retired).
 
-/// `fill_indicator` clone: clear + scatter |T| ones + transform.
+/// `fill_indicator` shape: clear + scatter |T| ones + transform.
 fn fill_and_transform(f: &mut Vec<i32>, size: usize, members: &[u16]) {
     f.clear();
     f.resize(size, 0);

@@ -51,22 +51,40 @@ enumerate/   the canonical-augmentation search
   experimental/  Witt phase-(b) scaffolding + BHM2012 direct-sum
                   mass-seeding (seeds.py) — see EXPERIMENTAL.md
 
-rust/        Rust kernel (doubly_even_kernel), built with maturin
-  src/canon.rs       Q_D-graph low-weight-incidence canonicaliser (D10)
+rust/        Rust kernel — Cargo WORKSPACE since 2026-06-11:
+  Cargo.toml         workspace root = the thin pyo3 wrapper crate
+                      (doubly-even-kernel, cdylib; mimalloc allocator
+                      lives here). Feature flags forward 1:1 to core
+                      (all default OFF): parallel, equivalence_verifier,
+                      dense_qd[_tc0,_refinvar], traces_qd, nauty_hist,
+                      parallel_profiling, phase_timers. NEVER
+                      --all-features (parallel × traces_qd is a
+                      deliberate compile_error).
+  .cargo/config.toml x86-64-v3 codegen (cwd-discovered — build via
+                      scripts/install-kernel.sh; verify with
+                      kernel_target_features(), avx2 must be True).
+  src/lib.rs         the 9 pyfunctions + py_exports.rs (dormant FFI).
+  core/              doubly-even-core (rlib) — ALL algorithms:
+    src/enumerate/   the recursion, split by concern: worker.rs
+                      (traversal + candidate test), cache.rs (two-tier
+                      canon cache), stats.rs (stats layout — SINGLE
+                      SOURCE OF TRUTH, exported via
+                      kernel_stats_layout()), drivers.rs (seq/parallel/
+                      streaming entries).
+    src/parent_rule.rs coset-spectrum φ cascade (D15–D17) — module
+                      doc-comment states the math; proofs in
+                      docs/theory.md.
+    src/orbit.rs     σ_Q orbit-min BFS (D18 m4r) + singular reps.
+    src/canon.rs     Q_D-graph low-weight-incidence canonicaliser (D10)
                       + native sparsenauty path; default dispatch.
-  src/enumerate.rs   Native enumerate_doubly_even recursion (D11).
-  src/permutations.rs Schreier-Sims + perm_compose / perm_inverse /
-                      compute_column_orbits shared utilities.
-  src/experimental/  Dormant audit substrate — see EXPERIMENTAL.md
-    feulner.rs       Feulner column-side canonicaliser (D9, ~1000 LOC,
-                      reference / diff oracle; dispatch closed).
-    feulner_clb.rs   Jerrum CLB + Lemma 5.9 (Feulner §5.2 substrate).
-    paired_iso.rs    Leon §10(i) verifier (D12, dormant under
-                      `equivalence_verifier` feature).
-    invariants.rs    WL + T11/T12/T13 collision-experiment substrate.
-  Cargo.toml         Feature flags (all default OFF): parallel,
-                      equivalence_verifier, dense_qd, dense_qd_tc0,
-                      dense_qd_refinvar, traces_qd, nauty_hist.
+    src/seeder_pool.rs D16 helper pool for seeder σ_Q calls.
+    src/permutations.rs Schreier-Sims + perm utilities.
+    src/experimental/ Dormant audit substrate — see EXPERIMENTAL.md
+                      (feulner D9, paired_iso D12, invariants, …).
+
+scripts/microbench/  standalone crate; links doubly-even-core DIRECTLY
+                      (since 2026-06-11) — production arms ARE
+                      production code, no hand-copied clones to sync.
 ```
 
 ## Quarantine layout
@@ -133,6 +151,12 @@ Three independent checks the test suite relies on:
   The single-pass + mass-formula-verified constraint
   ([[no-offline-blocklist]] in user memory) closes the entire family.
 
+Post-2026-06 closures (hand SIMD intrinsics, bitsliced BFS, probe
+restructures, L1-fit, adaptive seeder gate, …) live in the
+**`docs/bottlenecks.md` §6 dead list** — check it before proposing any
+performance idea. Note the category distinction recorded there: cheap
+*rejectors* died of per-probe cost; the parent-rule *redefinition* won.
+
 ## Open / parked items
 
 - `/workspace/markdown/` is not under git. If we want it versioned,
@@ -179,8 +203,16 @@ Three independent checks the test suite relies on:
 ## Public docs
 
 Landing docs for GitHub readers are under `/workspace/src/docs/`:
-- `algorithm.md` — the >5× lever writeup with cumulative ablation table.
-- `performance.md` — measured walls; N=28 cloud row; tuning knobs.
+- `algorithm.md` — the nine-lever narrative with cumulative ablation table.
+- `theory.md` — the parent-rule math: definitions, theorems, proofs,
+  theorem-to-code index.
+- `bottlenecks.md` — **the LIVING performance state** (walls, phase
+  shares, ranked next levers, dead list). Single home of "where the
+  time goes"; carries the when-a-lever-ships doc-maintenance checklist
+  at the top — follow it.
+- `benchmarking.md` — measurement runbook (install discipline, gates,
+  stats schema, microbench suite, samply).
+- `performance.md` — measured walls; cloud rows; tuning knobs.
 - `reproducing.md` — clean-checkout-to-cloud-run recipe.
 - `cluster-deployment.md` — honest multi-node sketch (untested at scale).
 - `references.md` — credits (DFGHILM, RL Miller, Bouyukliev,
@@ -190,480 +222,90 @@ Public docs **never use internal session labels (D5/D6/D10/D11/D13/V3/V4/V5)**.
 Those labels stay only in `/workspace/markdown/architecture/*.md` and in
 the section below.
 
-## Performance state (post-D18 m4r BFS)
+## Performance state
 
-See `/workspace/markdown/architecture/04-optimisations.md` for the
-per-lever write-up (§D15–§D18 are the headline levers) and
-`architecture/05-retrospective.md` for the (now-amended) sign-off
-retrospective. The descriptive-name version of this is in
-`/workspace/src/docs/algorithm.md` (levers 6–8).
+**Live numbers, phase shares, ranked next levers and the dead list are
+in `docs/bottlenecks.md` — that file, not this one, is the single
+source for "where the time goes".** Headline as of 2026-06-11: N=22
+seq 0.685 s / par 0.24 s; N=24 seq 6.26 s; N=26 seq 81.4 s / par
+9.70 s (t=24 d=4 cap=500K); N=27 par 63.0 s. Cloud records (pre-lever:
+N=28 61 min, N=29 12.32 h on c4a-72) are due a cheap re-run — N=29
+forecast 1.0–1.5 h.
 
-Headline (post-D18, 2026-06-10 night session, 13700K-equivalent dev
-container; median of 3, all Table-3 cells verified per run; d = 4
-best at every benched N): **`N = 26` seq 85.6 s / par 9.81 s**
-(24t d=4 cap=500K); `N = 24` seq 6.44 s / par ~1.7 s; `N = 22` seq
-0.698 s; `N = 27` par 66.9 s (flat vs D17 — worker-throttled, see
-the seeder-timeline note below). vs D17 same-session controls: N=26
-1.13× seq / 1.18× par, N=24 1.17× seq, N=22 1.14× seq. Decisions
-identical to D17/D16/D15/legacy: classes, canon calls AND
-phi_strata_sum bit-equal at N=22/24/26. The pre-D18 (D17) walls were:
-N=26 seq 97.2 s / par 11.5 s; N=24 seq 7.52 s; N=22 seq 0.796 s /
-par 0.24 s; full D17 history in `04-optimisations.md` §D17.
-Post-D17 N=26 seq shares were canon 44.1 / σ_Q 41.0 / φ 11.9 %;
-D18 cuts the σ_Q share (~41 → ~33 %), making canon (~50 % of the
-smaller wall) the largest consumer again. Residual φ is 67 % v-half
-XOR+popcount sweep (the SIMD shape). Kill-switches / A-B controls:
-`DOUBLY_EVEN_PARENT_RULE=legacy` (whole rule),
-`DOUBLY_EVEN_SEEDER_THREADS=0` (seeder pool only); D17 and D18 have
-no knobs (exact, bit-identical; D18's m4r/walk crossover is the
-`M4R_MIN_L = 14` const in `rust/src/orbit.rs`).
+Knob quick-reference (details in `docs/benchmarking.md` §3):
 
-**2026-06-10 night session (pre-SIMD checklist, all five items done —
-see `markdown/notes/d18-wrapup-next-session-2026-06-10.md`, the
-next-session entry point):** (1) the min_l rule re-measured post-D17:
-**keep 22** (minl=20 LOSES 6–7 % at N=26, wash at N=27; the pooled
-BFS at L=20/21 never beats sequential even call-locally); (2) seeder
-timeline instrumentation shipped (`parallel_profiling` payload is now
-a 7-tuple — pre-2026-06-10 profile JSONs are from a two-phase shim
-and not comparable): workers are NOT starved during the k=3 σ_Q spans
-(13.9/24 busy at N=26, 19.1/24 at N=27; at N=27 the seeder itself is
-backpressure-blocked 30 s of its 51 s span) — **the adaptive pool
-gate is dead**; the measured next parallel lever is parallelising
-ACROSS the ~200 independent per-parent k=3 σ_Q calls, not inside one
-BFS; (3) `phi_replay` re-synced to the D16/D17 cascade + new
-`vhalf_sweep` bin (SIMD target baseline: 0.75 ns/elem ≈ 12 GB/s
-scalar, no cache cliff); (4) **D18 shipped** (lever 18 below);
-(5) PERFMON verified (perf_event_open + sampling work; samply needs
-the host's `--ulimit memlock=-1:-1` respawn — fixed in the spawn
-script, verify samply first thing next session). Pre-D15 records: N=22 0.691 s 20t / 6.64 s
-seq; N=24 8.90 s; N=26 169.8 s; N=28 61 min on c4a-72, ~$3. The cloud
-rows predate D15+D16+D17 — **a post-D17 N ≥ 28 cloud run is the
-obvious next datapoint** (N=29 count-anchored forecast: **1.0–1.5 h**
-on c4a-72 vs 12.32 h actual; kept-canon now dominates the forecast,
-28 vs 11 φ core-h).
+| knob | default | note |
+|---|---|---|
+| `DOUBLY_EVEN_THREADS` | unset (seq) | cores−2 at N≤22, full count at N≥24 |
+| `DOUBLY_EVEN_FRONTIER_DEPTH` | 4 | d=4 best at every benched N |
+| `DOUBLY_EVEN_CANON_CACHE_CAP` | 1M | 500K at N=26 local (OOM unlock); 200K on ≥200-core boxes |
+| `DOUBLY_EVEN_PARENT_RULE` | coset-spectrum | `legacy` = kill-switch, `audit` = measurement |
+| `DOUBLY_EVEN_PHI_MAX_RANK` | 13 | legacy rule above (sound mixing) |
+| `DOUBLY_EVEN_SEEDER_THREADS` | = threads | 0 disables the seeder pool |
+| `DOUBLY_EVEN_SEEDER_PAR_MIN_L` | 22 | load-bearing; don't lower |
+| `DOUBLY_EVEN_NO_MASS_STOP` | off | ablation knob |
+| `M4R_MIN_L = 14` | const in `core/src/orbit.rs` | orbit-BFS byte-table crossover |
 
-**Unmerged opt-in branches** (documented in the public README):
-- `feature/dfs-order-by-aut` (1 commit): aut_desc DFS child-ordering;
-  -12 % N=24, -10 % N=25, -8 % N=26, regresses at N≤22. Off-switch
-  `DOUBLY_EVEN_DFS_ORDER=off`.
-- `feature/dfs-speedup-bliss-pq` (2 commits on top of aut_desc): L2'
-  cross-worker priority queue at depth-5 seeder frontier; -2 % N=24/26
-  additional on top of aut_desc. Off-switch `DOUBLY_EVEN_SEED_ORDER=fifo`.
+Internal-label index (the label↔name map; one line per lever, full
+writeups in `markdown/architecture/04-optimisations.md` §-by-§):
+D2 quotient-space candidates · D3 two-tier canon cache · D4 weight-enum
+prefilter · D5 gaborit_sigma + mass-stop · D6 σ_Q orbit-min tables ·
+D7 Witt infra (parked) · D8 degree initial partition · D9 Feulner
+reference · D10 Q_D-graph canonicaliser · D11 native Rust recursion ·
+D12 paired-iso (dormant) · D13(+V3–V5) outer-DFS parallelism ·
+D14 fingerprint cache (REVERTED) · **D15 coset-spectrum parent rule** ·
+**D16 split-frame φ + amax + pooled seeder** · **D17 E-chain** ·
+**D18 m4r orbit BFS** · 2026-06-11: workspace restructure +
+x86-64-v3 codegen (no label). Public docs use the descriptive names
+only.
 
-Scaling forecast for `N ≥ 28` lives at
-`/workspace/markdown/architecture/06-scaling-frontier.md`: N=28
-reproduced 2026-05-21 on c4a-72 in 61 min; N=29 reproduced
-2026-05-23 on the same platform in 12.32 hr (239,465,540 classes,
-~$35 compute) using the streaming-output path now shipped; N=30
-needs streaming + ≥256 GB RAM or a small cluster. The N=29
-certificate lives at `docs/results/n29.json` (per-`k` cells +
-mass + `gaborit_sigma`), with the citable `CITATION.cff` at the
-repo root.
+History of this section: the long narrative that lived here was
+relocated verbatim to
+`markdown/notes/claude-md-relocated-2026-06-11.md` (most of it
+duplicates 04-optimisations.md §D15–D18 / 08-post-d15-profile.md /
+the wrapup notes). Next-session entry points live in
+`markdown/notes/<latest>-wrapup-*.md`.
 
-**Strategic note from N=29 (2026-05-23) — RESOLVED by D15
-(2026-06-10).** At N=29 the kernel made 87.2 billion canon calls at
-29.5 µs/call mean — ~364 canon calls per emitted equivalence class
-(15.6 at N=22, growing ~2.6× per 2-step). Per-call cost is *dropping*
-with N, but the canonical-augmentation candidate count explodes
-faster than the class count, so the directive was: **any future >2×
-lever at N ≥ 28 must cut call count, not per-call cost.** D15 (the
-coset-spectrum parent rule, `rust/src/parent_rule.rs`) is that lever:
-it redefines the McKay canonical-parent function so an exact
-weight-spectrum computation (Gray sweep + per-stratum Walsh–Hadamard,
-1–4 µs) decides ~94–97 % of candidates with **no canon call at all**.
-This is NOT in the ruled-out family below: those were all cheap
-*equivalence rejectors* bolted onto the old rule (per-probe ≈
-per-call trap); D15 changes which question the parent test asks.
-The old closure claim in `05-retrospective.md` §5 ("every alternative
-p requires canonicalising D") was wrong — McKay needs iso-invariance
-+ single orbit only, canon only for ties (cf.
-Bouyukliev–Bouyuklieva 2019 §3.3) — and is amended in place.
-**The post-D15 re-profile is DONE (2026-06-10, same day; full writeup
-`markdown/architecture/08-post-d15-profile.md`).** Headline: the φ
-cascade itself is the new bottleneck — share ladder 4.2/5.9/11.0/
-25.5/**59.9 %** at N=18/20/22/24/26 (the earlier "48 % canon / 38 %
-σ_Q" split missed φ because those JSONs predate the phi_ns capture) —
-and it is compute-bound, NOT cache-bound: no L1 cliff exists anywhere
-in the kernel (WHT/Gray sweeps stream; hot vs cold-evicted φ replay
-differ < 2 %). 83 % of φ is the unconditional prefix (Gray sweep +
-sort + first-stratum WHT) → the ranked next lever is **φ arithmetic
-volume** (share work across sibling candidates of one parent /
-cheaper first-stratum reject; 08-doc §7). σ_Q is 89.4 % orbit-min
-BFS (latency-bound, low-rank); canon is κ ≈ 0.04-and-falling — leave
-alone. **EXECUTED same day as D16** (lever 16 below): φ 2.8×, and the
-key piece was not the planned sharing machinery but the **amax O(1)
-reject** found while implementing — one precomputed bound decides
-~99 % of first strata in a single integer compare. Lesson recorded in
-memory `[[d16-split-frame-phi]]`: bound-first, machinery second.
-
-Cumulative levers, oldest first:
-
-1. **D2** Quotient-space candidate enumeration (DFGHILM B.3).
-2. **D3** Two-tier canon cache (`rust/src/enumerate.rs:111, 157`):
-   primary LRU keyed by RREF (capacity tunable via
-   `DOUBLY_EVEN_CANON_CACHE_CAP`, default 1M) + secondary
-   weight-enumerator-keyed bucket cache. **The cap is load-bearing
-   at N ≥ 26** — without it, N=26 OOMs at ~500K cached entries per
-   worker × 20 workers. Commit `fd530cb`.
-3. **D4** Weight-enumerator prefilter on the orbit BFS.
-4. **D5a/b** Verified closed-form `gaborit_sigma` + mass-stop
-   shortcut in the recursion.
-5. **D6** `Q_C`-coordinate orbit-min with σ_Q lookup tables.
-6. **D7** Witt-structured orbit infrastructure (kept; not active).
-7. **D8** Degree-based initial vertex partition for nauty.
-8. **D9** Feulner Rust+Python canonicaliser (reference, 6× slower
-   than nauty per call; substrate for D12).
-9. **D10** Q_D-graph low-weight-incidence canonicaliser
-   (**1.91× at `N = 22`**, active default).
-10. **D11** Native Rust `enumerate_doubly_even` + incremental Feulner
-    (**1.32× at `N = 22`**; eliminates Python ↔ Rust crossings).
-11. **D12** Paired-iso (Leon §10(i)) prefilter — shipped **dormant**.
-12. **Q6 sparsenauty audit** (2026-05-17) — full `expert-review/
-    05-nauty-traces-audit.md` §5 priority list executed:
-    `schreier = TRUE` (+5 %), densenauty (+ 39 / + 42 / + 260 %),
-    Traces (+ 2 %) all regress (all Δ are wall-time slower than
-    baseline 6.97 s). `78 µs/call` is the sparsenauty
-    algorithmic floor at this graph shape. Phase 0 `statsblk`
-    counters (`numnodes`, `tctotal`, `maxlevel`, `numgenerators`)
-    added to the kernel for future audits; four dormant Cargo
-    features (`dense_qd`, `dense_qd_tc0`, `dense_qd_refinvar`,
-    `traces_qd`) kept as reproducibility substrate.
-13. **D13 Outer-DFS parallelism** (2026-05-18, V3 2026-05-21) —
-    sequential traversal to a configurable cut depth, then a
-    crossbeam-channel worker pool runs each accepted subtree on its
-    own thread. Sparsenauty is parallel-safe under the `tls` feature
-    on `nauty-Traces-sys` (already on; `USE_TLS` → `_Thread_local`
-    on mutable globals). Per-worker canon caches; per-worker
-    mass-stop disabled (loses 4–11 % vs sequential; gained outright
-    by parallelism). V1 (depth=3): 3.1× at N=22. V2 (depth=4):
-    5.8× at N=22 (6.87 s → 1.18 s, 16t on 13700K). **V3 pipelined
-    seeder (2026-05-21, the new default):** workers spawn first and
-    block on `task_rx.recv()`; the seeder runs on the main thread
-    and pushes each depth-`frontier_depth` seed into the channel as
-    it's discovered, overlapping seeder DFS with worker recursion
-    (DFGHILM Appendix B.4 producer-consumer recipe). Closes the
-    serial-seeder Amdahl ceiling diagnosed in
-    `architecture/07-parallel-scaling-profile.md` (~44 % of V2 wall
-    at N=22 t=16 d=4). **8.55× at N=22** (7.01 s → 0.82 s, 20t d=4
-    on 22-core); **11.2× at N=24** (107 s → 9.54 s, 22t d=5).
-    Bounded channel cap = `num_threads * 4` doubles as backpressure
-    once the seeder pipes directly into it. Behind off-by-default
-    Cargo feature `parallel`; enabled at runtime via
-    `DOUBLY_EVEN_THREADS` env var (and tunable via
-    `DOUBLY_EVEN_FRONTIER_DEPTH`, default 4) or `num_threads=`
-    kwarg on the kernel entry. Conflicts with `traces_qd` (Traces
-    uses non-TLS static work queues) — guarded by `compile_error!`.
-    Determinism harness in `rust/tests/parallel_determinism.rs`
-    (covers N = 12, 14, 16 at threads 2, 4, 8).
-14. **D13-V4 sprint** (2026-05-22, 13700K): four cuts attacking
-    per-call memory pressure + recovering the worker mass-stop V2/V3
-    left disabled. Net: N=22 0.82 → 0.691 s (-16 %), N=26 218 →
-    184.8 s (-15 %), seq 7.01 → 6.64 s (-5.3 %).
-    - **Cut 1 (`40dc251`)**: `mimalloc` global allocator. Per-thread
-      arenas eliminate ptmalloc cross-thread contention on the ~210 KB
-      of fresh allocs per `canon_info_*` call. -3.6 % seq, -4.8 %
-      parallel-unbound, -3.8 % N=24. One line in `lib.rs`.
-    - **Cut 2+3 (`ec6e65f`)**: thread-local `CanonScratch` struct
-      hoists all 13 per-call Vecs (`cw`, `d`, `v`, `e`, `lab`, `ptn`,
-      `orbits`, `cg_v`, `cg_d`, `cg_e`, `right_lists`, `by_cell`,
-      `by_weight`) shared between `canon_info_native` +
-      `canon_info_qd_native`. Grow-only via `.clear()`/`.resize()`;
-      zero per-call heap allocs after warmup. Also drops the
-      `left_write = v.clone()` (~8 KB memcpy/call) in both
-      `build_sparsegraph` and `build_low_weight_sparsegraph` via a
-      stack-local cursor. -2.2 % seq wall, -3 % per-call parallel.
-    - **Cut 4 (`0059089`)**: per-worker mass-stop via shared
-      `GlobalMassTracker` (Mutex<Vec<u128>> + Arc). Workers atomically
-      add `N!/|Aut|` on every emit; consult `is_full(k+1)` before
-      descending. Invariant: skip-when-full can only over-search,
-      never under-search (canonical augmentation forbids duplicates).
-      **The single biggest V4 lever**: -20.7 % wall at N=22 PEEP,
-      -20.3 % unbound, -0.8 % at N=24. Also fixes pre-existing
-      `parallel_profiling` feature breakage from V3 ship.
-15. **D15 Coset-spectrum parent rule** (2026-06-10, default since
-    same day) — replaces the σ-derived canonical-parent function with
-    "parent = hyperplane whose complement-coset weight spectrum
-    φ(u) = (φ_4, φ_8, …) is lex-minimal", ties broken legacy-style
-    restricted to the argmin set. Evaluated per candidate in the
-    frame `[C-rows, v]` via one Gray sweep + lazy per-stratum
-    Walsh–Hadamard transforms (1–4 µs); φ-rejects skip RREF, cache
-    and nauty entirely. Per-rank cap `DOUBLY_EVEN_PHI_MAX_RANK`
-    (default 13, legacy above — sound, rank is iso-invariant).
-    Wall: **7.6× seq / 2.9× parallel at N=22, 3.1× at N=24,
-    6.5× at N=26** (same-session A/B); canon calls −15×/−32×/−87×.
-    Hard gate passed: per-rank φ-accepts == legacy accepts exactly
-    (no-mass-stop, N=14–24, seq + parallel). Mass formula + Table 3
-    green everywhere. Code `rust/src/parent_rule.rs` +
-    `enumerate.rs::test_candidate`; gate harnesses
-    `scripts/experimental/d15_phi_rule_check.py` (Phase 0) and
-    `d15_phi_audit.py` (Phase 1, κ = kept-canon-ns fraction: 0.039
-    at N=24). Env `DOUBLY_EVEN_PARENT_RULE` ∈ {coset-spectrum
-    (default), legacy, audit}.
-16. **D16 Split-frame φ + amax reject + pooled seeder** (2026-06-10,
-    same-day follow-on; `04-optimisations.md` §D16). (a) Per-parent
-    `PhiParentCtx` shares all C-half φ work (codeword table, weights,
-    strata, lazy half-size WHTs `F̂_C^{(w)}`) across sibling
-    candidates; the full WHT factors exactly as its last butterfly
-    stage `f̂[(u',a)] = F̂_C[u'] ± Ĝ_v[u']`. (b) **The amax O(1)
-    reject** — `max` over a pair is `F̂_C[u'] + |Ĝ_v[u']| ≥ F̂_C[u']`,
-    so the per-parent `amax_w > tc − tv` proves reject in ONE integer
-    compare; decides ~99 % of first strata (`phi_s1_fastpath`), no
-    per-candidate WHT. (c) Pooled seeder σ_Q (`rust/src/
-    seeder_pool.rs`): level-parallel orbit-min BFS + range-split Gray
-    walk, exactly-once via AtomicBitset, minima provably identical;
-    the **min_l = 22 gate is load-bearing** (pool only the idle-window
-    calls; min_l=16 measured 1.00× at d4 / 0.91× at d5 from
-    helper-vs-worker contention). Decisions bit-identical (audit
-    VERDICT GO at N=22/24, ±mass-stop). φ 2.8×; N=26 126.6 s seq /
-    13.2 s par (1.64×/1.62× over D15); N=24 par 2.60 → 1.67 s. The
-    planned "killer pre-check" (`DOUBLY_EVEN_PHI_KILLER`) is moot —
-    stats slot 48 was reserved at 0 (now repurposed by D17). Also:
-    mimalloc now builds with `local_dynamic_tls` (initial-exec TLS
-    made the dlopen'd wheel fail imports at the glibc static-TLS
-    surplus — keep the wheel free of the STATIC_TLS ELF flag). Env:
-    `DOUBLY_EVEN_SEEDER_THREADS` (default = THREADS; 0/1 = off),
-    `DOUBLY_EVEN_SEEDER_PAR_MIN_L` (default 22).
-17. **D17 E-chain** (2026-06-10 late evening;
-    `04-optimisations.md` §D17). The d16-wrapup "E-set amax extension"
-    generalised to the full chain: a C-only first stratum leaves the
-    argmin set in pair structure `E ∪ {u_C} ∪ (u_C+E)`, which every
-    further C-only stratum preserves; while it holds, v-only strata
-    reject O(1) (no parent data), mixed strata apply the amax theorem
-    restricted to the running E-set (one compare, per-parent bound),
-    and C-only strata filter E parent-side (empty ⇒ AcceptUnique).
-    Per-parent lazy chain (`PhiParentCtx::ensure_chain`: `chain_e` /
-    `chain_bound`, built once per position, read O(1) by siblings);
-    the argmin set is never materialised on-chain, killing the
-    per-candidate stratum WHTs AND `ensure_sorted_v`. Decides
-    34/41/43 % of ALL candidates at N=22/24/26 (stats slot 48
-    `phi_chain_fastpath`, ex-killer reserve). φ 3.78× at N=26
-    (43.7 → 11.6 s; 953 → 257 ns/cand); seq N=26 126.1 → 97.2 s
-    (1.30×); N ≤ 24 par flat (seeder-bound). Exactness: audit GO +
-    classes/canon-calls/strata-sums bit-equal to D16 + deterministic
-    witness test (hand-computed N=34 frame) + 30K-candidate
-    brute-force sweep. No knob. Found-while-shipping: real parents
-    have every stratum populated, so the v-only chain reject almost
-    never fires in production (it dominates in random-frame tests) —
-    the bound reject + parent-side filter do the work.
-18. **D18 m4r orbit-min BFS** (2026-06-10 night;
-    `04-optimisations.md` §D18). The σ_Q focused profile (real-input
-    microbench `scripts/microbench/src/orbit_probe.rs` replaying 446
-    dumped rank-2/3 parents from N=26/27) showed the orbit-min BFS is
-    COMPUTE-bound on `mat_apply` (probes are L2/L3-resident at
-    L=20–23; the singular set is group-invariant so the closure
-    visits all ~2^(L−2) reps; orbits are few and giant). Probe-side
-    restructures all failed the ship bar (put 1.03×, batch 0.98×,
-    radix-bucket 0.85×); generator dedupe+inverse-drop is sound but
-    near-empty. The winner: per-generator method-of-four-Russians
-    byte tables (`ceil(L/8)` L1 loads + XORs per image vs a
-    ~popcount-step chained walk), gen-major over 1024-element
-    frontier chunks — **1.84–1.94× on the BFS**, byte-identical
-    minima (per-level new-element set is probe-order-independent).
-    `rust/src/orbit.rs` (`m4r_build`/`orbit_minima_m4r`,
-    `M4R_MIN_L=14`); sequential + pooled arms. Wall: N=22 1.14× /
-    N=24 1.17× / N=26 1.13× seq, N=26 par 1.18×, N=27 par flat
-    (worker-throttled, as the seeder timeline predicted). Real-input
-    dumps regenerate via `cargo test --release dump_sigma_inputs --
-    --ignored` (in `rust/`).
-
-`bench.py` lives in `scripts/`; per-step JSON records are in
-`scripts/bench-results/` (gitignored). Rust microbench for
-sparsenauty internals: `scripts/microbench/src/nauty_decomp.rs`.
-
-**The pre-D15 statement "the `N ≤ 22` frontier is saturated at the
-pure-algorithmic level with this canonicaliser" is obsolete** — it was
-true only within the fixed-parent-rule frame;
-`architecture/05-retrospective.md` §5 records the correction. The
-fresh profile landed 2026-06-10
-(`markdown/architecture/08-post-d15-profile.md`): φ cascade 59.9 % of
-N=26 seq wall and compute-bound — see the strategic note above. The
-frontier-depth re-tune ALSO landed: **post-D15 the N=26 optimum is
-d=4, not d=5** (22.2 s vs 27.1 s at t=24, −18 %), because D15
-resurrected the seeder Amdahl ceiling (worker active/wall ≈ 54 % at
-d=5; the seeder's serial ranks-0–4 walk contains the low-rank σ_Q
-spike). N=26 SEQUENTIAL also needs
-`DOUBLY_EVEN_CANON_CACHE_CAP=500000` now (uncapped run was
-OOM-killed). **Post-D17** N=29 on c4a-72 is priced at **1.0–1.5 h**
-(count-anchored, `post_d15_scaling_fit.py --glob 'd17-echain2-seq-'
---kappa 0.0391`) vs 1.5–2.3 h post-D16 (clean re-fit; the wrapup
-note's 1.4–2.2 from the polluted glob was nonetheless sound) and
-12.32 h pre-D15 actual. N=32 single-thread by the method-(b)
-geometric carry: ~63 core-h post-D17 / 475 post-D16-clean / "174"
-from the polluted glob — all floors (the ratios still accelerate),
-spread too wide to plan on; the candidate-count explosion is the
-unknown. d=4 beats d=5 at every benched N. The two unmerged opt-in
-branches (`feature/dfs-order-by-aut`, `feature/dfs-speedup-bliss-pq`)
-were benched against the legacy rule and need re-validation on top of
-D15+D16+D17 before merging.
-
-**Profiling instrumentation (2026-06-10 sprint, D16 delta included):**
-the kernel stats vector is now 49 fields and per_k_stats 19 rows —
-per-rank timing rows `phi_ns/candidates_q_ns/nauty_ns` (rows 14–16)
-and `phi_ctx_ns` (row 18, a SUBSET of row 14) are ALWAYS-ON at zero
-timer cost; sub-phase splits (σ_Q 5-way, φ 5-way sampled 1-in-64 via
-portable rdtsc/cntvct in `rust/src/cycles.rs`; φ phases re-mapped by
-D16: vhalf/members/first-stratum/wht/direct) live behind the
-`phase_timers` Cargo feature (overhead gate 1.008×/0.998× at N=22/24 —
-PASS; sampled φ mean validates to 1 % of the always-on mean). Layout
-mirror: `scripts/bench.py::KERNEL_STATS_LAYOUT` / `PER_K_STATS_ROWS`;
-bench JSONs now persist per_k_stats with sum==aggregate asserts.
-Slot 48 is `phi_chain_fastpath` since D17 (ex `phi_killer_rejects`
-reserve). D17 chain work lands in the existing phase buckets (chain
-ops under "direct", chain builds in `phi_ctx_ns`).
-`scripts/microbench/src/phi_replay.rs` was re-synced to the D16/D17
-split-frame + chain cascade on 2026-06-10 (validated against the
-brute-force spectrum argmin; `--mode conly` exercises the chain arms);
-`vhalf_sweep` isolates φ phase 0 (the SIMD target) and `orbit_probe`
-replays the σ_Q BFS on real dumped inputs. All three are hand-copied
-clones — mirror any kernel change to `parent_rule.rs` phase 0 or
-`orbit.rs` BFS bodies into them.
-Cache-cliff microbenches (portable x86/arm64): `scripts/microbench/`
-bins `wht_sweep`, `phi_replay`, `singular_walk`; extrapolation tool
-`scripts/experimental/post_d15_scaling_fit.py`. The dev container
-blocks `perf_event_open` via seccomp (samply/perf need it recreated
-with `--cap-add PERFMON`; host `kernel.perf_event_paranoid=1` is
-already set); `[profile.profiling]` in `rust/Cargo.toml` is ready for
-that day.
-
-## D13 quickstart
-
-Enable in the wheel build:
+## Quickstart
 
 ```sh
-maturin build --release --features parallel -m rust/Cargo.toml \
-  && uv pip install rust/target/wheels/doubly_even_kernel-*.whl
-```
-
-At runtime, set `DOUBLY_EVEN_THREADS`. Post-D13-V5 measurements on
-the 13700K (16 physical / 24 logical) confirm:
-
-- **N = 22**: sweet spot at `t = 20` (mean 0.691 s over 3 runs;
-  t=18 = 0.720, t=22 = 0.717, both ~4 % worse). On the 13700K this
-  uses all 8 P-core SMT pairs + 4 E-cores, leaving 4 E-cores idle
-  for scheduler migration. On a symmetric N-core host the rough rule
-  remains `t = N − 2`; on hybrid the actual sweet spot is empirical
-  per topology — see `architecture/07-parallel-scaling-profile.md`
-  § "V4 contention/memory sprint".
-- **N ≥ 24**: sweet spot at **`t = 24` (full logical core count)**.
-  D13-V5 re-measurement (2026-05-23) on the 13700K:
-  N=24 t=24 = 8.90 s vs t=22 = 9.12 s (**-2.4 %**, mean of 3);
-  N=26 t=24 = 169.8 s vs t=20 = 184.2 s (**-7.8 %**). V4's
-  per-call thread-local scratch + mimalloc cut SMT contention enough
-  that oversubscribed P-core siblings now pay back the latency cost.
-  Going above 24 (t=26, t=28) regresses — true logical-core
-  count is the ceiling, not a target to exceed. See
-  `architecture/07-parallel-scaling-profile.md` § "V5 thread-count
-  recalibration".
-
-`DOUBLY_EVEN_FRONTIER_DEPTH` defaults to 4 and rarely needs
-tweaking. ~~At N ≥ 24 a value of 5 is better~~ — **obsolete post-D15**:
-the 2026-06-10 re-tune measured d=4 > d=5 at N=26, and post-D16 the
-gap widened (13.2 s d4 vs 19.9 s d5 at t=24, pooled seeder on). Use
-d=4 everywhere; re-verify d on the first N ≥ 28 cloud run. The D16
-seeder pool (`DOUBLY_EVEN_SEEDER_THREADS`, default on;
-`DOUBLY_EVEN_SEEDER_PAR_MIN_L`, default 22) is a no-op at N ≤ 24 by
-construction (L < 22 everywhere) and worth ~6 % at N=26 d4; don't
-lower min_l — pooling past the idle window loses to helper-vs-worker
-contention.
-
-For `N ≥ 26`, also cap the per-worker canon cache via
-`DOUBLY_EVEN_CANON_CACHE_CAP` (default 1,000,000 entries; lower if
-RAM-constrained — at N = 26 with 20 workers, ~500 K cap × 20 = ~64 GB
-canon-cache footprint plus the output Vec). Without a cap, N = 26
-OOMs; this env var is the unlock that landed in `fd530cb`.
-
-```sh
-# N ≤ 22 — leave 2 cores headroom (use t = cores − 2):
-DOUBLY_EVEN_THREADS=20 uv run python scripts/bench.py \
-  --label parallel-t20 --N 18,20,22
-# N ≥ 24 — full logical-core count (V5 finding) + deeper cut:
-DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
-  uv run python scripts/bench.py --label parallel-t24-d5 --N 24
-# N = 26 — cap canon cache to avoid OOM at 24 workers:
-DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
+scripts/install-kernel.sh parallel       # build + install the wheel
+                                         # (cd's into rust/ for the v3
+                                         # config; probes avx2 + module)
+uv run pytest                            # 549 passed + 41 slow-skipped
+uv run python scripts/bench.py --label <arm>-seq --N 18,22,24
+DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=4 \
   DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
-  uv run python scripts/bench.py --label parallel-t24-d5-n26 --N 26
+  uv run python scripts/bench.py --label <arm>-par-n26 --N 26
 ```
 
-D13-V5 sprint (2026-05-23) investigated and closed the two named
-post-V4 candidates:
-- **Adaptive per-seed depth**: doesn't apply at N ≥ 24. Channel-based
-  load balancing already absorbs the heavy-seed tail (N=24 t=22
-  max/mean = 1.01× per `parallel_profiling` measurement; the N=22
-  1.28× imbalance is an N ≤ 22-shape artifact). Forcing adaptive
-  recursion at the boundary regresses N=24 by **+43-56 %** when
-  enabled at any threshold — the depth-4 → 5 split explodes the
-  seed set, the bounded channel backpressures, and the seeder runs
-  finely-grained work that workers could otherwise parallelise.
-  Profile data + analysis in
-  `architecture/07-parallel-scaling-profile.md` § "V5 thread-count
-  recalibration". No code change shipped.
-- **Shared canon LRU**: intra-worker primary-cache hit rate at N=24
-  is only **3.13 %** (41 K hits / 1.31 M is_canon_aug calls). The
-  cross-worker dedup opportunity is capped by the same rate; even
-  if every per-worker miss became a shared hit, the wall reduction
-  ceiling is ~4 %, and DashMap shard contention plus `Rc → Arc`
-  surgery would eat most of it. Below the engineering threshold for
-  "final lever" status. Closed.
+The full bench-a-change protocol (one-wheel-one-label, the uv-cwd
+wheel trap, decision-identity gates, microbench suite, samply) is
+`docs/benchmarking.md` — read it before benching anything.
 
-The shipped V5 win is **the threading recommendation update**: use
-`t = 24` (full logical-core count) at N ≥ 24, not `t = 22` as the
-post-V4 docs suggested. Pure env-var change, no recompile. V4's
-per-call thread-local scratch + mimalloc cut SMT contention enough
-that oversubscribed P-cores now pay back the latency cost.
-
-## GCP quickstart (cloud port, validated 2026-05-21)
-
-The kernel ports to Google Cloud Emerald Rapids with **zero per-IPC
-penalty** — per-thread wall is 1.65× slower than the 13700K, which
-is purely the clock ratio. Validated on `c4-standard-24` (Intel
-Xeon Platinum 8581C in us-east4): N=26 at t=24 d=5 in 285 s, all
-DFGHILM cells match. 86 % nauty utilisation at N=26 confirms the
-parallel kernel saturates cloud silicon cleanly. Full writeup:
-`markdown/notes/gcp-shakedown-2026-05-21.md`. Refined
-c4-288-metal estimates: `markdown/architecture/06-scaling-frontier.md`
-§"GCP Emerald Rapids validation 2026-05-21".
-
-Two scripts in tree (nproc-aware, work unchanged on c4-24 / c4-48 /
-c4-288-metal):
-
-```sh
-# On the GCP VM, fresh Ubuntu 24.04, one-liner bootstrap:
-curl -fsSL https://raw.githubusercontent.com/<gh-user>/doubly-even/main/scripts/gcp-setup.sh \
-  | bash -s -- --repo https://github.com/<gh-user>/doubly-even
-# (~10 min: apt → rustup → uv → clone → uv sync → maturin --release --features parallel → smoke pytest)
-
-# Then run the three-stage bench (Run A seq, Run B t=nproc/2 d=4, Run C t=nproc d=5):
-cd ~/doubly-even
-scripts/gcp-bench.sh shakedown-c4-24
-```
-
-**Gotchas**:
-- `kernel_build_info()` returns `"baseline"` even with `--features
-  parallel` (it only distinguishes verifier vs not). To verify
-  parallel is in: check `inspect.signature(k.enumerate_doubly_even)`
-  contains `num_threads`.
-- Fresh GCP projects cap at **24 global vCPUs**; first quota
-  request for more is denied with a 48-h cooldown for billing
-  history. Plan ahead.
-- On c4-288-metal, set `DOUBLY_EVEN_CANON_CACHE_CAP=200000` (not
-  the local 500K) — 288 workers × 500K × 5 KB = 720 GB would eat
-  the 2160 GB ceiling without enough headroom for output Vec +
-  scratch. 200K leaves ~1.8 TB free.
+GCP gotchas (full recipe: `docs/reproducing.md`):
+- `kernel_build_info()` says "baseline" even with `--features
+  parallel`; check `num_threads` in
+  `inspect.signature(k.enumerate_doubly_even)` instead, and
+  `kernel_target_features()` for the codegen.
+- Fresh GCP projects cap at 24 global vCPUs; the first quota bump is
+  denied with a 48-h cooldown. Plan ahead.
+- On c4-288-metal set `DOUBLY_EVEN_CANON_CACHE_CAP=200000` (288
+  workers × 500K would eat the 2160 GB ceiling).
 
 ## Useful commands
 
 ```sh
 uv sync --all-extras --dev               # bootstrap a fresh checkout
-maturin build --release -m rust/Cargo.toml \
-  && uv pip install rust/target/wheels/doubly_even_kernel-*.whl
-# verifier build (D12, dormant): add --features equivalence_verifier
-# parallel build (D13-V3 pipelined, opt-in): add --features parallel
-#   then set DOUBLY_EVEN_THREADS=<cores − 2> for N ≤ 22 or <cores>
-#   for N ≥ 24 (or pass num_threads= to the kernel entry directly).
-#   Sequential path is byte-identical when the env var is unset.
-uv run pytest                            # 527 fast tests + 41 slow-skipped (~6 s)
-uv run pytest --run-slow                 # adds N=17, 18 Table 3 cells (~7 s total)
+scripts/install-kernel.sh parallel       # standard build (use this, not
+                                         # bare maturin — it cd's into
+                                         # rust/ so .cargo/config.toml
+                                         # is discovered, and probes the
+                                         # installed wheel)
+# other feature sets: scripts/install-kernel.sh parallel,phase_timers
+# sequential path is byte-identical when DOUBLY_EVEN_THREADS is unset
+uv run pytest                            # 549 passed + 41 slow-skipped (~47 s)
+uv run pytest --run-slow                 # 580 passed + 10 skipped
 uv run python scripts/bench.py --label baseline  # benchmark; writes JSON
 DOUBLY_EVEN_THREADS=20 uv run python scripts/bench.py --label parallel-t20 --N 20,22
 
@@ -679,8 +321,8 @@ for ec in enumerate_doubly_even(8):
 
 - Commits are authored by the user (email + name from local
   `git config`). Don't touch `~/.gitconfig` from inside the agent.
-- `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`
-  trailer goes on every assistant-driven commit.
+- A `Co-Authored-By: Claude <model> <noreply@anthropic.com>` trailer
+  goes on every assistant-driven commit (use the current model name).
 - The repo had its history rewritten once (`git filter-repo`) to fix
   author emails; further rewrites should be similarly explicit and
   user-approved.

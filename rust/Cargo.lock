@@ -218,15 +218,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
-name = "doubly-even-kernel"
+name = "doubly-even-core"
 version = "0.1.0"
 dependencies = [
  "criterion",
  "crossbeam-channel",
  "fixedbitset",
  "lru",
- "mimalloc",
  "nauty-Traces-sys",
+]
+
+[[package]]
+name = "doubly-even-kernel"
+version = "0.1.0"
+dependencies = [
+ "doubly-even-core",
+ "mimalloc",
  "pyo3",
 ]
 
