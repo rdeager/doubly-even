@@ -55,11 +55,16 @@ try:  # pragma: no cover -- import-side switch
 except ImportError:  # pragma: no cover
     _kernel = None
 
-# Layout of the kernel's `stats` vector — kept in sync by hand with
-# `rust/src/enumerate.rs::enumerate_doubly_even` doc. Indices into the
-# returned 45-element list. Fields 34–44 are the `phase_timers`
+# Layout of the kernel's `stats` vector. The kernel is the single source
+# of truth since the workspace restructure: `kernel_stats_layout()`
+# exports the Rust consts (`core::enumerate::stats::KERNEL_STATS_LAYOUT`
+# / `PER_K_STATS_ROWS`) and we consume them below. The frozen tuples
+# here are (a) the fallback for pre-restructure wheels and (b) an
+# append-only prefix assertion — if the kernel ever renames or reorders
+# a known slot, old bench JSONs stop being comparable and we want a loud
+# failure, not a silent drift. Fields 34–44 are the `phase_timers`
 # sub-phase split (zero on non-instrumented builds).
-KERNEL_STATS_LAYOUT: tuple[str, ...] = (
+_FALLBACK_KERNEL_STATS_LAYOUT: tuple[str, ...] = (
     "canon_calls",                # 0
     "primary_hits",               # 1
     "secondary_attempts",         # 2
@@ -123,7 +128,7 @@ KERNEL_STATS_LAYOUT: tuple[str, ...] = (
 # k+1). Rows 14–16 are the post-D15 per-rank timing rows (ns, always-on);
 # rows 14–15 are bucketed by parent rank, row 16 (`nauty_ns`) by the rank
 # of the code being canonised (= parent_k + 1 for child canon calls).
-PER_K_STATS_ROWS: tuple[str, ...] = (
+_FALLBACK_PER_K_STATS_ROWS: tuple[str, ...] = (
     "is_canon_aug_calls",     # 0
     "parent_eq_hits",         # 1
     "weight_enum_filtered",   # 2
@@ -144,6 +149,22 @@ PER_K_STATS_ROWS: tuple[str, ...] = (
     "phi_sampled_calls",      # 17 — per-rank φ sampling weights (phase_timers)
     "phi_ctx_ns",             # 18 — D16: per-rank ctx-build ns (SUBSET of row 14)
 )
+
+if _kernel is not None and hasattr(_kernel, "kernel_stats_layout"):
+    _stats_names, _per_k_names = _kernel.kernel_stats_layout()
+    KERNEL_STATS_LAYOUT: tuple[str, ...] = tuple(_stats_names)
+    PER_K_STATS_ROWS: tuple[str, ...] = tuple(_per_k_names)
+    assert KERNEL_STATS_LAYOUT[: len(_FALLBACK_KERNEL_STATS_LAYOUT)] == _FALLBACK_KERNEL_STATS_LAYOUT, (
+        "kernel stats layout diverged from bench.py's known prefix — "
+        "append-only evolution violated; old bench JSONs are no longer "
+        "comparable. Review before trusting any cross-session A/B."
+    )
+    assert PER_K_STATS_ROWS[: len(_FALLBACK_PER_K_STATS_ROWS)] == _FALLBACK_PER_K_STATS_ROWS, (
+        "kernel per-k rows diverged from bench.py's known prefix"
+    )
+else:  # pre-restructure wheel (no kernel_stats_layout export)
+    KERNEL_STATS_LAYOUT = _FALLBACK_KERNEL_STATS_LAYOUT
+    PER_K_STATS_ROWS = _FALLBACK_PER_K_STATS_ROWS
 
 
 def per_k_stats_dict(per_k: list[list[int]]) -> dict[str, list[int]]:
@@ -269,6 +290,10 @@ def run_one(N: int) -> PerNResult:
             slot.classes += 1
             slot.mass += factorial_N // int(aord_str)
             result.classes += 1
+        assert len(stats) == len(KERNEL_STATS_LAYOUT), (
+            f"kernel returned {len(stats)} stats fields, layout has "
+            f"{len(KERNEL_STATS_LAYOUT)} — stale wheel or stale bench.py?"
+        )
         result.kernel_stats = {
             name: int(stats[i]) for i, name in enumerate(KERNEL_STATS_LAYOUT)
         }
@@ -341,6 +366,10 @@ def run_one_with_profile(N: int, num_threads: int) -> PerNResult:
         slot.classes += 1
         slot.mass += factorial_N // int(aord_str)
         result.classes += 1
+    assert len(stats) == len(KERNEL_STATS_LAYOUT), (
+        f"kernel returned {len(stats)} stats fields, layout has "
+        f"{len(KERNEL_STATS_LAYOUT)} — stale wheel or stale bench.py?"
+    )
     result.kernel_stats = {
         name: int(stats[i]) for i, name in enumerate(KERNEL_STATS_LAYOUT)
     }

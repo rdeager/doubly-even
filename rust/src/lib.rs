@@ -227,7 +227,11 @@ fn py_enumerate_doubly_even(
         let _ = py;
         enumerate::enumerate_doubly_even(n, max_k, quota, factorial_n)
     };
-    debug_assert_eq!(stats.len(), 49, "stats vector length mismatch");
+    debug_assert_eq!(
+        stats.len(),
+        doubly_even_core::enumerate::KERNEL_STATS_LAYOUT.len(),
+        "stats vector length mismatch"
+    );
     let result: Vec<_> = out
         .into_iter()
         .map(|e| {
@@ -331,6 +335,37 @@ fn py_enumerate_doubly_even_streaming(
     Ok(dict.into())
 }
 
+/// Names of the kernel stats vector / per-rank rows, in kernel order.
+/// The Rust consts in `core::enumerate::stats` are the single source of
+/// truth; `scripts/bench.py` consumes this at import (with a frozen
+/// fallback for pre-workspace wheels). Doubles as a "new wheel actually
+/// installed" probe for the bench harness.
+#[pyfunction]
+#[pyo3(name = "kernel_stats_layout")]
+fn py_kernel_stats_layout() -> (Vec<&'static str>, Vec<&'static str>) {
+    (
+        doubly_even_core::enumerate::KERNEL_STATS_LAYOUT.to_vec(),
+        doubly_even_core::enumerate::PER_K_STATS_ROWS.to_vec(),
+    )
+}
+
+/// Compile-time target features of the installed wheel. The gate for the
+/// x86-64-v3 codegen ship: after an install, `avx2` must be `true` on a
+/// v3 build (cargo config discovery is cwd-based, so a silently-ignored
+/// `.cargo/config.toml` would otherwise produce an unflagged wheel that
+/// looks identical).
+#[pyfunction]
+#[pyo3(name = "kernel_target_features")]
+fn py_kernel_target_features() -> Vec<(&'static str, bool)> {
+    vec![
+        ("x86_64", cfg!(target_arch = "x86_64")),
+        ("aarch64", cfg!(target_arch = "aarch64")),
+        ("avx2", cfg!(target_feature = "avx2")),
+        ("bmi2", cfg!(target_feature = "bmi2")),
+        ("popcnt", cfg!(target_feature = "popcnt")),
+    ]
+}
+
 /// Build identifier — `"verifier"` when compiled with the
 /// `equivalence_verifier` feature, otherwise `"baseline"`. Used by the
 /// Python A/B harness to confirm which kernel is loaded.
@@ -352,6 +387,8 @@ fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_enumerate_doubly_even, m)?)?;
     m.add_function(wrap_pyfunction!(py_enumerate_doubly_even_streaming, m)?)?;
     m.add_function(wrap_pyfunction!(py_kernel_build_info, m)?)?;
+    m.add_function(wrap_pyfunction!(py_kernel_stats_layout, m)?)?;
+    m.add_function(wrap_pyfunction!(py_kernel_target_features, m)?)?;
 
     // Dormant wrappers (debug submodule, Feulner, invariants, audit features).
     py_exports::register(m)?;
