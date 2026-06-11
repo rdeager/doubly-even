@@ -11,7 +11,8 @@
 //!       (`--poles`: dependent-chase vs independent-probe ns on the
 //!       same-size bitset = the available memory-level parallelism)
 //!   (b) do portable restructures win? Variants, all minima-identical:
-//!         base   — verbatim `orbit.rs` clone (contains+insert)
+//!         base   — the PRODUCTION legacy walk body
+//!                  (`doubly_even_core::orbit::orbit_minima_walk`)
 //!         put    — single read-modify-write probe per image
 //!         batch  — two passes per level chunk: compute all images into
 //!                  a flat buffer, then probe; gives the OoO core
@@ -19,6 +20,12 @@
 //!         bucket — batch + radix-bucket images by high bits before
 //!                  probing (page/TLB locality; only plausibly useful
 //!                  at L ≥ 24 where the bitset spans many pages)
+//!         m4r    — the PRODUCTION D18 body (`m4r_build` +
+//!                  `orbit_minima_m4r`; fixed internal chunk = 1024 —
+//!                  `--batch-chunk` only affects the local variants)
+//!       Production arms link `doubly-even-core` directly (clones
+//!       retired); local variants are asserted minima-equal AGAINST
+//!       production on every parent.
 //!   (c) is there cross-parent structure worth sharing? (`--stats`:
 //!       per-parent generators / reps / minima / probes / orbit sizes)
 //!
@@ -43,26 +50,21 @@
 //!   ... -- --stats            # per-parent cross-parent table
 //! Pin it: `taskset -c 4 ...`.
 
+use doubly_even_core::orbit::{m4r_build, mat_apply, orbit_minima_m4r, orbit_minima_walk, singular_reps_q};
 use microbench::timing::{cycles_to_ns, mono_cycles, ns_per_cycle};
 use microbench::XorShift64;
 use std::env;
 use std::hint::black_box;
 
-// ----- bitset (one u64 word per probe, same shape as FixedBitSet)
+// ----- bitset (one u64 word per probe, same shape as FixedBitSet) for
+// ----- the LOCAL experimental variants; production arms use the core
+// ----- bodies (FixedBitSet) directly.
 
 struct BitSet(Vec<u64>);
 
 impl BitSet {
     fn with_capacity(bits: usize) -> Self {
         BitSet(vec![0u64; bits.div_ceil(64)])
-    }
-    #[inline]
-    fn contains(&self, i: usize) -> bool {
-        (self.0[i >> 6] >> (i & 63)) & 1 == 1
-    }
-    #[inline]
-    fn insert(&mut self, i: usize) {
-        self.0[i >> 6] |= 1 << (i & 63);
     }
     /// Single read-modify-write: set bit i, return whether it was set.
     #[inline]
@@ -75,81 +77,11 @@ impl BitSet {
     }
 }
 
-#[inline]
-fn mat_apply(m: &[u64], v: u64) -> u64 {
-    let mut out: u64 = 0;
-    let mut u = v;
-    while u != 0 {
-        let i = u.trailing_zeros() as usize;
-        out ^= m[i];
-        u &= u - 1;
-    }
-    out
-}
-
 fn is_identity_mat(m: &[u64]) -> bool {
     m.iter().enumerate().all(|(i, &c)| c == 1u64 << i)
 }
 
-fn singular_reps_q(v_basis: &[u64]) -> Vec<u64> {
-    let l = v_basis.len();
-    let mut out: Vec<u64> = Vec::new();
-    if l == 0 {
-        return out;
-    }
-    let size: u64 = 1u64 << l;
-    out.reserve(size as usize / 2);
-    let mut u: u64 = 0;
-    let mut v: u64 = 0;
-    for i in 1..size {
-        let flip = i.trailing_zeros() as usize;
-        u ^= 1u64 << flip;
-        v ^= v_basis[flip];
-        if v.count_ones() & 3 == 0 {
-            out.push(u);
-        }
-    }
-    out
-}
-
 // ----- BFS variants (minima provably identical; see module doc)
-
-/// Verbatim `orbit.rs::aut_orbit_minima_q_witt` clone (identity gens
-/// pre-filtered by the caller). Returns (minima, probes, orbit_count).
-fn bfs_base(reps_sorted: &[u64], gens: &[&Vec<u64>], l: u32) -> (Vec<u64>, u64, usize) {
-    let universe = 1usize << l;
-    let mut seen = BitSet::with_capacity(universe);
-    let mut minima: Vec<u64> = Vec::new();
-    let mut probes = 0u64;
-    let cap = reps_sorted.len();
-    let mut queue: Vec<u64> = Vec::with_capacity(cap);
-    let mut next: Vec<u64> = Vec::with_capacity(cap);
-    for &v in reps_sorted {
-        if seen.contains(v as usize) {
-            continue;
-        }
-        minima.push(v);
-        seen.insert(v as usize);
-        queue.clear();
-        queue.push(v);
-        while !queue.is_empty() {
-            next.clear();
-            for &current in &queue {
-                for g in gens {
-                    let new_v = mat_apply(g, current);
-                    probes += 1;
-                    if !seen.contains(new_v as usize) {
-                        seen.insert(new_v as usize);
-                        next.push(new_v);
-                    }
-                }
-            }
-            std::mem::swap(&mut queue, &mut next);
-        }
-    }
-    let orbits = minima.len();
-    (minima, probes, orbits)
-}
 
 /// base with the contains+insert pair replaced by one `put`.
 fn bfs_put(reps_sorted: &[u64], gens: &[&Vec<u64>], l: u32) -> Vec<u64> {
@@ -212,80 +144,6 @@ fn bfs_batch(reps_sorted: &[u64], gens: &[&Vec<u64>], l: u32, chunk: usize) -> V
                 for &new_v in &images {
                     if !seen.put(new_v as usize) {
                         next.push(new_v);
-                    }
-                }
-            }
-            std::mem::swap(&mut queue, &mut next);
-        }
-    }
-    minima
-}
-
-/// Method-of-four-Russians image computation: per generator, one
-/// 256-entry lookup table per 8-bit chunk of the input (`T[c][b]` =
-/// image of chunk-c bits `b`), so an image is `ceil(L/8)` L1 loads +
-/// XORs instead of a ~popcount(x)-step chained ctz/XOR walk. Tables are
-/// built once per BFS call (256 Gray-ordered XORs per chunk per gen —
-/// microseconds against a tens-of-ms call). The level loop runs
-/// GEN-MAJOR over a frontier chunk so only one generator's ~6 KB of
-/// tables is hot at a time (L1-resident). Probe order within a level
-/// changes, which cannot change the per-level new-element set, the
-/// orbit closure, or the minima (see module doc).
-struct M4rGen {
-    /// `tables[c][b]` for chunk c (bits `8c..8c+8`), byte value b.
-    tables: Vec<[u64; 256]>,
-}
-
-impl M4rGen {
-    fn build(m: &[u64]) -> Self {
-        let l = m.len();
-        let n_chunks = l.div_ceil(8);
-        let mut tables = vec![[0u64; 256]; n_chunks];
-        for (c, t) in tables.iter_mut().enumerate() {
-            let base = c * 8;
-            let width = (l - base).min(8);
-            for b in 1usize..1 << width {
-                t[b] = t[b & (b - 1)] ^ m[base + (b.trailing_zeros() as usize)];
-            }
-        }
-        M4rGen { tables }
-    }
-
-    #[inline]
-    fn apply(&self, x: u64) -> u64 {
-        let mut out = 0u64;
-        for (c, t) in self.tables.iter().enumerate() {
-            out ^= t[((x >> (c * 8)) & 0xff) as usize];
-        }
-        out
-    }
-}
-
-/// base BFS with m4r image computation, gen-major over frontier chunks.
-fn bfs_m4r(reps_sorted: &[u64], gens: &[&Vec<u64>], l: u32, chunk: usize) -> Vec<u64> {
-    let m4r: Vec<M4rGen> = gens.iter().map(|g| M4rGen::build(g)).collect();
-    let universe = 1usize << l;
-    let mut seen = BitSet::with_capacity(universe);
-    let mut minima: Vec<u64> = Vec::new();
-    let cap = reps_sorted.len();
-    let mut queue: Vec<u64> = Vec::with_capacity(cap);
-    let mut next: Vec<u64> = Vec::with_capacity(cap);
-    for &v in reps_sorted {
-        if seen.put(v as usize) {
-            continue;
-        }
-        minima.push(v);
-        queue.clear();
-        queue.push(v);
-        while !queue.is_empty() {
-            next.clear();
-            for cur_chunk in queue.chunks(chunk) {
-                for g in &m4r {
-                    for &current in cur_chunk {
-                        let new_v = g.apply(current);
-                        if !seen.put(new_v as usize) {
-                            next.push(new_v);
-                        }
                     }
                 }
             }
@@ -593,10 +451,16 @@ fn main() {
         let mut reps_sorted = reps.clone();
         reps_sorted.sort_unstable();
 
-        // base (+ stats)
+        // base — production walk body (reps pre-sorted, identity gens
+        // pre-filtered, matching the production entry's contract).
         let c0 = mono_cycles();
-        let (minima_base, probes, _orbits) = bfs_base(&reps_sorted, &gens, p.l);
+        let minima_base = orbit_minima_walk(&reps_sorted, &gens, p.l);
         let base_cyc = mono_cycles().wrapping_sub(c0);
+        // The singular rep set is ⟨gens⟩-closed (Aut(C) preserves
+        // wt mod 4 on lifts), so the BFS dequeues each rep exactly once
+        // and probes it once per generator: probes = |reps| · |gens|.
+        // (The retired instrumented clone counted exactly this.)
+        let probes = reps_sorted.len() as u64 * gens.len() as u64;
 
         // put
         let c0 = mono_cycles();
@@ -616,15 +480,18 @@ fn main() {
         let bucket_cyc = mono_cycles().wrapping_sub(c0);
         assert_eq!(minima_bucket, minima_base, "bucket minima diverge on {}", p.name);
 
-        // m4r (full gen set)
+        // m4r (full gen set) — production D18 body, table build included
+        // in the timed region (as the production entry pays it per call).
         let c0 = mono_cycles();
-        let minima_m4r = bfs_m4r(&reps_sorted, &gens, p.l, chunk);
+        let tables = m4r_build(&gens, p.l);
+        let minima_m4r = orbit_minima_m4r(&reps_sorted, &tables, p.l);
         let m4r_cyc = mono_cycles().wrapping_sub(c0);
         assert_eq!(minima_m4r, minima_base, "m4r minima diverge on {}", p.name);
 
         // m4r + dedupe/inverse-reduced gen set (same group, same orbits)
         let c0 = mono_cycles();
-        let minima_m4r_red = bfs_m4r(&reps_sorted, &gens_red, p.l, chunk);
+        let tables_red = m4r_build(&gens_red, p.l);
+        let minima_m4r_red = orbit_minima_m4r(&reps_sorted, &tables_red, p.l);
         let m4r_red_cyc = mono_cycles().wrapping_sub(c0);
         assert_eq!(
             minima_m4r_red, minima_base,

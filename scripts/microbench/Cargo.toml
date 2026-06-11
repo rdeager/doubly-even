@@ -33,6 +33,13 @@ path = "src/singular_walk.rs"
 name = "microbench"
 path = "src/lib.rs"
 
+# The pure-Rust algorithm crate (no pyo3) — the bins' "production arms"
+# call it directly instead of carrying hand-copied clones of the kernel
+# hot loops. `phase_timers` enables the sampled φ sub-phase clock that
+# phi_replay drives via `phi_sample::force_next_sample`/`take_last`.
+[dependencies]
+doubly-even-core = { path = "../../rust/core", features = ["phase_timers"] }
+
 # Target-conditional like the kernel manifest: nauty's build.rs probes
 # `popcnt` unconditionally and refuses to compile on aarch64 with the
 # feature on. Only the two x86-only bins use nauty at all.

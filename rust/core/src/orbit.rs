@@ -65,7 +65,10 @@ const M4R_CHUNK: usize = 1024;
 /// against the real rank-2/3 inputs at N = 26/27
 /// (`scripts/microbench/src/orbit_probe.rs`; the probes are L2-resident
 /// at those L, so the walk's serial arithmetic dominates the call).
-fn m4r_build<M: AsRef<[BinVec]>>(gens: &[M], l: u32) -> Vec<Vec<[BinVec; 256]>> {
+///
+/// `pub` (with [`orbit_minima_m4r`] and [`orbit_minima_walk`]) for the
+/// microbench replay bins, which time these production bodies directly.
+pub fn m4r_build<M: AsRef<[BinVec]>>(gens: &[M], l: u32) -> Vec<Vec<[BinVec; 256]>> {
     let n_chunks = (l as usize).div_ceil(8);
     gens.iter()
         .map(|g| {
@@ -100,7 +103,7 @@ fn m4r_apply(tables: &[[BinVec; 256]], x: BinVec) -> BinVec {
 /// independent of probe order — so the orbit closure and the
 /// ascending-rep minima scan are byte-identical to the legacy body
 /// (same argument as the pooled variant's determinism note).
-fn orbit_minima_m4r(
+pub fn orbit_minima_m4r(
     reps_sorted: &[BinVec],
     tables: &[Vec<[BinVec; 256]>],
     l: u32,
@@ -258,7 +261,11 @@ pub fn aut_orbit_minima_q_witt(
 /// Legacy BFS body — element-major `mat_apply` walk. Kept for `L <`
 /// [`M4R_MIN_L`] (where the m4r table build doesn't amortize) and as the
 /// byte-equality oracle for the m4r body in tests.
-fn orbit_minima_walk(reps_sorted: &[BinVec], gens: &[&Mat], l: u32) -> Vec<BinVec> {
+///
+/// Precondition (callers of the public entry [`aut_orbit_minima_q_witt`]
+/// get this for free): `reps_sorted` ascending, identity generators
+/// filtered out.
+pub fn orbit_minima_walk(reps_sorted: &[BinVec], gens: &[&Mat], l: u32) -> Vec<BinVec> {
     let universe = 1usize << l;
     let mut seen = FixedBitSet::with_capacity(universe);
     let mut minima: Vec<BinVec> = Vec::new();
