@@ -4,29 +4,30 @@ Single home for the measured wall-time numbers and tuning knobs. The
 algorithmic *why* lives in [`algorithm.md`](algorithm.md); this doc is
 tables.
 
-## Headline (method-of-four-Russians BFS + x86-64-v3 codegen, parallel kernel, median of 3)
+## Headline (automorphism-only canonicalisation epoch, parallel kernel, median of 3)
 
-Measured 2026-06-11 on a 13700K-equivalent dev container (its
-same-session legacy controls reproduce the 13700K records within 1–10 %,
-e.g. `N = 26` 168.3 s vs the recorded 169.8 s). Each run starts from a
-cold canon cache; all DFGHILM Table 3 cells verified per run. The
-"vs pair-structure chain" column is the four-Russians orbit BFS's
-same-session A/B over [`algorithm.md`](algorithm.md) lever 8; the
-x86-64-v3 codegen flag adds a further 1.01–1.05× sequential on top
-(same-session A/B: `N = 26` 85.0 → 81.4 s), already included in the
-wall columns. `d = 4` is the best frontier depth at every benched `N`.
+Measured 2026-06-12 on a 13700K-equivalent dev container — a
+single-wheel knob A/B whose `DOUBLY_EVEN_CANON_LABELLING=full` control
+reproduced the 2026-06-11 walls (0.683 / 6.27 / 81.5 s sequential), so
+the "vs full labelling" column is exactly
+[`algorithm.md`](algorithm.md) lever 10's same-session delta. Each run
+starts from a cold canon cache; all DFGHILM Table 3 cells verified per
+run. `d = 4` is the best frontier depth at every benched `N`.
 
-| N  | classes   | sequential | parallel best           | vs pair-structure chain |
+| N  | classes   | sequential | parallel best           | vs full labelling |
 |----|----------:|-----------:|-------------------------|------------------------:|
-| 18 |       341 |    0.029 s | —                       | ~1.0× (seq) |
-| 20 |     1,211 |    0.147 s | 0.051 s (t=16, d=4)     | 1.0× (unchanged since the split-frame epoch) |
-| 22 |     5,118 |    0.685 s | **0.24 s** (t=24, d=4)  | 1.14× (seq) |
-| 24 |    37,496 |     6.26 s | **~1.7 s** (t=24, d=4)  | 1.17× (seq) |
-| 26 |   494,272 | **81.4 s** | **9.70 s** (t=24, d=4)  | 1.13× (seq), 1.18× (par) |
-| 27 | 2,673,492 |          — | **63.0 s** (t=24, d=4, cap=500K; single rep) | ~1.05× (par) |
+| 18 |       341 |    0.029 s | —                       | ~1.0× (small N) |
+| 20 |     1,211 |    0.147 s | 0.051 s (t=16, d=4)     | ~1.0× (small N) |
+| 22 |     5,118 |    0.623 s | **0.24 s** (t=24, d=4)  | 1.097× (seq) |
+| 24 |    37,496 |     5.72 s | **~1.7 s** (t=24, d=4)  | 1.096× (seq) |
+| 26 |   494,272 | **74.6 s** | **9.21 s** (t=24, d=4)  | 1.092× (seq), 1.035× (par) |
+| 27 | 2,673,492 |          — | **~63–66 s** (t=24, d=4, cap=500K) | ~1.0× (par; worker-bound, session noise ±10 %) |
 
 `N = 26` sequential needs `DOUBLY_EVEN_CANON_CACHE_CAP=500000` (the
-uncapped run OOMs). The pair-structure-chain numbers (2026-06-10, same
+uncapped run OOMs). The four-Russians + codegen epoch (2026-06-11):
+`N = 22` 0.685 s seq / 0.24 s par; `N = 24` 6.26 s seq; `N = 26`
+81.4 s seq / 9.70 s par; `N = 27` 63.0 s par.
+The pair-structure-chain numbers (2026-06-10, same
 container, kept for cross-reference): `N = 22` 0.796 s seq / 0.24 s
 par; `N = 24` 7.52 s seq / 1.77 s par; `N = 26` 97.2 s seq / 11.5 s
 par; `N = 27` 66.1 s par. The split-frame numbers (2026-06-10):

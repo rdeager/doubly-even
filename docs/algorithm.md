@@ -2,7 +2,7 @@
 
 This doc walks through what `doubly-even` adds on top of the DFGHILM
 Appendix B canonical-augmentation recipe to make the enumeration tractable
-on a desktop or modest cloud VM. Nine levers carry the load; each delivered
+on a desktop or modest cloud VM. Ten levers carry the load; each delivered
 a measurable wall-time reduction on its own, and they compose to roughly
 ~640× over the pure-Python baseline at `N = 22` and ~1500× over Sage's
 `self_orthogonal_binary_codes` at the same length.
@@ -24,7 +24,8 @@ above it):
 | + split-frame φ sharing + one-comparison reject      | 0.051 s | 0.245 s |  1.67 s | 13.2 s |
 | + pair-structure chain (O(1) later strata)           | 0.051 s |  0.24 s |  1.77 s | 11.5 s |
 | + method-of-four-Russians orbit BFS                  | 0.051 s |  0.24 s |  1.7 s  | 9.8 s  |
-| + x86-64-v3 codegen (and workspace split)            | 0.051 s | **0.24 s** | **1.7 s** | **9.7 s** |
+| + x86-64-v3 codegen (and workspace split)            | 0.051 s |  0.24 s |  1.7 s  | 9.7 s  |
+| + automorphism-only canonicalisation on accepts      | 0.051 s | **0.24 s** | **1.7 s** | **9.2 s** |
 
 The parallel `N ≤ 24` cells stopped moving at the chain row (each
 row's same-hour control re-measures within noise of the row above):
@@ -32,11 +33,13 @@ parallel `N ≤ 26` is bounded by the serial seeder, not by
 per-candidate work, so the last three levers' wins are clearest
 sequentially. The chain takes `N = 26` sequential from 126.6 to
 97.2 s (1.30×, spectrum evaluation itself 3.78×), the four-Russians
-orbit BFS to 85.6 s (1.13×; 1.17× at `N = 24`), and the codegen flag
-to **81.4 s** (1.044× on a cool box). The orbit BFS is the one
-post-chain lever that also moves the parallel wall at `N = 26`
-(11.5 → 9.8 s, 1.18×), because the serial seeder span it shortens is
-exactly the parallel bottleneck.
+orbit BFS to 85.6 s (1.13×; 1.17× at `N = 24`), the codegen flag
+to 81.4 s (1.044× on a cool box), and automorphism-only
+canonicalisation to **74.6 s** (1.092×; 1.097×/1.096× at
+`N = 22`/`24`). The orbit BFS is the one post-chain lever that also
+moves the parallel wall at `N = 26` substantially (11.5 → 9.8 s,
+1.18×), because the serial seeder span it shortens is exactly the
+parallel bottleneck; autom-only adds a further 1.035× there.
 
 The remainder of this doc explains what each lever does and why it works.
 
@@ -516,6 +519,51 @@ x86 wheels consequently require AVX2 — any x86 CPU since ~2013;
 aarch64 builds are unaffected (NEON is baseline and already
 auto-vectorised). The live ranked-lever list is
 [`bottlenecks.md`](bottlenecks.md).
+
+### 10. Automorphism-only canonicalisation on accepts
+
+With the parent rule deciding rejects invariant-first (lever 6), the
+canon call count sits at its floor: one call per emitted class (the
+recursion needs `Aut(D)` and `|Aut(D)|` per class for the mass
+certificate and the next level's candidate generation) plus the ~6 %
+of calls that break invariant ties. The remaining canon lever is
+therefore not *fewer* calls but *cheaper requested output* — and nauty
+decomposes its work accordingly: the automorphism-group search and the
+canonical-labelling ("best leaf") bookkeeping are separable, with the
+canonical pass measured at 19–25 % of the sparsenauty call on our
+graph shapes.
+
+The decision architecture makes the split free to exploit: the parent
+rule's outcome is known *before* the canonicaliser is invoked, so the
+kernel knows at call time whether the canonical labelling will be
+consumed. Only tie-breaks (and the legacy-rule path) read it; on the
+~80 % of calls that are unique-accepts, nauty now runs with
+`getcanon = FALSE` — same generators, same group order, same column
+orbits, no labelling. A cache entry written without a labelling that
+is later hit by a tie-break on the same subspace is transparently
+recomputed in full (measured: never fired in any benched run).
+
+Measured (same-session knob A/B, median of 3): `N = 22` sequential
+0.683 → 0.623 s, `N = 24` 6.27 → 5.72 s, `N = 26` 81.5 → **74.6 s** —
+**1.092–1.097×** across the board — and `N = 26` parallel
+9.53 → 9.21 s (1.035×; the parallel wall is seeder-bound). Decisions
+are bit-identical: classes, per-rank counts, canon-call counts and
+strata sums all gate-equal; the emitted search tree cannot move
+because no decision ever read the labelling on these calls. Expected
+to matter more on cloud runs at `N ≥ 28`, where canonicalisation is
+~68 % of forecast core-hours.
+
+One empirical footnote: in roughly one call in 4×10⁵, nauty without
+the best-leaf bookkeeping reports a *different generating set* of the
+same automorphism group. This is decision-neutral — orbit computations
+are generating-set independent — but it is why the A/B gate compares
+group-level counters rather than generator counts.
+
+Knob: `DOUBLY_EVEN_CANON_LABELLING=full` restores the labelling on
+every call (and per-class `canonical_column_order` in the in-memory
+output; the streaming format never carried it). Code:
+`rust/core/src/canon.rs`, `qd_graph.rs` (the `get_canon` flag),
+`rust/core/src/enumerate/cache.rs` (label modes, upgrade-on-hit).
 
 ## Cumulative result
 

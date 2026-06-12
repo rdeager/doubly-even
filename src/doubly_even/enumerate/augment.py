@@ -307,6 +307,12 @@ def enumerate_doubly_even(N: int, max_k: int | None = None) -> Iterator[Enumerat
             raw, _stats, _per_k = _kernel.enumerate_doubly_even(
                 N, cap, quota_vec, factorial_N
             )
+        # Output contract (autom-only canon lever, 2026-06-12): under the
+        # default ``DOUBLY_EVEN_CANON_LABELLING=autom-only`` the kernel
+        # skips nauty's canonical labelling on accepts, so ``ccol`` is an
+        # EMPTY tuple here. Set ``DOUBLY_EVEN_CANON_LABELLING=full`` to
+        # restore per-class labels, or call ``canon.nauty.canon_info`` on
+        # the code directly (the direct API always computes the label).
         for rref, ccol, gens, aord_str, orbits in raw:
             c = Code(N, tuple(rref))
             info = CanonInfo(

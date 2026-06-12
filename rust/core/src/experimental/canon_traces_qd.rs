@@ -116,7 +116,7 @@ pub fn canon_info_qd_traces(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> 
     // Traces doesn't expose numnodes/tctotal/maxlevel — emit zeros for
     // those Q6 counters; numgenerators is still in TracesStats.
     Some(NativeCanonInfo {
-        canonical_column_order,
+        canonical_column_order: Some(canonical_column_order),
         aut_generators,
         column_orbits,
         grpsize1: stats.grpsize1,

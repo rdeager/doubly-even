@@ -91,9 +91,13 @@ fn py_canon_info_native(
     rref: Vec<BinVec>,
     n: u32,
 ) -> (Vec<u32>, Vec<Vec<u32>>, f64, i32, Vec<u32>) {
-    let info = canon::canon_info_native(&rref, n);
+    // The direct API always computes the canonical labelling — tests and
+    // Python-side consumers depend on it (the autom-only lever applies
+    // only inside the enumeration recursion).
+    let info = canon::canon_info_native(&rref, n, true);
     (
-        info.canonical_column_order,
+        info.canonical_column_order
+            .expect("get_canon=true always yields the label"),
         info.aut_generators,
         info.grpsize1,
         info.grpsize2,
@@ -111,9 +115,10 @@ fn py_canon_info_qd_native(
     rref: Vec<BinVec>,
     n: u32,
 ) -> Option<(Vec<u32>, Vec<Vec<u32>>, f64, i32, Vec<u32>)> {
-    qd_graph::canon_info_qd_native(&rref, n).map(|info| {
+    qd_graph::canon_info_qd_native(&rref, n, true).map(|info| {
         (
-            info.canonical_column_order,
+            info.canonical_column_order
+                .expect("get_canon=true always yields the label"),
             info.aut_generators,
             info.grpsize1,
             info.grpsize2,
@@ -164,7 +169,7 @@ fn py_subspace_in_orbit(
 ///
 ///   `(rref, canonical_column_order, aut_generators, aut_order_decimal, column_orbits)`
 ///
-/// Plus a `stats: Vec[int]` (length 49) and a `per_k_stats: list[list[int]]`
+/// Plus a `stats: Vec[int]` (length 51) and a `per_k_stats: list[list[int]]`
 /// (19 rows) — see `enumerate::enumerate_doubly_even` doc for the field
 /// layout, mirrored in `scripts/bench.py` (`KERNEL_STATS_LAYOUT`,
 /// `PER_K_STATS_ROWS`).
@@ -323,7 +328,7 @@ fn py_enumerate_doubly_even_streaming(
     // without u128 -> int conversion losing precision at N >= 21.
     let mass_strs: Vec<String> = result.mass.iter().map(|m| m.to_string()).collect();
     dict.set_item("mass", mass_strs)?;
-    // stats vector: same 49-field layout as the in-memory entry. Convert
+    // stats vector: same 51-field layout as the in-memory entry. Convert
     // to decimal strings for the same precision reason (some fields are
     // cumulative ns — easily > 2^53 at N = 26).
     let stats_strs: Vec<String> = result.stats.iter().map(|s| s.to_string()).collect();

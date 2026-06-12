@@ -131,6 +131,7 @@ pub fn enumerate_doubly_even_parallel_with_profile(
     }
 
     let rule = crate::parent_rule::ParentRule::from_env();
+    let labelling = crate::enumerate::LabelMode::from_env();
 
     // Worker pool spawns first and waits on the (initially empty) bounded
     // channel — identical shape to the production driver, so seeder DFS
@@ -159,7 +160,7 @@ pub fn enumerate_doubly_even_parallel_with_profile(
         let epoch = total_t0; // Instant is Copy; one shared epoch.
         handles.push(std::thread::spawn(move || {
             let inf_quota = vec![u128::MAX; (mk + 1) as usize];
-            let mut worker = WorkerState::new(nn, mk, inf_quota, fact, rule);
+            let mut worker = WorkerState::new(nn, mk, inf_quota, fact, rule, labelling);
             worker.install_global_mass(gm);
             let mut seed_profiles: Vec<SeedProfile> = Vec::new();
             let mut active_ns: u64 = 0;
@@ -207,7 +208,7 @@ pub fn enumerate_doubly_even_parallel_with_profile(
 
     // Seeder on the main thread, pipelined into the bounded channel,
     // with the epoch armed so traverse_seed records the timeline.
-    let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n, rule);
+    let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n, rule, labelling);
     seed_state.install_global_mass(std::sync::Arc::clone(&global_mass));
     let (seeder_threads, seeder_min_l) = crate::seeder_pool::SeederPool::env_defaults(num_threads);
     if seeder_threads >= 2 {
@@ -219,7 +220,7 @@ pub fn enumerate_doubly_even_parallel_with_profile(
     {
         let zero_rref: Vec<BinVec> = Vec::new();
         let zero_pivots: Vec<u32> = Vec::new();
-        let zero_info = seed_state.canon_info(&zero_rref);
+        let zero_info = seed_state.canon_info(&zero_rref, false);
         seed_state.traverse_seed(zero_rref, zero_pivots, zero_info, frontier_depth, &task_tx);
     }
     seed_state.clear_seeder_pool();

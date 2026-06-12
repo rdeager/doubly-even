@@ -238,17 +238,19 @@ pub(crate) fn build_low_weight_sparsegraph(
 /// Returns `Some(NativeCanonInfo)` on success; `None` when the span-aware
 /// builder gave up (caller falls back to `canon::canon_info_native`). The
 /// shape of `NativeCanonInfo` is identical so the dispatch site needs no
-/// extra plumbing.
-pub fn canon_info_qd_native(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> {
+/// extra plumbing. `get_canon = false` runs nauty with `getcanon = FALSE`
+/// (autom-only — see `canon_info_native`).
+pub fn canon_info_qd_native(rref: &[BinVec], n: u32, get_canon: bool) -> Option<NativeCanonInfo> {
     SCRATCH.with(|scratch_cell| {
         let mut scratch = scratch_cell.borrow_mut();
-        canon_info_qd_native_impl(rref, n, &mut scratch)
+        canon_info_qd_native_impl(rref, n, get_canon, &mut scratch)
     })
 }
 
 fn canon_info_qd_native_impl(
     rref: &[BinVec],
     n: u32,
+    get_canon: bool,
     scratch: &mut CanonScratch,
 ) -> Option<NativeCanonInfo> {
     let (nde, l) = build_low_weight_sparsegraph(rref, n, scratch)?;
@@ -271,7 +273,7 @@ fn canon_info_qd_native_impl(
     scratch.orbits.clear();
     scratch.orbits.resize(total, 0);
     let mut options = optionblk::default_sparse();
-    options.getcanon = TRUE;
+    options.getcanon = if get_canon { TRUE } else { FALSE };
     options.defaultptn = FALSE;
     options.userautomproc = Some(auto_callback);
     // schreier=TRUE measured net regression on the Q_D-graph too — see
@@ -279,24 +281,33 @@ fn canon_info_qd_native_impl(
     let mut stats = statsblk::default();
 
     // Canonical-graph output buffers (nauty needs writable storage even
-    // when we discard the canonical sparsegraph).
-    scratch.cg_v.clear();
-    scratch.cg_v.resize(total, 0);
-    scratch.cg_d.clear();
-    scratch.cg_d.resize(total, 0);
-    scratch.cg_e.clear();
-    scratch.cg_e.resize(nde, 0);
-    let mut canon_sg = sparsegraph {
-        nde: 0,
-        v: scratch.cg_v.as_mut_ptr(),
-        nv: total as c_int,
-        d: scratch.cg_d.as_mut_ptr(),
-        e: scratch.cg_e.as_mut_ptr(),
-        w: ptr::null_mut(),
-        vlen: scratch.cg_v.len(),
-        dlen: scratch.cg_d.len(),
-        elen: scratch.cg_e.len(),
-        wlen: 0,
+    // when we discard the canonical sparsegraph) — skipped entirely with
+    // `getcanon = FALSE`, where nauty ignores the argument (pass null).
+    let mut canon_sg_storage = if get_canon {
+        scratch.cg_v.clear();
+        scratch.cg_v.resize(total, 0);
+        scratch.cg_d.clear();
+        scratch.cg_d.resize(total, 0);
+        scratch.cg_e.clear();
+        scratch.cg_e.resize(nde, 0);
+        Some(sparsegraph {
+            nde: 0,
+            v: scratch.cg_v.as_mut_ptr(),
+            nv: total as c_int,
+            d: scratch.cg_d.as_mut_ptr(),
+            e: scratch.cg_e.as_mut_ptr(),
+            w: ptr::null_mut(),
+            vlen: scratch.cg_v.len(),
+            dlen: scratch.cg_d.len(),
+            elen: scratch.cg_e.len(),
+            wlen: 0,
+        })
+    } else {
+        None
+    };
+    let canon_sg_ptr: *mut sparsegraph = match canon_sg_storage.as_mut() {
+        Some(sg) => sg,
+        None => ptr::null_mut(),
     };
 
     AUT_BUFFER.with(|cell| cell.borrow_mut().clear());
@@ -313,7 +324,7 @@ fn canon_info_qd_native_impl(
             scratch.orbits.as_mut_ptr(),
             &mut options,
             &mut stats,
-            &mut canon_sg,
+            canon_sg_ptr,
         );
     }
 
@@ -336,15 +347,22 @@ fn canon_info_qd_native_impl(
 
     // Restrict canonical labelling to columns and invert into old→new form
     // in a single pass. Result Vec sizes are O(n) — leave fresh-allocated.
-    let mut canonical_column_order = vec![0u32; r];
-    let mut new_col_counter = 0u32;
-    for new_index in 0..total {
-        let old_vertex = scratch.lab[new_index] as usize;
-        if old_vertex >= l {
-            canonical_column_order[old_vertex - l] = new_col_counter;
-            new_col_counter += 1;
+    // With `getcanon = FALSE` the final content of `lab` is unspecified —
+    // skip extraction.
+    let canonical_column_order = if get_canon {
+        let mut order = vec![0u32; r];
+        let mut new_col_counter = 0u32;
+        for new_index in 0..total {
+            let old_vertex = scratch.lab[new_index] as usize;
+            if old_vertex >= l {
+                order[old_vertex - l] = new_col_counter;
+                new_col_counter += 1;
+            }
         }
-    }
+        Some(order)
+    } else {
+        None
+    };
 
     let column_orbits: Vec<u32> = scratch.orbits[l..].iter().map(|&x| x as u32).collect();
     let aut_generators = AUT_BUFFER.with(|cell| std::mem::take(&mut *cell.borrow_mut()));

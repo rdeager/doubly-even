@@ -1184,32 +1184,10 @@ pub(crate) fn tie_break_parent(
     m_set: &[u16],
     sigma: &[u32],
 ) -> Vec<BinVec> {
-    let kp1 = c_rref.len() + 1;
-    let row_at = |j: usize| -> BinVec {
-        if j < c_rref.len() {
-            c_rref[j]
-        } else {
-            v
-        }
-    };
     let mut best_key: Option<Vec<BinVec>> = None;
     let mut best_rref: Option<Vec<BinVec>> = None;
     for &u in m_set {
-        debug_assert_ne!(u, 0, "u = 0 is not a hyperplane functional");
-        // Kernel basis of u: for each j ≠ j0 (j0 = lowest set bit of u),
-        // the coordinate e_j + u_j·e_{j0} lies in ker(u).
-        let j0 = u.trailing_zeros() as usize;
-        let mut basis: Vec<BinVec> = Vec::with_capacity(kp1 - 1);
-        for j in 0..kp1 {
-            if j == j0 {
-                continue;
-            }
-            let mut word = row_at(j);
-            if (u >> j) & 1 == 1 {
-                word ^= row_at(j0);
-            }
-            basis.push(word);
-        }
+        let basis = hyperplane_basis(c_rref, v, u);
         let permuted: Vec<BinVec> = basis
             .iter()
             .map(|&b| apply_permutation(b, sigma))
@@ -1222,6 +1200,37 @@ pub(crate) fn tie_break_parent(
         }
     }
     best_rref.expect("tie_break_parent called with an empty argmin set")
+}
+
+/// Kernel basis of the hyperplane functional `u` on `D = ⟨C, v⟩` — the
+/// codimension-1 subcode `{x ∈ D : u·coords(x) = 0}` as a k-row basis in
+/// the original column frame (NOT row-reduced). For each `j ≠ j0` (`j0` =
+/// lowest set bit of `u`), the combination `e_j + u_j·e_{j0}` lies in
+/// `ker(u)`. Extracted verbatim from `tie_break_parent`'s loop body; the
+/// tie-dump hook reuses it to materialise the tied strata.
+pub(crate) fn hyperplane_basis(c_rref: &[BinVec], v: BinVec, u: u16) -> Vec<BinVec> {
+    debug_assert_ne!(u, 0, "u = 0 is not a hyperplane functional");
+    let kp1 = c_rref.len() + 1;
+    let row_at = |j: usize| -> BinVec {
+        if j < c_rref.len() {
+            c_rref[j]
+        } else {
+            v
+        }
+    };
+    let j0 = u.trailing_zeros() as usize;
+    let mut basis: Vec<BinVec> = Vec::with_capacity(kp1 - 1);
+    for j in 0..kp1 {
+        if j == j0 {
+            continue;
+        }
+        let mut word = row_at(j);
+        if (u >> j) & 1 == 1 {
+            word ^= row_at(j0);
+        }
+        basis.push(word);
+    }
+    basis
 }
 
 #[cfg(test)]

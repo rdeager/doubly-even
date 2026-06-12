@@ -226,15 +226,19 @@ the section below.
 
 **Live numbers, phase shares, ranked next levers and the dead list are
 in `docs/bottlenecks.md` — that file, not this one, is the single
-source for "where the time goes".** Headline as of 2026-06-12 (eval
-session, no levers shipped): N=22 seq 0.685 s / par 0.24 s; N=24 seq
-6.26 s; N=26 seq 81.4 s / par 9.70 s (t=24 d=4 cap=500K); N=27 par
-63.0 s. Cloud records (pre-lever: N=28 61 min, N=29 12.32 h on c4a-72)
-are due a cheap re-run — N=29 forecast 0.9–1.3 h. **Next-session entry
-point: `markdown/notes/speedup-eval-2026-06-12.md`** (§1 verdict: no
-local 2× exists — implement autom-only canon + counts-only output, then
-cloud; the GPT/Gemini solicitation brief is
-`markdown/notes/external-speedup-brief-2026-06-12.md`).
+source for "where the time goes".** Headline as of 2026-06-12 evening
+(**D19 autom-only canon SHIPPED**: getcanon=FALSE on the 80.7 % of
+canon calls whose labelling no decision reads; 1.09–1.10× seq,
+decisions bit-identical): N=22 seq 0.623 s / par 0.24 s; N=24 seq
+5.72 s; N=26 seq 74.6 s / par 9.21 s (t=24 d=4 cap=500K). Cloud
+records (pre-lever: N=28 61 min, N=29 12.32 h on c4a-72) are due a
+cheap re-run — N=29 forecast ~0.8–1.2 h. **Next session: cloud
+profiling prep** (eval plan §1 steps 2–4: counts-only output mode,
+then the cloud days). The external GPT/Gemini feedback is adjudicated
+in `markdown/notes/external-feedback-review-2026-06-12.md` (one new
+keeper: the decomposability+twin logging experiment, bottlenecks §4
+lever 4); φ-tie collision exposition:
+`markdown/notes/tie-collisions-2026-06-12.md`.
 
 Knob quick-reference (details in `docs/benchmarking.md` §3):
 
@@ -244,6 +248,8 @@ Knob quick-reference (details in `docs/benchmarking.md` §3):
 | `DOUBLY_EVEN_FRONTIER_DEPTH` | 4 | d=4 best at every benched N |
 | `DOUBLY_EVEN_CANON_CACHE_CAP` | 1M | 500K at N=26 local (OOM unlock); 200K on ≥200-core boxes |
 | `DOUBLY_EVEN_PARENT_RULE` | coset-spectrum | `legacy` = kill-switch, `audit` = measurement |
+| `DOUBLY_EVEN_CANON_LABELLING` | autom-only | `full` = D19 kill-switch (labelling on every call + per-class ccol in output) |
+| `DOUBLY_EVEN_TIE_DUMP` | unset | JSONL tie dump, sequential only (collision analysis) |
 | `DOUBLY_EVEN_PHI_MAX_RANK` | 13 | legacy rule above (sound mixing) |
 | `DOUBLY_EVEN_SEEDER_THREADS` | = threads | 0 disables the seeder pool |
 | `DOUBLY_EVEN_SEEDER_PAR_MIN_L` | 22 | load-bearing; don't lower |
@@ -260,7 +266,9 @@ D12 paired-iso (dormant) · D13(+V3–V5) outer-DFS parallelism ·
 D14 fingerprint cache (REVERTED) · **D15 coset-spectrum parent rule** ·
 **D16 split-frame φ + amax + pooled seeder** · **D17 E-chain** ·
 **D18 m4r orbit BFS** · 2026-06-11: workspace restructure +
-x86-64-v3 codegen (no label). Public docs use the descriptive names
+x86-64-v3 codegen (no label) · **D19 autom-only canon**
+(getcanon=FALSE on accepts; public name "automorphism-only
+canonicalisation", algorithm.md lever 10). Public docs use the descriptive names
 only.
 
 History of this section: the long narrative that lived here was

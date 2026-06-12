@@ -56,6 +56,9 @@ def _enumerate_class_canonical_forms(N: int) -> list[tuple[int, ...]]:
     quota_vec = [gaborit_sigma(N, k) for k in range(cap + 1)]
     factorial_N = math.factorial(N)
     raw, _stats, _per_k = _kernel.enumerate_doubly_even(N, cap, quota_vec, factorial_N)
+    # NOTE (autom-only lever, 2026-06-12): this script consumes the
+    # per-class canonical_column_order, which is EMPTY under the default
+    # labelling mode — run it with DOUBLY_EVEN_CANON_LABELLING=full.
     # `raw` entries are (rref, canonical_column_order, gens, aut_order_str, orbits).
     # Apply the canonical column order to each rref then re-RREF to get the
     # canonical form (same as what the kernel's secondary cache stores).

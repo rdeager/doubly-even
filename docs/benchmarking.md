@@ -84,6 +84,8 @@ N ≥ 28 cloud run):
 | `DOUBLY_EVEN_SEEDER_THREADS` | default (= threads) | 0 disables the seeder pool (A/B control) |
 | `DOUBLY_EVEN_SEEDER_PAR_MIN_L` | 22 (default) | load-bearing; lowering it loses to helper-vs-worker contention |
 | `DOUBLY_EVEN_PARENT_RULE` | default | `legacy` is the whole-rule kill-switch, `audit` the measurement mode |
+| `DOUBLY_EVEN_CANON_LABELLING` | default (`autom-only`) | `full` is the autom-only-lever kill-switch: computes nauty's canonical labelling on every call and restores per-class `canonical_column_order` in the output |
+| `DOUBLY_EVEN_TIE_DUMP` | unset | path to a JSONL sink for φ-tie records (collision analysis). **Sequential drivers only** — parallel drivers panic. Analysis: `scripts/experimental/tie_collision_analysis.py` |
 
 Each invocation runs each `N` once and writes one JSON
 (`scripts/bench-results/<timestamp>-<label>.json`) keyed by `per_N`,
@@ -95,7 +97,7 @@ label suffixes.
 
 ## 4. Kernel stats schema
 
-The stats vector (49 fields) and per-rank matrix (19 rows) are
+The stats vector (51 fields) and per-rank matrix (19 rows) are
 **single-sourced from the kernel**: the layout constants live next to
 the code that fills them (`enumerate::stats` in the kernel crate) and
 are exported to Python as `doubly_even_kernel.kernel_stats_layout()`.
@@ -137,7 +139,17 @@ move any decision):
 - *Sequential arms*: `classes` (total and per-k) and **every non-`_ns`
   counter** must be bit-equal — in particular `canon_calls`,
   `phi_strata_sum`, `phi_s1_fastpath`, `phi_chain_fastpath`, and all
-  per-k counter rows.
+  per-k counter rows. **Exception (autom-only labelling A/Bs only)**:
+  the nauty tree-shape sums (`nauty_numnodes_sum`, `nauty_tctotal_sum`,
+  `nauty_maxlevel_sum`) legitimately SHRINK under
+  `DOUBLY_EVEN_CANON_LABELLING=autom-only` — that drop is the lever —
+  and the two mode counters (`canon_autom_only_calls`,
+  `canon_label_upgrades`) only exist on one arm. `nauty_generators_sum`
+  is also excluded — measured ±1 at N=24 (1 in 4e5 calls): nauty may
+  emit a *different generating set* of the same group without the
+  best-leaf bookkeeping, which is decision-neutral (orbits / |Aut| /
+  classes / strata sums stay bit-equal — those ARE the gate). Stock
+  gate: `scripts/experimental/canon_labelling_ab_gate.py`.
 - *Parallel arms*: `classes`, per-k classes, and the mass certificate
   must be exact; call counters are race-variable by design (the shared
   mass-stop lets workers briefly over-search depending on timing) —

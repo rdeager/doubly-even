@@ -124,7 +124,7 @@ pub fn canon_info_qd_dense(rref: &[BinVec], n: u32) -> Option<NativeCanonInfo> {
     let aut_generators = AUT_BUFFER.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
 
     Some(NativeCanonInfo {
-        canonical_column_order,
+        canonical_column_order: Some(canonical_column_order),
         aut_generators,
         column_orbits,
         grpsize1: stats.grpsize1,

@@ -73,7 +73,11 @@ def test_kernel_matches_python_on_canonical_pairs(N: int) -> None:
 
     for ec in parents:
         D = ec.code
-        info_D = ec.info
+        # Re-derive via the direct canon API: under the default autom-only
+        # labelling mode (2026-06-12) the enumeration record's
+        # canonical_column_order is empty — only the direct `canon_info`
+        # call guarantees the label `canonical_parent` consumes.
+        info_D = cached_canon_info(D)
         # Use C := every rank-(k-1) subspace obtained by dropping a basis
         # row — at least one must be the canonical parent.
         rref_rows, _ = D.rref_basis()

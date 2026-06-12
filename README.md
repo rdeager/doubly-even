@@ -131,10 +131,12 @@ comparison before any canonicalisation (canon calls drop 87× at
 then a pair-structure chain that decides ~43 % of all candidates in
 O(1) past the first stratum), a method-of-four-Russians rewrite of
 the orbit-min BFS makes candidate generation ~1.9× faster at its
-core, and an x86-64-v3 codegen flag lets LLVM auto-vectorise the
-popcount loops. Desktop measurements (`N = 22` in 0.24 s parallel /
-0.69 s sequential, `N = 26` in **9.7 s** parallel / 81 s sequential,
-`N = 27` in 63 s parallel) and the cross-platform Sage comparison
+core, an x86-64-v3 codegen flag lets LLVM auto-vectorise the
+popcount loops, and automorphism-only canonicalisation skips nauty's
+canonical-labelling pass on the ~80 % of calls where no decision
+reads it. Desktop measurements (`N = 22` in 0.24 s parallel /
+0.62 s sequential, `N = 26` in **9.2 s** parallel / 75 s sequential,
+`N = 27` in ~63 s parallel) and the cross-platform Sage comparison
 (~1500× at `N = 22`) live in
 [`docs/performance.md`](docs/performance.md).
 

@@ -35,8 +35,11 @@ pub const QD_GRAPH_THRESHOLD: u32 = 0;
 /// or via Schreier-Sims on the returned generators).
 pub struct NativeCanonInfo {
     /// `canonical_column_order[old_col] = new_col` — the column permutation
-    /// that puts `C` in canonical form. Length `n`.
-    pub canonical_column_order: Vec<u32>,
+    /// that puts `C` in canonical form. Length `n`. `None` iff the call was
+    /// made with `get_canon = false` (autom-only mode: nauty runs with
+    /// `getcanon = FALSE`, producing generators / orbits / group order
+    /// identically but no canonical labelling).
+    pub canonical_column_order: Option<Vec<u32>>,
     /// Column-restricted generators of `Aut(C)`, each a permutation of
     /// `range(n)` in `apply_permutation` convention (`g[i]=j` means old
     /// column `i` becomes new column `j`).
@@ -241,14 +244,25 @@ fn build_sparsegraph(rref: &[BinVec], n: u32, scratch: &mut CanonScratch) -> usi
 /// dict). The bipartite-graph automorphism group on the right side is
 /// `Aut(C)` exactly; see `canon/bipartite.py` module docstring for the
 /// math.
-pub fn canon_info_native(rref: &[BinVec], n: u32) -> NativeCanonInfo {
+/// `get_canon = false` runs nauty with `getcanon = FALSE`: the canonical
+/// labelling (and the canonical-graph output buffers) are skipped — the
+/// measured 19–25 % canonical pass of the sparsenauty call — while
+/// generators, orbits and group order are produced as before. Callers that
+/// consume the labelling (tie-breaks, the legacy parent test, the direct
+/// Python API) must pass `true`.
+pub fn canon_info_native(rref: &[BinVec], n: u32, get_canon: bool) -> NativeCanonInfo {
     SCRATCH.with(|scratch_cell| {
         let mut scratch = scratch_cell.borrow_mut();
-        canon_info_native_impl(rref, n, &mut scratch)
+        canon_info_native_impl(rref, n, get_canon, &mut scratch)
     })
 }
 
-fn canon_info_native_impl(rref: &[BinVec], n: u32, scratch: &mut CanonScratch) -> NativeCanonInfo {
+fn canon_info_native_impl(
+    rref: &[BinVec],
+    n: u32,
+    get_canon: bool,
+    scratch: &mut CanonScratch,
+) -> NativeCanonInfo {
     let l: usize = 1usize << rref.len();
     let r: usize = n as usize;
     let total = l + r;
@@ -302,7 +316,7 @@ fn canon_info_native_impl(rref: &[BinVec], n: u32, scratch: &mut CanonScratch) -
     scratch.orbits.resize(total, 0);
 
     let mut options = optionblk::default_sparse();
-    options.getcanon = TRUE;
+    options.getcanon = if get_canon { TRUE } else { FALSE };
     options.defaultptn = FALSE;
     options.userautomproc = Some(auto_callback);
     // Q6 audit (`expert-review/05-nauty-traces-audit.md` Phase 1):
@@ -312,25 +326,36 @@ fn canon_info_native_impl(rref: &[BinVec], n: u32, scratch: &mut CanonScratch) -
     // Schreier bookkeeping outweighs the pruning. Knob closed.
     let mut stats = statsblk::default();
 
-    // Canonical-graph output: nauty needs an allocated sparsegraph to write
-    // into. We discard the contents — only the canonical labelling matters.
-    scratch.cg_v.clear();
-    scratch.cg_v.resize(total, 0);
-    scratch.cg_d.clear();
-    scratch.cg_d.resize(total, 0);
-    scratch.cg_e.clear();
-    scratch.cg_e.resize(nde, 0);
-    let mut canon_sg = sparsegraph {
-        nde: 0,
-        v: scratch.cg_v.as_mut_ptr(),
-        nv: total as c_int,
-        d: scratch.cg_d.as_mut_ptr(),
-        e: scratch.cg_e.as_mut_ptr(),
-        w: ptr::null_mut(),
-        vlen: scratch.cg_v.len(),
-        dlen: scratch.cg_d.len(),
-        elen: scratch.cg_e.len(),
-        wlen: 0,
+    // Canonical-graph output: with `getcanon = TRUE` nauty needs an
+    // allocated sparsegraph to write into (we discard the contents — only
+    // the canonical labelling matters). With FALSE the argument is ignored;
+    // pass null and skip the buffer (re)zeroing entirely (the sys crate's
+    // own getcanon=FALSE example passes null).
+    let mut canon_sg_storage = if get_canon {
+        scratch.cg_v.clear();
+        scratch.cg_v.resize(total, 0);
+        scratch.cg_d.clear();
+        scratch.cg_d.resize(total, 0);
+        scratch.cg_e.clear();
+        scratch.cg_e.resize(nde, 0);
+        Some(sparsegraph {
+            nde: 0,
+            v: scratch.cg_v.as_mut_ptr(),
+            nv: total as c_int,
+            d: scratch.cg_d.as_mut_ptr(),
+            e: scratch.cg_e.as_mut_ptr(),
+            w: ptr::null_mut(),
+            vlen: scratch.cg_v.len(),
+            dlen: scratch.cg_d.len(),
+            elen: scratch.cg_e.len(),
+            wlen: 0,
+        })
+    } else {
+        None
+    };
+    let canon_sg_ptr: *mut sparsegraph = match canon_sg_storage.as_mut() {
+        Some(sg) => sg,
+        None => ptr::null_mut(),
     };
 
     AUT_BUFFER.with(|cell| cell.borrow_mut().clear());
@@ -347,7 +372,7 @@ fn canon_info_native_impl(rref: &[BinVec], n: u32, scratch: &mut CanonScratch) -
             scratch.orbits.as_mut_ptr(),
             &mut options,
             &mut stats,
-            &mut canon_sg,
+            canon_sg_ptr,
         );
     }
 
@@ -373,16 +398,22 @@ fn canon_info_native_impl(rref: &[BinVec], n: u32, scratch: &mut CanonScratch) -
     // convention (and pynauty's `canonical_column_order` field).
     // Result Vec sizes are O(n) (~22 entries at N=22); keep these fresh-
     // allocated rather than scratch-reused — they're handed to Python and
-    // outlive the scratch borrow anyway.
-    let mut canonical_column_order = vec![0u32; r];
-    let mut new_col_counter = 0u32;
-    for new_index in 0..total {
-        let old_vertex = scratch.lab[new_index] as usize;
-        if old_vertex >= l {
-            canonical_column_order[old_vertex - l] = new_col_counter;
-            new_col_counter += 1;
+    // outlive the scratch borrow anyway. With `getcanon = FALSE` the final
+    // content of `lab` is unspecified — skip extraction.
+    let canonical_column_order = if get_canon {
+        let mut order = vec![0u32; r];
+        let mut new_col_counter = 0u32;
+        for new_index in 0..total {
+            let old_vertex = scratch.lab[new_index] as usize;
+            if old_vertex >= l {
+                order[old_vertex - l] = new_col_counter;
+                new_col_counter += 1;
+            }
         }
-    }
+        Some(order)
+    } else {
+        None
+    };
 
     let column_orbits: Vec<u32> = scratch.orbits[l..].iter().map(|&x| x as u32).collect();
     let aut_generators = AUT_BUFFER.with(|cell| std::mem::take(&mut *cell.borrow_mut()));
@@ -414,8 +445,8 @@ mod tests {
     fn zero_code_has_full_symmetric_group() {
         // Rank-0 code: bipartite graph has L=1 (only the zero codeword),
         // R=n, no edges. Aut is the full S_n on the right side.
-        let info = canon_info_native(&[], 4);
-        assert_eq!(info.canonical_column_order.len(), 4);
+        let info = canon_info_native(&[], 4, true);
+        assert_eq!(info.canonical_column_order.as_ref().unwrap().len(), 4);
         // 4! = 24
         assert_eq!(info.grpsize1.round() as u32, 24);
         assert_eq!(info.grpsize2, 0);
@@ -428,7 +459,7 @@ mod tests {
     fn repetition_code_n4_k1() {
         // Code spanned by 0b1111: one nonzero codeword of weight 4.
         // Aut is S_4 (any permutation preserves the all-ones codeword).
-        let info = canon_info_native(&[0b1111u64], 4);
+        let info = canon_info_native(&[0b1111u64], 4, true);
         assert_eq!(info.grpsize1.round() as u32, 24);
         assert_eq!(info.grpsize2, 0);
     }
@@ -448,7 +479,7 @@ mod tests {
             0xB4u64, // bits {2, 4, 5, 7}
             0x78u64, // bits {3, 4, 5, 6}
         ];
-        let info = canon_info_native(&basis, 8);
+        let info = canon_info_native(&basis, 8, true);
         let raw = info.grpsize1 * 10f64.powi(info.grpsize2);
         assert_eq!(raw.round() as u32, 1344);
     }
@@ -462,7 +493,7 @@ mod tests {
         // `canon_info_native`. Pinning this behaviour so a future tweak to
         // the bail threshold doesn't silently change it.
         let basis = vec![0xE1u64, 0xD2u64, 0xB4u64, 0x78u64];
-        assert!(canon_info_qd_native(&basis, 8).is_none());
+        assert!(canon_info_qd_native(&basis, 8, true).is_none());
     }
 
     #[test]
@@ -473,10 +504,10 @@ mod tests {
         // (no bail at |accum| == 2). Aut(C) is S_4 × S_4 ⋊ Z_2, order
         // (4!)^2 * 2 = 1152.
         let basis = vec![0x0Fu64, 0xF0u64];
-        let info = canon_info_qd_native(&basis, 8).expect("qd builder should succeed");
+        let info = canon_info_qd_native(&basis, 8, true).expect("qd builder should succeed");
         let raw = info.grpsize1 * 10f64.powi(info.grpsize2);
         // Cross-check against canon_info_native on the same code.
-        let native = canon_info_native(&basis, 8);
+        let native = canon_info_native(&basis, 8, true);
         let native_raw = native.grpsize1 * 10f64.powi(native.grpsize2);
         assert_eq!(raw.round() as u64, native_raw.round() as u64);
         // Orbit partition (as a set partition) must agree.
@@ -504,7 +535,7 @@ mod tests {
     fn qd_native_repetition_n4_k1() {
         // Code spanned by 0b1111: span of weight-4 stratum is the whole
         // 1-dim code. Aut should be S_4 (24).
-        let info = canon_info_qd_native(&[0b1111u64], 4).expect("qd builder should succeed");
+        let info = canon_info_qd_native(&[0b1111u64], 4, true).expect("qd builder should succeed");
         assert_eq!(info.grpsize1.round() as u32, 24);
         assert_eq!(info.grpsize2, 0);
     }
@@ -513,6 +544,6 @@ mod tests {
     fn qd_native_zero_code_falls_back() {
         // Rank-0 code: no nonzero codewords. Builder returns None so the
         // caller falls back to canon_info_native.
-        assert!(canon_info_qd_native(&[], 5).is_none());
+        assert!(canon_info_qd_native(&[], 5, true).is_none());
     }
 }

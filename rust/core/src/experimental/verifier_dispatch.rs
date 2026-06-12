@@ -57,11 +57,17 @@ pub(crate) fn try_dispatch(rref: &[BinVec], n: u32, bucket: &[BucketEntry]) -> A
         }
     }
     let (hit, hit_cf) = if let Some((cf, cf_info, pi)) = found {
-        let sigma_d = reconstruct_canonical_column_order(&cf_info.canonical_column_order, &pi);
+        let sigma_d = reconstruct_canonical_column_order(
+            cf_info
+                .canonical_column_order
+                .as_ref()
+                .expect("secondary-cache entries always carry the label"),
+            &pi,
+        );
         let gens_d = reconstruct_aut_generators(&cf_info.aut_generators, &pi);
         let orbits_d = reconstruct_column_orbits(&gens_d, n);
         let new_info = Rc::new(CachedInfo {
-            canonical_column_order: sigma_d,
+            canonical_column_order: Some(sigma_d),
             aut_generators: gens_d,
             aut_order: cf_info.aut_order,
             column_orbits: orbits_d,
