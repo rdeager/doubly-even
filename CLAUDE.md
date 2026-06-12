@@ -226,11 +226,15 @@ the section below.
 
 **Live numbers, phase shares, ranked next levers and the dead list are
 in `docs/bottlenecks.md` — that file, not this one, is the single
-source for "where the time goes".** Headline as of 2026-06-11: N=22
-seq 0.685 s / par 0.24 s; N=24 seq 6.26 s; N=26 seq 81.4 s / par
-9.70 s (t=24 d=4 cap=500K); N=27 par 63.0 s. Cloud records (pre-lever:
-N=28 61 min, N=29 12.32 h on c4a-72) are due a cheap re-run — N=29
-forecast 1.0–1.5 h.
+source for "where the time goes".** Headline as of 2026-06-12 (eval
+session, no levers shipped): N=22 seq 0.685 s / par 0.24 s; N=24 seq
+6.26 s; N=26 seq 81.4 s / par 9.70 s (t=24 d=4 cap=500K); N=27 par
+63.0 s. Cloud records (pre-lever: N=28 61 min, N=29 12.32 h on c4a-72)
+are due a cheap re-run — N=29 forecast 0.9–1.3 h. **Next-session entry
+point: `markdown/notes/speedup-eval-2026-06-12.md`** (§1 verdict: no
+local 2× exists — implement autom-only canon + counts-only output, then
+cloud; the GPT/Gemini solicitation brief is
+`markdown/notes/external-speedup-brief-2026-06-12.md`).
 
 Knob quick-reference (details in `docs/benchmarking.md` §3):
 

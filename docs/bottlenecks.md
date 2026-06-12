@@ -1,7 +1,8 @@
 # Current bottleneck profile (living document)
 
-> **As of:** 2026-06-11 (consolidation session: workspace restructure +
-> x86-64-v3 codegen flag, both shipped and re-benched) · **wheel:**
+> **As of:** 2026-06-12 (speedup-evaluation session: no levers shipped;
+> phase shares re-measured on the v3 wheel, canon phase decomposed,
+> build levers A/B'd dead, two new levers ranked) · **wheel:**
 > `--features parallel`, AVX2 build · **box:** 13700K-equivalent dev
 > container (24 logical, AVX2, no AVX-512), 62 GB.
 >
@@ -60,14 +61,34 @@ re-run is cheap): N=28 in 61 min on GCP c4a-standard-72 (~$3); N=29 in
 12.32 h on the same platform (~$35), 239,465,540 classes, certificate at
 [`results/n29.json`](results/n29.json).
 
-## 2. Phase shares (sequential N=26; shares from the pre-v3 85.6 s profile, shape unchanged at 81.4 s)
+## 2. Phase shares (sequential N=26; re-measured 2026-06-12 from the v3 wheel's own counters, wall 81.4 s)
 
 | phase | seconds | share | trend |
 |---|---:|---:|---|
-| canonicalisation (nauty) | 43.0 | 50.3 % | largest again; κ (kept-canon fraction) ≈ 0.039 and falling — a *better canonicaliser* is not the lever, fewer calls already won |
-| σ_Q candidate generation | 28.0 | 32.8 % | was ~41 % before the four-Russians BFS; residual is close to its scalar floor |
-| φ cascade (parent rule)  | 11.6 | 13.5 % | beaten down from 59.9 % by the sharing/amax/chain levers |
-| other (recursion, RREF, cache) | ~3 | ~3.4 % | |
+| canonicalisation (nauty) | 42.9 | 52.7 % | at a *double floor* — see the call arithmetic and the per-call split below |
+| σ_Q candidate generation | 26.9 | 33.0 % | was ~41 % before the four-Russians BFS; residual is close to its scalar floor |
+| φ cascade (parent rule)  | 8.9 (+1.7 ctx) | 10.9 % (+2.1 %) | beaten down from 59.9 % by the sharing/amax/chain levers; fastest-growing phase with N (×20 per 2-step vs ×10 for the others) |
+| other (recursion, RREF, cache) | ~1.1 | ~1.3 % | |
+
+**Canon-call arithmetic (2026-06-12).** At every N:
+`canon_calls + cache_hits = classes + tie_rejects`, exactly. calls/class =
+1.003 / 1.025 / 1.053 / 1.059 at N=18/22/24/26; tie-rejects are 5.6 % of
+calls at N=26. **The call count is at the one-call-per-class floor** —
+every emitted class needs Aut(C) for the mass certificate and the next
+level's candidate generation. Any further "call nauty less often" idea is
+dead by arithmetic (ceiling = the 5.6 % tie-reject slice ≈ 2.9 % e2e).
+
+**Inside the canon phase (per-call timers + sampling profiler,
+2026-06-12).** sparsenauty proper is **94 %** of the phase (75.7 µs/call
+mean at N=26); the wrapper (codeword collect, graph build, canonical
+extract, exact |Aut|) is 6 %. Whole-process self-time at N=24:
+`refine_sg` 21.4 % + `targetcell_sg` 12.5 % + `sortints` 4.5 % ⇒
+**partition refinement ≈ 38 % of total wall ≈ 81 % of nauty time**;
+automorphism verification only ~3.6 %. 81 % of sparsenauty time sits at
+ranks k=7–9 where graphs are small (|C_low| median 24–56); the per-call
+tail at k ≥ 10 is size-driven but low-volume. Consequences: PGO barely
+moves it (measured, §6), and refinement-side invariant hooks add work
+exactly where the time already goes (§6).
 
 Sub-phase splits:
 
@@ -80,12 +101,15 @@ Sub-phase splits:
 
 Character of each: the φ v-half sweep is **compute-bound** (no cache
 cliff anywhere — streams at 12 GB/s scalar, 21–22 GB/s under AVX2; its
-histogram half is scalar-bound at ~0.19 ns/elem and is the floor). The
-σ_Q orbit-min BFS is **compute-bound on image generation** (the
-seen-bitset is L2/L3-resident at L=20–23; probes are 2–5× cheaper than
-the old chained walk); the byte-table method left it ~L1-load-bound.
-Canon is sparsenauty at its measured algorithmic floor for this graph
-shape (~78 µs/call shape; per-call cost *falls* with N).
+histogram half is scalar-bound at ~0.19 ns/elem and is the floor;
+disassembly re-certified 2026-06-12: weights pass is vpshufb/vpsadbw
+AVX2, histogram is scalar increments). The σ_Q orbit-min BFS is
+**compute-bound on image generation** (the seen-bitset is L2/L3-resident
+at L=20–23; probes are 2–5× cheaper than the old chained walk); the
+byte-table method left it ~L1-load-bound, and a u64 comparison sort in
+the candidate path is a further measured 5.5 % of N=24 wall (lever 5,
+§4). Canon is sparsenauty at its measured algorithmic floor for this
+graph shape (~76 µs/call at N=26; per-call cost *falls* with N).
 
 ## 3. Parallel state (the seeder Amdahl wall)
 
@@ -107,22 +131,47 @@ saturated workers); an adaptive workers-starved gate was measured dead
 parallel lever is **fanning out across the ~200 independent per-parent
 k=3 σ_Q calls** (~20–30 ms each), not parallelising inside one BFS.
 
-## 4. Ranked next levers
+## 4. Ranked next levers (re-ranked 2026-06-12; ceilings from §2 shares)
 
-1. ~~x86-64-v3 codegen flag~~ — **SHIPPED 2026-06-11**
-   (`rust/.cargo/config.toml`; 1.01–1.05× sequential on a cool box,
-   decisions bit-identical; aarch64 unaffected, NEON is baseline).
+1. **Autom-only canon on non-tie accepts** (NEW, found 2026-06-12 via the
+   per-call decomposition): call sparsenauty with `getcanon=FALSE` on the
+   80.7 % of canon calls whose canonical labelling no decision consumes —
+   the φ outcome (accept-unique vs tie) is known *before* `canon_info` is
+   invoked; only ties feed the labelling into `tie_break_parent`. The
+   canonical pass is 19–25 % of the sparsenauty call (synthetic A−B;
+   re-measure on real graphs first). Est. **1.06–1.09× e2e** at N=26 seq,
+   more at N ≥ 28 where canon is ~68 % of forecast core-hours. Zero
+   decision risk by construction (same search tree, same generators /
+   orbits / |Aut|); cache entries lacking the labelling recompute on a
+   tie-hit (hit rate 0.005 %). ~1 day.
 2. **N ≥ 28 cloud re-run** — the highest-value datapoint. N=29
-   count-anchored forecast: **1.0–1.5 h on c4a-72** (~$3–5) vs the
-   12.32 h actually paid pre-levers; the forecast predates the codegen
-   flag and only gets safer. Re-verify d on the first N ≥ 28 run.
-3. **Parallel k=3 σ_Q fan-out** (across calls, not within a BFS) — the
-   measured seeder lever at N=26/27; see §3.
+   count-anchored forecast: **0.9–1.3 h on c4a-72** (~$3–5) vs the
+   12.32 h actually paid pre-levers. Re-verify d on the first N ≥ 28 run;
+   A/B the aarch64 `target-cpu=neoverse-v2` pin (SVE2) while there.
+3. **Counts-only compact output mode** — required for the N=30 run
+   (output budget 100–200 MB; no per-class stream): fold per-rank
+   {classes, mass (bigint), |Aut| histogram} in the driver, emit one JSON.
+   Composes with lever 1 (counts mode needs no canonical labelling on any
+   accept). ~1–2 days.
 4. **Dense-level direction-switch BFS** (sequential σ_Q candidate):
    blind-mark + extract on dense BFS levels (Beamer-style bottom-up).
    Portable, exact, ~1.15–1.25× BFS-local ≈ 1.04–1.06× end-to-end,
    ~a day in `orbit.rs`. The only surviving σ_Q idea from the SIMD
    investigation; stacks with the flag.
+5. **Radix sort for the σ_Q lift sort** (NEW): 5.5 % of N=24 wall is
+   Rust's comparison sort on u64 keys inside the orbit-minima path
+   (sampling profile, 95.6 % attributed). LSD radix on u64 at these sizes
+   is typically 2–4×. Est. ~1.03–1.04× e2e, portable, exact. ~0.5–1 day.
+6. **Parallel k=3 σ_Q fan-out** (across calls, not within a BFS) — the
+   measured seeder lever, but **desktop-parallel only**: N ≥ 27 is
+   worker-throughput-bound (§3), so its cloud N ≥ 28 value is ~nil.
+   Demoted accordingly.
+
+Realistic stack of 1+4+5 ≈ **1.15–1.2× sequential**; no remaining lever
+family reaches 2× locally (the call-count arithmetic in §2 closed the
+last one). The 2×-class ideas left are research-grade: incremental
+Aut-group transfer along the augmentation tree (replacing nauty on
+accepts entirely) and GPU canonicalisation — both parked.
 
 ## 5. Scaling forecast N=28 → 32
 
@@ -135,16 +184,19 @@ than geometric wall fits; use only same-wheel same-session label globs
 | target | forecast | confidence / blocker |
 |---|---|---|
 | N=28 | well under the 61-min record; single c4a-72 | re-run is routine |
-| N=29 | 1.0–1.5 h on c4a-72 | count-anchored against the true 87.2 B pre-lever candidate count |
-| N=30 | streaming + ≥256 GB RAM or a small cluster; ~5–20 h on ~10× c4a-72 | cluster coordinator is the unshipped piece ([`cluster-deployment.md`](cluster-deployment.md)) |
-| N=31 | between N=30 and N=32; no fit run yet | candidate-count growth is the unknown |
-| N=32 | **floor ~63 core-h** single-thread by geometric carry — but the same method gave 475 and "174" on earlier data vintages; treat every figure as a floor, not an estimate | cluster territory; within reach post-levers. The k ≤ 4 slice alone has a separate published path (column-multiset engine, `algorithm.md`) |
+| N=29 | 0.9–1.3 h on c4a-72 (41 core-h: kept-canon 28, φ 9, σ_Q 4) | count-anchored, re-fit 2026-06-12 on the v3 glob |
+| N=30 | **single Axion box, counts-only output**: ~250 ± 100 core-h (×6/step from N=29) ⇒ ~4–6 h on a 96-core c4a, ~$20–50 | needs the counts-only mode (§4 lever 3); the old "streaming + cluster, ~3 TB" plan is obsolete — the output budget is now 100–200 MB (per-rank table + certificate) |
+| N=31 | ~×6 again ⇒ ~1,500 core-h; feasible single-box over days, or a small cluster | candidate-count growth is the unknown |
+| N=32 | **floor ~44 core-h** single-thread by geometric carry (re-fit 2026-06-12; earlier vintages gave 63/475/174 — the method is a floor, not an estimate; count-anchored ×6/step says ~9,000 core-h) | cluster coordinator + the column-multiset engine for k ≤ 4 (σ_Q BFS universe/time explodes at low rank); re-anchor after the first post-lever cloud datapoint |
 
-A >10× algorithmic speedup is banked since the N=29 run; machines with
-~4× the cores of c4a-72 exist (c4-288-metal, r8g.metal-48xl) — that
-product is the credible path to N=30/31 on a single machine. N=32
-planning should wait for a post-lever cloud datapoint to re-anchor the
-fit.
+A >10× algorithmic speedup is banked since the N=29 run. Two structural
+notes from the 2026-06-12 re-fit: **φ grows ~×20 per 2-step of N vs ~×10
+for canon and σ_Q** — at N ≥ 30 the parent-rule sweep overtakes canon as
+the dominant phase, and φ is ~47 % of the N=32 floor, so the histogram
+scalar floor (not canon) is the long-term algorithmic wall. φ
+L1-overflow at N=32 is only 4 % of φ time (the L1-fit idea stays dead
+even at scale). N=32 planning should wait for a post-lever cloud
+datapoint to re-anchor the fit.
 
 ## 6. Measured dead — do not revisit without new evidence
 
@@ -164,6 +216,12 @@ fit.
 | Shared cross-worker canon LRU | intra-worker hit rate 3.13 % caps the win at ~4 %, under the engineering bar | 2026-05-23 |
 | Adaptive per-seed frontier depth | +43–56 % regression at N=24 (seed-set explosion + channel backpressure) | 2026-05-23 |
 | Class-fingerprint caches / cheap equivalence rejectors (whole family) | per-probe cost ≈ per-call cost; collision blocklists presuppose the enumeration | 2026-05-17/18, closed permanently |
+| Any further "fewer canon calls" idea | call count is exactly classes + tie-rejects (one call per emitted class is the floor — Aut is needed per class); ceiling = the 5.6 % tie-reject slice ≈ 2.9 % e2e | 2026-06-12, closed by arithmetic |
+| Fat LTO | 1.004×/0.997× at N=22/24 — noise (thin-LTO + codegen-units=1 already ship) | 2026-06-12 |
+| PGO on the nauty C side (gcc, trained N=22/24) | 1.012–1.016× (N=22/24/26), decisions bit-identical — below the ~5 % bar; refinement cost is data-dependent pointer-chasing, not mispredicts | 2026-06-12 |
+| Rust-side PGO | blocked locally (no llvm-profdata for rustc's LLVM); ceiling is the non-nauty 45 % in branch-light loops, expected ≲2 % | 2026-06-12 (cloud-idle curiosity at best) |
+| Refinement-side nauty invariants (`distances_sg` etc.) | partition refinement is already 81 % of nauty time — invariants add per-node work exactly there; same failure mode as the measured refinement-invariant hook (+259 %) | 2026-06-12, dead on paper |
+| Tie-rate reduction as a standalone lever | tie-*accepts* still need their per-class call; only tie-rejects (5.6 % of calls) are removable ≈ 2.9 % e2e, and it would be decision-changing (audit-gated) | 2026-06-12 |
 
 The one *category* distinction worth remembering: every "cheaper
 rejector bolted onto the old parent rule" died of per-probe cost; the

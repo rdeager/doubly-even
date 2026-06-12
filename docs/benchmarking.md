@@ -210,6 +210,31 @@ samply record -r 1000 -- .venv/bin/python scripts/bench.py --label prof --N 24
 `nauty-Traces-sys` to take effect.) samply 0.13.1 verified end-to-end in
 this container.
 
+Traps (hit 2026-06-12 — all three will silently break this recipe):
+
+- `rust/pyproject.toml` sets `[tool.maturin] strip = true`, which strips
+  even `--profile profiling` wheels (symbol count 0, no attribution).
+  Workaround: `cargo build --profile profiling --features parallel` from
+  `rust/`, then copy `target/profiling/libdoubly_even_kernel.so` over the
+  installed module `.so` (verify import + `nm | wc -l` > 0 after).
+- An env `RUSTFLAGS` **replaces** (does not merge with) the
+  `rust/.cargo/config.toml` rustflags — the recipe above as written drops
+  the v3 flag. Use
+  `RUSTFLAGS="-C target-cpu=x86-64-v3 -C force-frame-pointers=yes"` and
+  re-verify `kernel_target_features()` afterwards.
+- `perf_event_paranoid` defaults to **4** on this host (the container
+  holds no CAP_PERFMON); ask the host to set it to 1 when a profiling
+  session is planned — don't assume the grant persists across spawns.
+
+PGO experiments (closed 2026-06-12, see `bottlenecks.md` §6 — recipe kept
+for reproducibility): instrumented arm needs
+`RUSTFLAGS="-C target-cpu=x86-64-v3 -C link-arg=-lgcov" CFLAGS="-fprofile-generate"`;
+the profile-use arm must use **identical RUSTFLAGS** (the
+nauty-Traces-sys OUT_DIR hash includes them — different flags ⇒ gcc
+silently finds no `.gcda`; check the `.gcda` files are present in the
+out-dir the rebuild actually used) plus
+`CFLAGS="-fprofile-use -fprofile-correction -Wno-coverage-mismatch"`.
+
 ## 9. Scaling extrapolation
 
 `scripts/experimental/post_d15_scaling_fit.py --glob '<label-prefix>'
