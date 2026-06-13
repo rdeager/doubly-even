@@ -13,8 +13,15 @@
 //! sampled split) and the aimed SIMD shapes are AVX2 Harley-Seal /
 //! AVX-512 VPOPCNTDQ / NEON cnt+addv. Reported per k+1:
 //!
-//!   pop_ns/elem    popcount-only loop (no histogram)
+//!   pop_ns/elem    popcount-only loop (no weights store, no histogram)
+//!   nohist_ns/el   weights store, NO histogram (2026-06-13 SVE2-ablation
+//!                  arm): exactly the production shape minus the counts4
+//!                  pass. `fused − nohist` is therefore the ceiling of ANY
+//!                  histogram trick on ANY architecture — an SVE2
+//!                  HISTCNT/TBL kernel still does the weights pass and
+//!                  store, it only makes the histogram (at best) free.
 //!   fused_ns/elem  production shape (weights store + histogram)
+//!   hist_ns/el     fused − nohist (the prize)
 //!   GB/s           effective traffic in fused mode (9 B/elem: 8 read
 //!                  + 1 written) — compare against ~DRAM/L2 streams to
 //!                  see how far from the bandwidth roof the scalar
@@ -65,6 +72,22 @@ fn vhalf_fused(cwords: &[u64], v: u64, wt_v: &mut Vec<u8>) -> [u32; 65] {
     counts_v
 }
 
+/// Weights-store variant WITHOUT the histogram pass: the production
+/// phase-0 minus `counts4`. The store cannot be elided (`wt_v` escapes
+/// through the `&mut` parameter and the function is never inlined), so
+/// `vhalf_fused − vhalf_weights_nohist` isolates the histogram pass —
+/// the upper bound of the SVE2 in-register-histogram idea.
+#[inline(never)]
+fn vhalf_weights_nohist(cwords: &[u64], v: u64, wt_v: &mut Vec<u8>) -> u8 {
+    let h = cwords.len();
+    wt_v.clear();
+    wt_v.resize(h, 0);
+    for (wt, &cw) in wt_v.iter_mut().zip(cwords.iter()) {
+        *wt = (cw ^ v).count_ones() as u8;
+    }
+    wt_v[h - 1]
+}
+
 /// Popcount-only variant (no weights store, no histogram): the floor a
 /// pure popcount SIMD kernel could reach if the histogram were free.
 #[inline(never)]
@@ -93,8 +116,16 @@ fn main() {
     println!("# vhalf_sweep: phi phase-0 XOR+popcount+histogram (the SIMD target)");
     println!("# ns_per_cycle = {:.4}, N = {n_bits}", ns_per_cycle());
     println!(
-        "{:>4} {:>9} {:>12} {:>12} {:>14} {:>14} {:>8}",
-        "k+1", "tbl_KB", "pop_ns/el", "fused_ns/el", "fused_cold/el", "hot_GB/s", "ratio"
+        "{:>4} {:>9} {:>12} {:>13} {:>12} {:>11} {:>14} {:>14} {:>8}",
+        "k+1",
+        "tbl_KB",
+        "pop_ns/el",
+        "nohist_ns/el",
+        "fused_ns/el",
+        "hist_ns/el",
+        "fused_cold/el",
+        "hot_GB/s",
+        "ratio"
     );
 
     let mut rng = XorShift64::new(0x5EED_F00D);
@@ -116,6 +147,15 @@ fn main() {
             }
         }
         let pop_cyc = mono_cycles().wrapping_sub(c0) / (iters * 64);
+
+        // weights-store, no histogram, hot
+        let c0 = mono_cycles();
+        for _ in 0..iters {
+            for &v in &cands {
+                black_box(vhalf_weights_nohist(&cwords, black_box(v), &mut wt_v));
+            }
+        }
+        let nohist_cyc = mono_cycles().wrapping_sub(c0) / (iters * 64);
 
         // fused, hot
         let c0 = mono_cycles();
@@ -144,16 +184,19 @@ fn main() {
         cold_cyc = cold_cyc.saturating_sub(evict_cyc);
 
         let pop_ns = cycles_to_ns(pop_cyc) / h as f64;
+        let nohist_ns = cycles_to_ns(nohist_cyc) / h as f64;
         let fused_ns = cycles_to_ns(fused_cyc) / h as f64;
         let cold_ns = cycles_to_ns(cold_cyc) / h as f64;
         // 8 B read (cwords) + 1 B written (wt_v) per element.
         let gbs = 9.0 / fused_ns;
         println!(
-            "{:>4} {:>9.1} {:>12.3} {:>12.3} {:>14.3} {:>14.2} {:>8.2}",
+            "{:>4} {:>9.1} {:>12.3} {:>13.3} {:>12.3} {:>11.3} {:>14.3} {:>14.2} {:>8.2}",
             kp1,
             (h * 8) as f64 / 1024.0,
             pop_ns,
+            nohist_ns,
             fused_ns,
+            fused_ns - nohist_ns,
             cold_ns,
             gbs,
             fused_ns / pop_ns.max(1e-9),
