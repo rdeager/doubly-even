@@ -7,6 +7,12 @@
 #   scripts/install-kernel.sh                   # baseline
 #   scripts/install-kernel.sh parallel          # D13 parallel
 #   scripts/install-kernel.sh parallel,equivalence_verifier
+#   scripts/install-kernel.sh parallel --target-cpu neoverse-v2
+#
+# --target-cpu <cpu> overrides the codegen CPU via RUSTFLAGS for this
+# build only (the cloud-day aarch64 pin A/B — eval §3 row 10). NOTE:
+# RUSTFLAGS takes precedence over rust/.cargo/config.toml, so on x86 an
+# override REPLACES the x86-64-v3 default rather than adding to it.
 #
 # Run from /workspace/src/.
 
@@ -15,6 +21,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 FEATURES="${1:-}"
+TARGET_CPU=""
+if [[ "${1:-}" == "--target-cpu" ]]; then
+    FEATURES=""
+    TARGET_CPU="${2:?--target-cpu needs a value}"
+elif [[ "${2:-}" == "--target-cpu" ]]; then
+    TARGET_CPU="${3:?--target-cpu needs a value}"
+fi
 MATURIN_ARGS=(build --release -m Cargo.toml)
 if [[ -n "$FEATURES" ]]; then
     MATURIN_ARGS+=(--features "$FEATURES")
@@ -24,7 +37,12 @@ fi
 # per-target rustflags in rust/.cargo/config.toml (x86-64-v3) are silently
 # ignored when maturin runs from the repo root. The avx2 probe below is
 # the backstop.
-(cd rust && ../.venv/bin/maturin "${MATURIN_ARGS[@]}")
+if [[ -n "$TARGET_CPU" ]]; then
+    echo "target-cpu override: $TARGET_CPU (replaces .cargo/config.toml rustflags)"
+    (cd rust && RUSTFLAGS="-C target-cpu=$TARGET_CPU" ../.venv/bin/maturin "${MATURIN_ARGS[@]}")
+else
+    (cd rust && ../.venv/bin/maturin "${MATURIN_ARGS[@]}")
+fi
 
 WHEEL=$(ls -t rust/target/wheels/doubly_even_kernel-*.whl | head -1)
 # uv-managed venvs ship without pip; `uv pip` targets ./.venv from the repo

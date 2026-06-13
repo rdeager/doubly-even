@@ -26,6 +26,14 @@
 # Honoured env vars:
 #   REPO_DIR    target clone directory (default: $HOME/doubly-even)
 #   PY_VERSION  python version to install (default: 3.12)
+#
+# --features <set> is forwarded to scripts/install-kernel.sh (default:
+# parallel). The re-profile cloud day wants `--features
+# parallel,parallel_profiling` (per-seed enqueue timings for the
+# seeder-timeline / tail-imbalance analysis that scripts/gcp-profile.sh
+# drives), optionally also `,phase_timers` for sub-phase splits;
+# production runs keep the plain `parallel` default (profiling adds
+# per-seed bookkeeping overhead — never run a production N>=30 with it).
 
 set -euo pipefail
 
@@ -33,14 +41,16 @@ REPO_URL=""
 BRANCH="main"
 REPO_DIR="${REPO_DIR:-$HOME/doubly-even}"
 PY_VERSION="${PY_VERSION:-3.12}"
+KERNEL_FEATURES="parallel"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --repo)   REPO_URL="$2"; shift 2 ;;
-        --branch) BRANCH="$2"; shift 2 ;;
-        --dir)    REPO_DIR="$2"; shift 2 ;;
+        --repo)     REPO_URL="$2"; shift 2 ;;
+        --branch)   BRANCH="$2"; shift 2 ;;
+        --dir)      REPO_DIR="$2"; shift 2 ;;
+        --features) KERNEL_FEATURES="$2"; shift 2 ;;
         -h|--help)
-            sed -n '2,30p' "$0"
+            sed -n '2,34p' "$0"
             exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 2 ;;
     esac
@@ -53,7 +63,7 @@ sudo apt-get update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     build-essential pkg-config git ca-certificates curl \
     "python${PY_VERSION}" "python${PY_VERSION}-venv" "python${PY_VERSION}-dev" \
-    libclang-dev clang
+    libclang-dev clang sysstat   # sysstat -> mpstat, used by scripts/gcp-profile.sh
 
 log "Step 2/9 — rustup (stable)"
 if ! command -v cargo >/dev/null 2>&1; then
@@ -99,8 +109,8 @@ if ! ldconfig -p | grep -q libclang; then
     echo "  using fallback LIBCLANG_PATH=$LIBCLANG_PATH"
 fi
 
-log "Step 7/9 — build & install kernel (parallel feature)"
-scripts/install-kernel.sh parallel
+log "Step 7/9 — build & install kernel (features: $KERNEL_FEATURES)"
+scripts/install-kernel.sh "$KERNEL_FEATURES"
 
 log "Step 8/9 — smoke pytest (n12 or n14)"
 .venv/bin/python -m pytest -x -q -k "n12 or n14"

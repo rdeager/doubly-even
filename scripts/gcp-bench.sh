@@ -5,11 +5,12 @@
 # without edits. The three runs (each writes its own JSON):
 #   A — seq baseline:  t=1                    — sanity floor + per-call cost
 #   B — half-sub:      t=nproc/2,  depth=4
-#   C — full-sub:      t=nproc,    depth=5
+#   C — full-sub:      t=nproc,    depth=4
 #
-# On c4-24 Runs B and C collapse to the same thread count (12 vs 24) — that
-# still gives a depth-4-vs-depth-5 comparison at the platform-fully-
-# subscribed configuration. On c4-48 they spread into half/full subscription.
+# Both parallel runs use depth=4: d=4 beats d=5 at every benched N since
+# the D16/D17 levers (the deeper cut resurrects the serial-seeder
+# ceiling — docs/bottlenecks.md §3). B-vs-C is then a clean half/full
+# subscription comparison; on c4-24 they collapse to 12t vs 24t.
 #
 # Cap stays at 500K for all three (the value that survives N=26 at 20
 # workers on the 13700K; per-worker cap × threads ≈ memory ceiling). On
@@ -35,6 +36,14 @@ HALF_CORES=$(( LOGICAL_CORES / 2 ))
 if (( HALF_CORES < 1 )); then HALF_CORES=1; fi
 CPU_MODEL=$(awk -F: '/^model name/ {print $2; exit}' /proc/cpuinfo | sed 's/^ *//')
 MEM_GB=$(awk '/MemTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo)
+# Provenance: codegen features of the installed wheel + the effective
+# values of the decision-bearing knobs (defaults shown when unset), so
+# A/B JSONs are attributable without guessing.
+KERNEL_TARGET=$(.venv/bin/python -c \
+    'import doubly_even_kernel as k; print(k.kernel_target_features())' 2>/dev/null \
+    || echo "kernel not importable")
+PARENT_RULE="${DOUBLY_EVEN_PARENT_RULE:-coset-spectrum (default)}"
+CANON_LABELLING="${DOUBLY_EVEN_CANON_LABELLING:-autom-only (default)}"
 
 cat <<EOF
 == GCP shakedown bench ==
@@ -44,8 +53,11 @@ cat <<EOF
   cpu:             $CPU_MODEL
   cores:           $LOGICAL_CORES logical
   memory:          ${MEM_GB} GiB
+  kernel target:   $KERNEL_TARGET
+  parent rule:     $PARENT_RULE
+  canon labelling: $CANON_LABELLING
   results dir:     scripts/bench-results/
-  thread plan:     A=1, B=$HALF_CORES (d=4), C=$LOGICAL_CORES (d=5)
+  thread plan:     A=1, B=$HALF_CORES (d=4), C=$LOGICAL_CORES (d=4)
 
 EOF
 
@@ -58,8 +70,8 @@ DOUBLY_EVEN_THREADS=1 \
     scripts/run-bench.sh --label "A-seq-${LABEL_SUFFIX}" --N 16,24
 
 # --- Run B: half-subscribed parallel ---------------------------------------
-# t = nproc/2, depth=4. On c4-48 this is 24t (matches the 13700K V5 N=22
-# sweet spot); on c4-24 this is 12t (under-subscribed, gives a clean
+# t = nproc/2, depth=4. On c4-48 this is 24t (the 13700K full-logical
+# count); on c4-24 this is 12t (under-subscribed, gives a clean
 # scaling baseline against Run C's full subscription).
 echo ">>> Run B — half-sub (t=$HALF_CORES, depth=4) — N=16,24,26"
 DOUBLY_EVEN_THREADS=$HALF_CORES \
@@ -67,14 +79,15 @@ DOUBLY_EVEN_THREADS=$HALF_CORES \
     DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
     scripts/run-bench.sh --label "B-t${HALF_CORES}-d4-${LABEL_SUFFIX}" --N 16,24,26
 
-# --- Run C: fully-subscribed parallel + deeper cut -------------------------
-# t = nproc, depth=5. Matches the 13700K V5 finding for N≥24. N=16
-# dropped (wall dominated by scheduling overhead at small N).
-echo ">>> Run C — full-sub (t=$LOGICAL_CORES, depth=5) — N=24,26"
+# --- Run C: fully-subscribed parallel ---------------------------------------
+# t = nproc, depth=4 (d=4 best at every benched N post-D16/D17; the old
+# d=5 full-sub arm is superseded). N=16 dropped (wall dominated by
+# scheduling overhead at small N).
+echo ">>> Run C — full-sub (t=$LOGICAL_CORES, depth=4) — N=24,26"
 DOUBLY_EVEN_THREADS=$LOGICAL_CORES \
-    DOUBLY_EVEN_FRONTIER_DEPTH=5 \
+    DOUBLY_EVEN_FRONTIER_DEPTH=4 \
     DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
-    scripts/run-bench.sh --label "C-t${LOGICAL_CORES}-d5-${LABEL_SUFFIX}" --N 24,26
+    scripts/run-bench.sh --label "C-t${LOGICAL_CORES}-d4-${LABEL_SUFFIX}" --N 24,26
 
 echo
 echo "== Done. JSON files:"
