@@ -28,6 +28,7 @@
 //!   the in-Rust mass gate.
 
 mod cache;
+mod decomp;
 mod drivers;
 mod stats;
 mod worker;
@@ -40,13 +41,15 @@ compile_error!(
 
 pub use cache::LabelMode;
 pub use drivers::{
-    enumerate_doubly_even, enumerate_doubly_even_streaming, enumerate_doubly_even_with_opts,
-    enumerate_doubly_even_with_rule, StreamingResult,
+    enumerate_doubly_even, enumerate_doubly_even_counts, enumerate_doubly_even_streaming,
+    enumerate_doubly_even_with_opts, enumerate_doubly_even_with_rule, CountsResult,
+    StreamingResult,
 };
 #[cfg(feature = "parallel")]
 pub use drivers::{
-    enumerate_doubly_even_parallel, enumerate_doubly_even_parallel_streaming,
-    enumerate_doubly_even_parallel_with_rule, enumerate_doubly_even_parallel_with_seeder,
+    enumerate_doubly_even_parallel, enumerate_doubly_even_parallel_counts,
+    enumerate_doubly_even_parallel_streaming, enumerate_doubly_even_parallel_with_rule,
+    enumerate_doubly_even_parallel_with_seeder, ProgressSink,
 };
 pub use stats::{KERNEL_STATS_LAYOUT, PER_K_STATS_ROWS};
 pub use worker::EnumeratedRaw;

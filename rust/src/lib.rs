@@ -340,6 +340,124 @@ fn py_enumerate_doubly_even_streaming(
     Ok(dict.into())
 }
 
+/// Counts-only variant for the N >= 30 frontier (eval plan §5): no
+/// per-class records anywhere — the result is per-rank
+/// {classes, Σ N!/|Aut|, |Aut| histogram} plus the usual stats, with the
+/// in-Rust mass gate as the correctness certificate.
+///
+/// `quota` is a list of DECIMAL STRINGS: σ(30, k) reaches 2^136, which
+/// overflows both u128 and pyo3's int conversion — the 256-bit mass
+/// spine parses these directly. `factorial_n` still fits u128 through
+/// N = 34.
+///
+/// `progress_path` (optional): the kernel rewrites this JSON atomically
+/// every `progress_interval_s` seconds with per-rank [mass, quota]
+/// decimal-string pairs — the live source for `dec progress`.
+#[pyfunction]
+#[pyo3(name = "enumerate_doubly_even_counts",
+       signature = (n, max_k, quota, factorial_n, num_threads=None,
+                    progress_path=None, progress_interval_s=30))]
+#[allow(clippy::too_many_arguments)]
+fn py_enumerate_doubly_even_counts(
+    py: Python<'_>,
+    n: u32,
+    max_k: u32,
+    quota: Vec<String>,
+    factorial_n: u128,
+    num_threads: Option<u32>,
+    progress_path: Option<std::path::PathBuf>,
+    progress_interval_s: u64,
+) -> PyResult<pyo3::Py<pyo3::types::PyDict>> {
+    use doubly_even_core::u256::U256;
+    use pyo3::types::PyDict;
+    if n > types::MAX_N {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "n = {n} exceeds MAX_N = {}; the u64 kernel supports N up to 64",
+            types::MAX_N,
+        )));
+    }
+    let quota: Vec<U256> = quota
+        .iter()
+        .map(|s| {
+            U256::from_decimal(s).map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("bad quota entry: {e}"))
+            })
+        })
+        .collect::<PyResult<_>>()?;
+
+    #[cfg(feature = "parallel")]
+    let progress = progress_path.map(|path| enumerate::ProgressSink {
+        path,
+        interval_s: progress_interval_s,
+    });
+    #[cfg(not(feature = "parallel"))]
+    if progress_path.is_some() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "progress_path requires the kernel to be built with --features parallel \
+             (the watcher thread + shared tracker live there)",
+        ));
+    }
+    #[cfg(not(feature = "parallel"))]
+    let _ = progress_interval_s;
+
+    let nt = num_threads.unwrap_or(0);
+    let result = if nt >= 2 {
+        #[cfg(feature = "parallel")]
+        {
+            py.allow_threads(|| {
+                enumerate::enumerate_doubly_even_parallel_counts(
+                    n,
+                    max_k,
+                    quota,
+                    factorial_n,
+                    nt as usize,
+                    progress,
+                )
+            })
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            let _ = py;
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "num_threads >= 2 requires the kernel to be built with \
+                 --features parallel (D13 outer-DFS parallelism)",
+            ));
+        }
+    } else {
+        #[cfg(feature = "parallel")]
+        {
+            py.allow_threads(|| {
+                enumerate::enumerate_doubly_even_counts(n, max_k, quota, factorial_n, progress)
+            })
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            py.allow_threads(|| {
+                enumerate::enumerate_doubly_even_counts(n, max_k, quota, factorial_n)
+            })
+        }
+    };
+
+    let dict = PyDict::new(py);
+    let mass_strs: Vec<String> = result.mass.iter().map(|m| m.to_string()).collect();
+    dict.set_item("mass", mass_strs)?;
+    dict.set_item("classes", result.classes)?;
+    // |Aut| histogram per rank: [(aut_order_decimal, count), ...] ascending.
+    let hist: Vec<Vec<(String, u64)>> = result
+        .aut_hist
+        .iter()
+        .map(|h| h.iter().map(|&(aut, c)| (aut.to_string(), c)).collect())
+        .collect();
+    dict.set_item("aut_hist", hist)?;
+    let stats_strs: Vec<String> = result.stats.iter().map(|s| s.to_string()).collect();
+    dict.set_item("stats", stats_strs)?;
+    dict.set_item("per_k_stats", result.per_k_stats)?;
+    dict.set_item("n", n)?;
+    dict.set_item("max_k", max_k)?;
+    dict.set_item("num_threads", nt)?;
+    Ok(dict.into())
+}
+
 /// Names of the kernel stats vector / per-rank rows, in kernel order.
 /// The Rust consts in `core::enumerate::stats` are the single source of
 /// truth; `scripts/bench.py` consumes this at import (with a frozen
@@ -391,6 +509,7 @@ fn doubly_even_kernel(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_subspace_in_orbit, m)?)?;
     m.add_function(wrap_pyfunction!(py_enumerate_doubly_even, m)?)?;
     m.add_function(wrap_pyfunction!(py_enumerate_doubly_even_streaming, m)?)?;
+    m.add_function(wrap_pyfunction!(py_enumerate_doubly_even_counts, m)?)?;
     m.add_function(wrap_pyfunction!(py_kernel_build_info, m)?)?;
     m.add_function(wrap_pyfunction!(py_kernel_stats_layout, m)?)?;
     m.add_function(wrap_pyfunction!(py_kernel_target_features, m)?)?;

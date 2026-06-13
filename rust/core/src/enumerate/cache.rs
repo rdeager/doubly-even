@@ -410,7 +410,7 @@ mod tests {
     use crate::parent_rule::ParentRule;
 
     fn fresh_worker(label_mode: LabelMode) -> WorkerState {
-        let quota = vec![u128::MAX; 5];
+        let quota = vec![crate::u256::U256::MAX; 5];
         let mut w = WorkerState::new(
             8,
             4,

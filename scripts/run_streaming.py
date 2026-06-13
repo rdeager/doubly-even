@@ -6,15 +6,18 @@ runs where the in-memory Vec<EnumeratedRaw> output (used by
 Usage::
 
     # Local N=24 dry-run (small enough that bench.py also works):
-    DOUBLY_EVEN_THREADS=20 DOUBLY_EVEN_FRONTIER_DEPTH=5 \\
+    DOUBLY_EVEN_THREADS=20 DOUBLY_EVEN_FRONTIER_DEPTH=4 \\
         uv run python scripts/run_streaming.py --N 24 \\
         --output-dir /tmp/n24-stream
 
     # GCP c4a-standard-72 (Axion ARM) N=29:
-    DOUBLY_EVEN_THREADS=72 DOUBLY_EVEN_FRONTIER_DEPTH=5 \\
+    DOUBLY_EVEN_THREADS=72 DOUBLY_EVEN_FRONTIER_DEPTH=4 \\
         DOUBLY_EVEN_CANON_CACHE_CAP=300000 \\
         uv run python scripts/run_streaming.py --N 29 \\
         --output-dir /mnt/scratch/n29
+
+(depth=4 beats depth=5 at every benched N since the 2026-06-10 levers;
+see docs/bottlenecks.md §3.)
 
 The kernel's in-Rust mass-formula gate runs before this script returns
 — any mismatch is a fatal PanicException. After the kernel returns,
@@ -101,6 +104,20 @@ def main() -> int:
     nt = _parse_thread_env(os.environ.get("DOUBLY_EVEN_THREADS")) or 0
     frontier_depth = os.environ.get("DOUBLY_EVEN_FRONTIER_DEPTH", "default")
     canon_cap = os.environ.get("DOUBLY_EVEN_CANON_CACHE_CAP", "default (500000)")
+    # Decision-bearing knobs: recorded so cloud A/Bs are
+    # attributable from stats.json alone. "default" = the env var is
+    # unset and the kernel uses its built-in default.
+    knobs = {
+        var: os.environ.get(var, "default")
+        for var in (
+            "DOUBLY_EVEN_PARENT_RULE",
+            "DOUBLY_EVEN_CANON_LABELLING",
+            "DOUBLY_EVEN_PHI_MAX_RANK",
+            "DOUBLY_EVEN_SEEDER_THREADS",
+            "DOUBLY_EVEN_SEEDER_PAR_MIN_L",
+            "DOUBLY_EVEN_NO_MASS_STOP",
+        )
+    }
 
     print(f"== run_streaming.py ==")
     print(f"  label:           {args.label}")
@@ -109,7 +126,11 @@ def main() -> int:
     print(f"  threads:         {nt} (from DOUBLY_EVEN_THREADS)")
     print(f"  frontier depth:  {frontier_depth}")
     print(f"  canon cache cap: {canon_cap}")
+    for var, val in knobs.items():
+        if val != "default":
+            print(f"  {var}: {val}")
     print(f"  build_info:      {_kernel.kernel_build_info()}")
+    print(f"  target features: {_kernel.kernel_target_features()}")
     print(f"  git_sha:         {git_sha()[:12]}")
     print(f"  cpu:             {cpu_model()}")
     print(f"  memory:          {mem_gib():.1f} GiB")
@@ -135,7 +156,12 @@ def main() -> int:
     for k in range(max_k + 1):
         print(f"  k={k:2d}: mass={mass[k]:>22d}  σ={quota[k]:>22d}")
 
-    # Persist the run-level stats.json (kernel-side data).
+    # Persist the run-level stats.json (kernel-side data). Stats are
+    # name-labelled via `kernel_stats_layout()` — the single source of
+    # truth exported by the kernel since the 2026-06-11 workspace
+    # restructure (rust/core/src/enumerate/stats.rs). Raw vectors are
+    # kept alongside for any positional consumer.
+    stats_names, per_k_names = _kernel.kernel_stats_layout()
     stats_path = output_dir / "stats.json"
     payload = {
         "label": args.label,
@@ -144,9 +170,11 @@ def main() -> int:
         "num_threads": nt,
         "frontier_depth": frontier_depth,
         "canon_cache_cap": canon_cap,
+        "env_knobs": knobs,
         "timestamp_utc": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
         "git_sha": git_sha(),
         "build_info": _kernel.kernel_build_info(),
+        "target_features": _kernel.kernel_target_features(),
         "python_version": platform.python_version(),
         "platform": platform.platform(),
         "cpu_model": cpu_model(),
@@ -155,9 +183,10 @@ def main() -> int:
         # mass[k] is the validated sum N!/|Aut| at rank k.
         "mass": mass,
         "quota_sigma": quota,
-        # See rust/src/enumerate.rs::enumerate_doubly_even doc for the
-        # stats / per_k_stats field layouts (26 fields and 10 rows
-        # respectively). Stored verbatim for tuning.
+        "kernel_stats": {name: stats[i] for i, name in enumerate(stats_names)},
+        "kernel_per_k_stats": {
+            name: per_k_stats[i] for i, name in enumerate(per_k_names)
+        },
         "kernel_stats_raw": stats,
         "kernel_per_k_stats_raw": per_k_stats,
     }

@@ -8,6 +8,7 @@ use std::rc::Rc;
 use crate::parent_rule::ParentRule;
 use crate::streaming::BinaryWriter;
 use crate::types::BinVec;
+use crate::u256::U256;
 
 #[cfg(feature = "parallel")]
 use super::cache::CachedInfo;
@@ -45,29 +46,32 @@ pub(crate) struct SeedFrontier {
 /// (workers may briefly continue past the tipping point before noticing),
 /// never under-search. The class count is still correct.
 ///
-/// `std::sync::Mutex<Vec<u128>>` rather than a per-rank atomic because
-/// (a) u128 has no native atomic op on x86-64 and (b) the lock is held
-/// for nanoseconds per emission — well under nauty's ≥ 78 µs/call cost.
+/// `std::sync::Mutex<Vec<U256>>` rather than a per-rank atomic because
+/// (a) wide ints have no native atomic op on x86-64 and (b) the lock is
+/// held for nanoseconds per emission — well under nauty's ≥ 78 µs/call
+/// cost. U256 since 2026-06-13: σ(30, ·) ≈ 2^136 overflows u128 (and a
+/// 72-way worker split of it still does).
 #[cfg(feature = "parallel")]
 pub(crate) struct GlobalMassTracker {
-    mass: std::sync::Mutex<Vec<u128>>,
-    quota: Vec<u128>,
+    mass: std::sync::Mutex<Vec<U256>>,
+    quota: Vec<U256>,
 }
 
 #[cfg(feature = "parallel")]
 impl GlobalMassTracker {
-    pub(crate) fn new(quota: Vec<u128>) -> Self {
+    pub(crate) fn new(quota: Vec<U256>) -> Self {
         let len = quota.len();
         Self {
-            mass: std::sync::Mutex::new(vec![0u128; len]),
+            mass: std::sync::Mutex::new(vec![U256::ZERO; len]),
             quota,
         }
     }
 
-    /// Atomically add `delta` to `mass[k]`.
+    /// Atomically add `delta` to `mass[k]`. (Per-class contributions
+    /// `N!/|Aut| ≤ N!` always fit u128; only the sum needs width.)
     pub(crate) fn add(&self, k: usize, delta: u128) {
         let mut m = self.mass.lock().expect("global mass tracker poisoned");
-        m[k] = m[k].checked_add(delta).expect("global mass overflow");
+        m[k] = m[k].add_u128(delta);
     }
 
     /// True iff `mass[k] >= quota[k]`. Returns `false` for out-of-range `k`.
@@ -83,8 +87,9 @@ impl GlobalMassTracker {
     /// joined; used by the streaming drivers as the in-Rust correctness
     /// gate (`mass[k] == quota[k]` for `k < max_k` must hold, mirroring
     /// the Python-side `sigma_brute` / `gaborit_sigma` assertion the
-    /// in-memory path runs post-collection).
-    pub(crate) fn snapshot(&self) -> Vec<u128> {
+    /// in-memory path runs post-collection). Also polled live by the
+    /// counts-mode progress watcher.
+    pub(crate) fn snapshot(&self) -> Vec<U256> {
         let m = self.mass.lock().expect("global mass tracker poisoned");
         m.clone()
     }
@@ -210,10 +215,18 @@ pub fn enumerate_doubly_even_with_rule(
     factorial_n: u128,
     rule: ParentRule,
 ) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
+    let quota = widen_quota(quota);
     let mut state =
         WorkerState::new(n, max_k, quota, factorial_n, rule, LabelMode::from_env());
     install_tie_dump_from_env(&mut state);
     run_sequential(state)
+}
+
+/// u128 → U256 quota widening at the public-API boundary. The legacy
+/// `Vec<u128>` signatures stay (every value through N = 29 fits); the
+/// N ≥ 30 counts entry takes decimal strings instead.
+fn widen_quota(quota: Vec<u128>) -> Vec<U256> {
+    quota.into_iter().map(U256::from).collect()
 }
 
 /// [`enumerate_doubly_even_with_rule`] with an explicit labelling mode —
@@ -227,6 +240,7 @@ pub fn enumerate_doubly_even_with_opts(
     rule: ParentRule,
     labelling: LabelMode,
 ) -> (Vec<EnumeratedRaw>, Vec<u128>, Vec<Vec<u64>>) {
+    let quota = widen_quota(quota);
     run_sequential(WorkerState::new(n, max_k, quota, factorial_n, rule, labelling))
 }
 
@@ -261,6 +275,19 @@ fn install_tie_dump_from_env(state: &mut WorkerState) {
             state.install_tie_dump(std::io::BufWriter::new(f));
         }
     }
+    if let Ok(path) = std::env::var("DOUBLY_EVEN_DECOMP_LOG") {
+        let path = path.trim();
+        if !path.is_empty() {
+            let f = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .unwrap_or_else(|e| {
+                    panic!("DOUBLY_EVEN_DECOMP_LOG: cannot open {path:?}: {e}")
+                });
+            state.install_decomp_log(std::io::BufWriter::new(f));
+        }
+    }
 }
 
 /// Interleaved appends from many workers are not sound for arbitrary
@@ -268,14 +295,16 @@ fn install_tie_dump_from_env(state: &mut WorkerState) {
 /// files are the documented future alternative if ever needed.
 #[cfg(feature = "parallel")]
 fn reject_tie_dump_in_parallel() {
-    let set = std::env::var("DOUBLY_EVEN_TIE_DUMP")
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false);
-    if set {
-        panic!(
-            "DOUBLY_EVEN_TIE_DUMP is sequential-only; unset DOUBLY_EVEN_THREADS \
-             or run the sequential driver"
-        );
+    for var in ["DOUBLY_EVEN_TIE_DUMP", "DOUBLY_EVEN_DECOMP_LOG"] {
+        let set = std::env::var(var)
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if set {
+            panic!(
+                "{var} is sequential-only; unset DOUBLY_EVEN_THREADS \
+                 or run the sequential driver"
+            );
+        }
     }
 }
 
@@ -404,6 +433,7 @@ pub fn enumerate_doubly_even_parallel_with_seeder(
     if num_threads <= 1 || max_k <= frontier_depth {
         return enumerate_doubly_even_with_rule(n, max_k, quota, factorial_n, rule);
     }
+    let quota = widen_quota(quota);
     reject_tie_dump_in_parallel();
     // One labelling-mode resolution for seeder + all workers.
     let labelling = LabelMode::from_env();
@@ -420,7 +450,7 @@ pub fn enumerate_doubly_even_parallel_with_seeder(
     // D13-V4 cut 4: shared cross-worker mass tracker. Workers consult
     // `gm.is_full(k+1)` instead of local `mass_at_k`, recovering the
     // 4–11 % sequential mass-stop win that V2/V3 left on the floor.
-    // The worker's *local* quota stays u128::MAX (the local panic check
+    // The worker's *local* quota stays U256::MAX (the local panic check
     // would otherwise race; global counter is the authoritative one).
     let global_mass = std::sync::Arc::new(GlobalMassTracker::new(quota.clone()));
 
@@ -433,7 +463,7 @@ pub fn enumerate_doubly_even_parallel_with_seeder(
         let fact = factorial_n;
         let gm = std::sync::Arc::clone(&global_mass);
         handles.push(std::thread::spawn(move || {
-            let inf_quota = vec![u128::MAX; (mk + 1) as usize];
+            let inf_quota = vec![U256::MAX; (mk + 1) as usize];
             let mut worker = WorkerState::new(nn, mk, inf_quota, fact, rule, labelling);
             worker.install_global_mass(gm);
             while let Ok(seed) = task_rx.recv() {
@@ -499,15 +529,15 @@ pub fn enumerate_doubly_even_parallel_with_seeder(
 /// kernel-side miscount before paying the egress cost.
 ///
 /// Panics with a per-k diff on any mismatch (excess or shortfall).
-fn assert_mass_matches_quota(mass: &[u128], quota: &[u128], max_k: u32) {
+fn assert_mass_matches_quota(mass: &[U256], quota: &[U256], max_k: u32) {
     let limit = ((max_k as usize) + 1).min(mass.len()).min(quota.len());
     let mut diffs: Vec<String> = Vec::new();
     for k in 0..limit {
         if mass[k] != quota[k] {
             let line = if mass[k] > quota[k] {
-                format!("  k={k}: mass={}, quota={}, excess=+{}", mass[k], quota[k], mass[k] - quota[k])
+                format!("  k={k}: mass={}, quota={}, excess=+{}", mass[k], quota[k], mass[k].checked_sub(quota[k]))
             } else {
-                format!("  k={k}: mass={}, quota={}, shortfall=-{}", mass[k], quota[k], quota[k] - mass[k])
+                format!("  k={k}: mass={}, quota={}, shortfall=-{}", mass[k], quota[k], quota[k].checked_sub(mass[k]))
             };
             diffs.push(line);
         }
@@ -527,7 +557,10 @@ fn assert_mass_matches_quota(mass: &[u128], quota: &[u128], max_k: u32) {
 pub struct StreamingResult {
     pub stats: Vec<u128>,
     pub per_k_stats: Vec<Vec<u64>>,
-    pub mass: Vec<u128>,
+    /// U256 since 2026-06-13 (σ(30, ·) overflows u128); the pyo3 layer
+    /// already serialised mass as decimal strings, so the Python-facing
+    /// format is unchanged.
+    pub mass: Vec<U256>,
 }
 
 /// Streaming sequential driver. Mirrors [`enumerate_doubly_even`] but
@@ -546,6 +579,7 @@ pub fn enumerate_doubly_even_streaming(
     factorial_n: u128,
     output_dir: &std::path::Path,
 ) -> StreamingResult {
+    let quota = widen_quota(quota);
     let path = output_dir.join("out.w000.bin");
     let writer = BinaryWriter::create(&path, n, 0)
         .expect("failed to create streaming output file");
@@ -594,6 +628,7 @@ pub fn enumerate_doubly_even_parallel_streaming(
     if num_threads <= 1 || max_k <= frontier_depth {
         return enumerate_doubly_even_streaming(n, max_k, quota, factorial_n, output_dir);
     }
+    let quota = widen_quota(quota);
 
     let cap = (num_threads * 4).max(8);
     let (task_tx, task_rx) = bounded::<SeedFrontier>(cap);
@@ -619,7 +654,7 @@ pub fn enumerate_doubly_even_parallel_streaming(
         handles.push(std::thread::spawn(move || {
             let writer = BinaryWriter::create(&path, nn, worker_id as u32)
                 .expect("failed to create per-worker streaming file");
-            let inf_quota = vec![u128::MAX; (mk + 1) as usize];
+            let inf_quota = vec![U256::MAX; (mk + 1) as usize];
             let mut worker = WorkerState::new(nn, mk, inf_quota, fact, rule, labelling);
             worker.install_global_mass(gm);
             worker.install_output_writer(writer);
@@ -682,6 +717,317 @@ pub fn enumerate_doubly_even_parallel_streaming(
         stats: combined_stats,
         per_k_stats: combined_per_k,
         mass,
+    }
+}
+
+/// Output of the counts-only drivers (the N ≥ 30 mode — eval plan §5).
+/// No per-class records exist anywhere: the only artefacts are the
+/// per-rank aggregates below (~KBs at any N) and the in-Rust
+/// mass-formula gate, which remains the correctness certificate.
+pub struct CountsResult {
+    pub stats: Vec<u128>,
+    pub per_k_stats: Vec<Vec<u64>>,
+    /// Per-rank Σ N!/|Aut| — validated `== quota[k]` before returning.
+    pub mass: Vec<U256>,
+    /// Per-rank emitted-class counts.
+    pub classes: Vec<u64>,
+    /// Per-rank |Aut| histogram, ascending by |Aut|.
+    pub aut_hist: Vec<Vec<(u128, u64)>>,
+}
+
+/// Progress sink for the counts drivers: every `interval_s` seconds the
+/// watcher snapshots the shared mass tracker and atomically rewrites
+/// `<path>` (write to `.tmp`, rename) with per-rank mass vs quota as
+/// decimal strings — exactly the "fraction of σ(N, k) mass found"
+/// signal `dec progress` renders. One final snapshot is written when
+/// the run completes.
+#[cfg(feature = "parallel")]
+pub struct ProgressSink {
+    pub path: std::path::PathBuf,
+    pub interval_s: u64,
+}
+
+#[cfg(feature = "parallel")]
+fn write_progress_json(
+    path: &std::path::Path,
+    n: u32,
+    max_k: u32,
+    elapsed_s: f64,
+    done: bool,
+    mass: &[U256],
+    quota: &[U256],
+) {
+    let rows: Vec<String> = mass
+        .iter()
+        .zip(quota.iter())
+        .map(|(m, q)| format!("[\"{m}\",\"{q}\"]"))
+        .collect();
+    let body = format!(
+        "{{\"n\":{n},\"max_k\":{max_k},\"elapsed_s\":{elapsed_s:.1},\"done\":{done},\
+         \"mass_quota\":[{}]}}\n",
+        rows.join(",")
+    );
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, &body).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// Spawn the progress watcher. Returns a stop flag + handle; set the
+/// flag and join once the traversal is done — the watcher writes a
+/// final `done: true` snapshot on exit.
+#[cfg(feature = "parallel")]
+fn spawn_progress_watcher(
+    tracker: std::sync::Arc<GlobalMassTracker>,
+    quota: Vec<U256>,
+    n: u32,
+    max_k: u32,
+    sink: ProgressSink,
+) -> (
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::thread::JoinHandle<()>,
+) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let stop_w = std::sync::Arc::clone(&stop);
+    let handle = std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        let mut last_write = std::time::Instant::now();
+        write_progress_json(&sink.path, n, max_k, 0.0, false, &tracker.snapshot(), &quota);
+        while !stop_w.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            if last_write.elapsed().as_secs() >= sink.interval_s.max(1) {
+                write_progress_json(
+                    &sink.path,
+                    n,
+                    max_k,
+                    t0.elapsed().as_secs_f64(),
+                    false,
+                    &tracker.snapshot(),
+                    &quota,
+                );
+                last_write = std::time::Instant::now();
+            }
+        }
+        write_progress_json(
+            &sink.path,
+            n,
+            max_k,
+            t0.elapsed().as_secs_f64(),
+            true,
+            &tracker.snapshot(),
+            &quota,
+        );
+    });
+    (stop, handle)
+}
+
+/// Merge per-worker counts folds (element-wise classes, histogram union).
+fn merge_counts(
+    classes: &mut [u64],
+    hist: &mut [std::collections::HashMap<u128, u64>],
+    other_classes: Vec<u64>,
+    other_hist: Vec<std::collections::HashMap<u128, u64>>,
+) {
+    for (a, b) in classes.iter_mut().zip(other_classes) {
+        *a += b;
+    }
+    for (a, b) in hist.iter_mut().zip(other_hist) {
+        for (aut, count) in b {
+            *a.entry(aut).or_insert(0) += count;
+        }
+    }
+}
+
+fn sort_hist(hist: Vec<std::collections::HashMap<u128, u64>>) -> Vec<Vec<(u128, u64)>> {
+    hist.into_iter()
+        .map(|h| {
+            let mut v: Vec<(u128, u64)> = h.into_iter().collect();
+            v.sort_unstable_by_key(|&(aut, _)| aut);
+            v
+        })
+        .collect()
+}
+
+/// Counts-only sequential driver. Takes quota as `Vec<U256>` directly —
+/// this is the one entry that must work at N ≥ 30, where σ(N, k)
+/// overflows both u128 and pyo3's int conversion (the Python layer
+/// passes decimal strings). With the `parallel` feature a progress sink
+/// can be attached (the watcher polls a shared tracker); without it the
+/// sink is ignored beyond a final write.
+pub fn enumerate_doubly_even_counts(
+    n: u32,
+    max_k: u32,
+    quota: Vec<U256>,
+    factorial_n: u128,
+    #[cfg(feature = "parallel")] progress: Option<ProgressSink>,
+) -> CountsResult {
+    let quota_for_assert = quota.clone();
+    let rule = ParentRule::from_env();
+    let mut state =
+        WorkerState::new(n, max_k, quota.clone(), factorial_n, rule, LabelMode::from_env());
+    state.counts_only = true;
+
+    #[cfg(feature = "parallel")]
+    let watcher = progress.map(|sink| {
+        let tracker = std::sync::Arc::new(GlobalMassTracker::new(quota.clone()));
+        state.install_global_mass(std::sync::Arc::clone(&tracker));
+        spawn_progress_watcher(tracker, quota, n, max_k, sink)
+    });
+
+    let zero_rref: Vec<BinVec> = Vec::new();
+    let zero_pivots: Vec<u32> = Vec::new();
+    let info = state.canon_info(&zero_rref, false);
+    state.traverse(zero_rref, zero_pivots, info);
+
+    let mass = state.mass_snapshot();
+    let (classes, hist) = state.take_counts();
+    let (_empty, stats, per_k_stats) = state.finalize();
+    debug_assert!(_empty.is_empty(), "counts mode must produce empty in-memory output");
+
+    #[cfg(feature = "parallel")]
+    if let Some((stop, handle)) = watcher {
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        handle.join().expect("progress watcher panicked");
+    }
+
+    assert_mass_matches_quota(&mass, &quota_for_assert, max_k);
+    CountsResult {
+        stats,
+        per_k_stats,
+        mass,
+        classes,
+        aut_hist: sort_hist(hist),
+    }
+}
+
+/// Counts-only parallel driver. Same fan-out as
+/// [`enumerate_doubly_even_parallel_streaming`], but workers fold
+/// per-rank aggregates instead of writing class records; the shared
+/// mass tracker doubles as the live progress source.
+#[cfg(feature = "parallel")]
+pub fn enumerate_doubly_even_parallel_counts(
+    n: u32,
+    max_k: u32,
+    quota: Vec<U256>,
+    factorial_n: u128,
+    num_threads: usize,
+    progress: Option<ProgressSink>,
+) -> CountsResult {
+    use crossbeam_channel::{bounded, unbounded};
+
+    let frontier_depth: u32 = std::env::var("DOUBLY_EVEN_FRONTIER_DEPTH")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|&d| d >= 2)
+        .unwrap_or(4);
+
+    if num_threads <= 1 || max_k <= frontier_depth {
+        return enumerate_doubly_even_counts(n, max_k, quota, factorial_n, progress);
+    }
+
+    type WorkerResult = (
+        Vec<u128>,
+        Vec<Vec<u64>>,
+        Vec<u64>,
+        Vec<std::collections::HashMap<u128, u64>>,
+    );
+
+    let cap = (num_threads * 4).max(8);
+    let (task_tx, task_rx) = bounded::<SeedFrontier>(cap);
+    let (result_tx, result_rx) = unbounded::<WorkerResult>();
+
+    reject_tie_dump_in_parallel();
+    let quota_for_assert = quota.clone();
+    let global_mass = std::sync::Arc::new(GlobalMassTracker::new(quota.clone()));
+    let watcher = progress.map(|sink| {
+        spawn_progress_watcher(
+            std::sync::Arc::clone(&global_mass),
+            quota.clone(),
+            n,
+            max_k,
+            sink,
+        )
+    });
+
+    let rule = ParentRule::from_env();
+    let labelling = LabelMode::from_env();
+
+    let mut handles = Vec::with_capacity(num_threads);
+    for _ in 0..num_threads {
+        let task_rx = task_rx.clone();
+        let result_tx = result_tx.clone();
+        let mk = max_k;
+        let nn = n;
+        let fact = factorial_n;
+        let gm = std::sync::Arc::clone(&global_mass);
+        handles.push(std::thread::spawn(move || {
+            let inf_quota = vec![U256::MAX; (mk + 1) as usize];
+            let mut worker = WorkerState::new(nn, mk, inf_quota, fact, rule, labelling);
+            worker.counts_only = true;
+            worker.install_global_mass(gm);
+            while let Ok(seed) = task_rx.recv() {
+                worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
+            }
+            let (classes, hist) = worker.take_counts();
+            let (_empty, stats, per_k) = worker.finalize();
+            let _ = result_tx.send((stats, per_k, classes, hist));
+        }));
+    }
+    drop(task_rx);
+    drop(result_tx);
+
+    let mut seed_state =
+        WorkerState::new(n, max_k, quota.clone(), factorial_n, rule, labelling);
+    seed_state.counts_only = true;
+    seed_state.install_global_mass(std::sync::Arc::clone(&global_mass));
+    let (seeder_threads, seeder_min_l) =
+        crate::seeder_pool::SeederPool::env_defaults(num_threads);
+    if seeder_threads >= 2 {
+        seed_state.install_seeder_pool(std::sync::Arc::new(
+            crate::seeder_pool::SeederPool::new(seeder_threads, seeder_min_l),
+        ));
+    }
+    {
+        let zero_rref: Vec<BinVec> = Vec::new();
+        let zero_pivots: Vec<u32> = Vec::new();
+        let zero_info = seed_state.canon_info(&zero_rref, false);
+        seed_state.traverse_seed(
+            zero_rref,
+            zero_pivots,
+            zero_info,
+            frontier_depth,
+            &task_tx,
+        );
+    }
+    seed_state.clear_seeder_pool();
+    drop(task_tx);
+
+    let (mut classes, mut hist) = seed_state.take_counts();
+    let (_empty, mut combined_stats, mut combined_per_k) = seed_state.finalize();
+    for _ in 0..num_threads {
+        let (stats, per_k, w_classes, w_hist) = result_rx
+            .recv()
+            .expect("worker thread hung up before sending result");
+        merge_stats_only(&mut combined_stats, &mut combined_per_k, stats, per_k);
+        merge_counts(&mut classes, &mut hist, w_classes, w_hist);
+    }
+    for h in handles {
+        h.join().expect("worker thread panicked");
+    }
+
+    let mass = global_mass.snapshot();
+    if let Some((stop, handle)) = watcher {
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        handle.join().expect("progress watcher panicked");
+    }
+    assert_mass_matches_quota(&mass, &quota_for_assert, max_k);
+    CountsResult {
+        stats: combined_stats,
+        per_k_stats: combined_per_k,
+        mass,
+        classes,
+        aut_hist: sort_hist(hist),
     }
 }
 

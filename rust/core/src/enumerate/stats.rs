@@ -111,6 +111,7 @@ impl WorkerState {
         if let Some(mut w) = self.output_writer.take() {
             w.flush().expect("BinaryWriter final flush failed");
         }
+        self.flush_decomp_log();
         let stats: Vec<u128> = vec![
             self.stats_canon_calls as u128,
             self.stats_primary_hits as u128,
@@ -266,7 +267,7 @@ mod layout_tests {
     /// single source for Python (`kernel_stats_layout()` / bench.py).
     #[test]
     fn finalize_lengths_match_layout_consts() {
-        let quota = vec![u128::MAX; 4];
+        let quota = vec![crate::u256::U256::MAX; 4];
         let mut w = WorkerState::new(
             10,
             3,

@@ -118,7 +118,11 @@ fn check_streaming_matches_sequential(n: u32, max_k: u32, quota: &[u128], fact: 
         "mass snapshot length mismatch"
     );
     for k in 0..=(max_k as usize) {
-        assert_eq!(res_seq.mass[k], quota[k], "seq mass[k={k}] vs quota mismatch");
+        assert_eq!(
+            res_seq.mass[k],
+            doubly_even_core::u256::U256::from(quota[k]),
+            "seq mass[k={k}] vs quota mismatch"
+        );
     }
     fs::remove_dir_all(&tmp_seq).ok();
 
@@ -140,7 +144,8 @@ fn check_streaming_matches_sequential(n: u32, max_k: u32, quota: &[u128], fact: 
         );
         for k in 0..=(max_k as usize) {
             assert_eq!(
-                res_par.mass[k], quota[k],
+                res_par.mass[k],
+                doubly_even_core::u256::U256::from(quota[k]),
                 "par mass[k={k}] threads={nt} vs quota mismatch"
             );
         }

@@ -17,6 +17,7 @@ use crate::permutations::{dual_basis, perm_inverse};
 use crate::streaming::BinaryWriter;
 use crate::subspace_orbit::subspace_in_orbit;
 use crate::types::BinVec;
+use crate::u256::U256;
 
 use super::cache::{canon_cache_capacity, weight_enum, BucketEntry, CachedInfo, LabelMode};
 #[cfg(feature = "parallel")]
@@ -34,8 +35,15 @@ pub struct EnumeratedRaw {
 pub(crate) struct WorkerState {
     pub(crate) n: u32,
     pub(crate) max_k: u32,
-    pub(crate) quota: Vec<u128>,
-    pub(crate) mass_at_k: Vec<u128>,
+    pub(crate) quota: Vec<U256>,
+    pub(crate) mass_at_k: Vec<U256>,
+    /// Counts-only mode (N ≥ 30 frontier): emits fold into per-rank
+    /// aggregates instead of materialising `EnumeratedRaw` records, so
+    /// memory stays O(ranks) rather than O(classes).
+    pub(crate) counts_only: bool,
+    /// Per-rank `|Aut| → class-count` histogram. Populated only when
+    /// `counts_only`; drained by [`Self::take_counts`].
+    counts_hist: Vec<HashMap<u128, u64>>,
     pub(crate) factorial_n: u128,
     /// D13-V4 cut 4: when `Some`, every emit atomically increments
     /// `global_mass.mass[k]` and the candidate-loop mass-stop checks
@@ -287,6 +295,13 @@ pub(crate) struct WorkerState {
     /// one JSONL record per φ-tie, for the invariant-collision analysis.
     /// `None` ⇒ zero-cost no-op. See [`Self::dump_tie`].
     pub(crate) tie_dump: Option<std::io::BufWriter<std::fs::File>>,
+    /// Decomposability-log sink (`DOUBLY_EVEN_DECOMP_LOG`, sequential
+    /// drivers only): one JSONL record per `test_candidate` canon-info
+    /// consultation — support / direct-sum components / twin columns of
+    /// the child RREF, plus the nauty ns the consultation cost (0 ⇒
+    /// cache hit). The lever-4 measurement (bottlenecks §4); `None` ⇒
+    /// zero-cost no-op. Flushed in `finalize`.
+    pub(crate) decomp_log: Option<std::io::BufWriter<std::fs::File>>,
     pub(crate) output: Vec<EnumeratedRaw>,
     /// Streaming output sink. When `Some`, every emit writes
     /// `(k, aut_order, basis)` to the per-worker binary file and skips
@@ -309,7 +324,7 @@ impl WorkerState {
     pub(crate) fn new(
         n: u32,
         max_k: u32,
-        quota: Vec<u128>,
+        quota: Vec<U256>,
         factorial_n: u128,
         parent_rule: ParentRule,
         label_mode: LabelMode,
@@ -326,7 +341,9 @@ impl WorkerState {
             n,
             max_k,
             quota,
-            mass_at_k: vec![0u128; len],
+            mass_at_k: vec![U256::ZERO; len],
+            counts_only: false,
+            counts_hist: vec![HashMap::new(); len],
             factorial_n,
             skip_mass_stop,
             #[cfg(feature = "parallel")]
@@ -415,6 +432,7 @@ impl WorkerState {
             stats_canon_autom_only_calls: 0,
             stats_canon_label_upgrades: 0,
             tie_dump: None,
+            decomp_log: None,
             output: Vec::new(),
             output_writer: None,
         }
@@ -427,6 +445,59 @@ impl WorkerState {
     /// documented future alternative if ever needed).
     pub(crate) fn install_tie_dump(&mut self, writer: std::io::BufWriter<std::fs::File>) {
         self.tie_dump = Some(writer);
+    }
+
+    /// Attach the decomposability-log sink (`DOUBLY_EVEN_DECOMP_LOG`).
+    /// Sequential drivers only, for the same interleaved-append reason
+    /// as the tie dump.
+    pub(crate) fn install_decomp_log(&mut self, writer: std::io::BufWriter<std::fs::File>) {
+        self.decomp_log = Some(writer);
+    }
+
+    /// Decomposability-log hook (no-op when `DOUBLY_EVEN_DECOMP_LOG` is
+    /// unset): one JSONL record per canon-info consultation in
+    /// [`Self::test_candidate`], carrying the direct-sum / twin-column
+    /// structure of the child RREF (see [`super::decomp`] for the math)
+    /// and the nauty ns the consultation cost (`ns = 0` ⇔ cache hit,
+    /// `miss = 0`). Records are buffered; [`flush_decomp_log`] runs in
+    /// `finalize` — unlike ties, these are high-volume (one per accept
+    /// or tie at every rank), so no per-record flush.
+    ///
+    /// [`flush_decomp_log`]: Self::flush_decomp_log
+    fn log_decomp(&mut self, d_rref: &[BinVec], nauty_ns: u128, miss: u64, outcome: &str) {
+        if self.decomp_log.is_none() {
+            return;
+        }
+        let support = super::decomp::column_support(d_rref);
+        let comps = super::decomp::component_sizes(d_rref, self.n);
+        let twins = super::decomp::twin_class_sizes(d_rref, self.n);
+        let comps_json: Vec<String> = comps.iter().map(|c| c.to_string()).collect();
+        let twins_json: Vec<String> = twins.iter().map(|c| c.to_string()).collect();
+        use std::io::Write;
+        let w = self.decomp_log.as_mut().expect("checked above");
+        writeln!(
+            w,
+            "{{\"n\":{},\"k\":{},\"out\":\"{}\",\"ns\":{},\"miss\":{},\"sup\":{},\
+             \"comp\":[{}],\"tw\":[{}]}}",
+            self.n,
+            d_rref.len(),
+            outcome,
+            nauty_ns,
+            miss,
+            support.count_ones(),
+            comps_json.join(","),
+            twins_json.join(","),
+        )
+        .expect("decomp-log write failed");
+    }
+
+    /// Flush the decomp-log sink (called from `finalize`; the BufWriter
+    /// would also flush on drop, but explicitly so write errors surface).
+    pub(crate) fn flush_decomp_log(&mut self) {
+        if let Some(w) = self.decomp_log.as_mut() {
+            use std::io::Write;
+            w.flush().expect("decomp-log flush failed");
+        }
     }
 
     /// Emitted-record label under the active [`LabelMode`]: `Full` clones
@@ -504,6 +575,13 @@ impl WorkerState {
             orbits[orbit_of[i]].push(u);
         }
 
+        // Decomposability tags for the tied CHILD `D = ⟨C, v⟩` (lever-4
+        // joint evidence: are invariant collisions direct-sum-rich?).
+        let (d_rref, _) = extend_rref(c_rref, v, self.n);
+        let d_support = super::decomp::column_support(&d_rref).count_ones();
+        let d_comps = super::decomp::component_sizes(&d_rref, self.n);
+        let d_twins = super::decomp::twin_class_sizes(&d_rref, self.n);
+
         use std::io::Write;
         let w = self.tie_dump.as_mut().expect("checked above");
         let rref_hex: Vec<String> = c_rref.iter().map(|r| format!("\"{r:x}\"")).collect();
@@ -515,10 +593,13 @@ impl WorkerState {
                 format!("[{}]", inner.join(","))
             })
             .collect();
+        let comps_json: Vec<String> = d_comps.iter().map(|c| c.to_string()).collect();
+        let twins_json: Vec<String> = d_twins.iter().map(|c| c.to_string()).collect();
         writeln!(
             w,
             "{{\"n\":{},\"parent_k\":{},\"parent_rref\":[{}],\"v\":\"{:x}\",\
-             \"m_set\":[{}],\"accept\":{},\"aut_order\":\"{}\",\"tie_orbits\":[{}]}}",
+             \"m_set\":[{}],\"accept\":{},\"aut_order\":\"{}\",\"tie_orbits\":[{}],\
+             \"d_sup\":{},\"d_comp\":[{}],\"d_tw\":[{}]}}",
             self.n,
             parent_k,
             rref_hex.join(","),
@@ -527,6 +608,9 @@ impl WorkerState {
             accept,
             info_d.aut_order,
             orbits_json.join(","),
+            d_support,
+            comps_json.join(","),
+            twins_json.join(","),
         )
         .expect("tie-dump write failed");
         // Flush per record: ties are rare and partial runs stay inspectable.
@@ -549,8 +633,17 @@ impl WorkerState {
     /// by the sequential streaming driver as the input to the in-Rust
     /// mass-formula assertion (the parallel driver uses
     /// `GlobalMassTracker::snapshot` instead — same role, cross-worker).
-    pub(crate) fn mass_snapshot(&self) -> Vec<u128> {
+    pub(crate) fn mass_snapshot(&self) -> Vec<U256> {
         self.mass_at_k.clone()
+    }
+
+    /// Drain the per-rank aggregates accumulated in `counts_only` mode:
+    /// `(classes_per_rank, |Aut|-histogram_per_rank)`. The class count is
+    /// the sum of the histogram's values.
+    pub(crate) fn take_counts(&mut self) -> (Vec<u64>, Vec<HashMap<u128, u64>>) {
+        let hist = std::mem::take(&mut self.counts_hist);
+        let classes = hist.iter().map(|h| h.values().sum()).collect();
+        (classes, hist)
     }
 
     /// Compute the canonical parent of `D` as a rank-(k-1) subspace.
@@ -735,12 +828,22 @@ impl WorkerState {
                     self.stats_phi_accept_unique += 1;
                     self.stats_phi_accept_unique_by_k[parent_k] += 1;
                     let (d_rref, d_pivots) = extend_rref(rref, v, self.n);
+                    let (ns0, calls0) = (self.stats_nauty_ns, self.stats_canon_calls);
                     let info_d = self.canon_info(&d_rref, false);
+                    self.log_decomp(
+                        &d_rref,
+                        self.stats_nauty_ns - ns0,
+                        self.stats_canon_calls - calls0,
+                        "acc",
+                    );
                     Some((d_rref, d_pivots, info_d))
                 }
                 PhiOutcome::Tie(m_set) => {
                     let (d_rref, d_pivots) = extend_rref(rref, v, self.n);
+                    let (ns0, calls0) = (self.stats_nauty_ns, self.stats_canon_calls);
                     let info_d = self.canon_info(&d_rref, true);
+                    let (tie_ns, tie_calls) =
+                        (self.stats_nauty_ns - ns0, self.stats_canon_calls - calls0);
                     let t1 = std::time::Instant::now();
                     let target = tie_break_parent(
                         rref,
@@ -758,6 +861,12 @@ impl WorkerState {
                     self.stats_phi_ns += tie_delta;
                     self.stats_phi_ns_by_k[parent_k] += tie_delta as u64;
                     self.dump_tie(parent_k, rref, v, &m_set, &info_d, accept);
+                    self.log_decomp(
+                        &d_rref,
+                        tie_ns,
+                        tie_calls,
+                        if accept { "tie_acc" } else { "tie_rej" },
+                    );
                     if accept {
                         self.stats_phi_tie_accept += 1;
                         self.stats_phi_tie_accept_by_k[parent_k] += 1;
@@ -777,8 +886,15 @@ impl WorkerState {
         let phi_res = self.phi_audit_evaluate(parent_k, rref, v, phi);
         let (d_rref, d_pivots) = extend_rref(rref, v, self.n);
         let nauty_ns_before = self.stats_nauty_ns;
+        let calls_before = self.stats_canon_calls;
         let info_d = self.canon_info(&d_rref, true);
         let accept = self.is_canonical_augmentation(parent_k, rref, &d_rref, &info_d);
+        self.log_decomp(
+            &d_rref,
+            self.stats_nauty_ns - nauty_ns_before,
+            self.stats_canon_calls - calls_before,
+            if accept { "leg_acc" } else { "leg_rej" },
+        );
         if let Some(res) = phi_res {
             let delta = self.stats_nauty_ns - nauty_ns_before;
             self.phi_audit_resolve(parent_k, rref, v, res, &info_d, delta);
@@ -937,7 +1053,11 @@ impl WorkerState {
         // `canonical_column_order`, `aut_generators`, `column_orbits` —
         // the merge script reconstructs everything it needs from rref +
         // aut_order. In-memory path keeps the legacy shape.
-        if let Some(w) = self.output_writer.as_mut() {
+        if self.counts_only {
+            *self.counts_hist[k as usize]
+                .entry(info.aut_order)
+                .or_insert(0) += 1;
+        } else if let Some(w) = self.output_writer.as_mut() {
             w.write_class(info.aut_order, &rref)
                 .expect("BinaryWriter::write_class failed");
         } else {
@@ -951,9 +1071,7 @@ impl WorkerState {
         }
         // Update mass.
         let mass_contribution = self.factorial_n / info.aut_order;
-        self.mass_at_k[k as usize] = self.mass_at_k[k as usize]
-            .checked_add(mass_contribution)
-            .expect("mass overflow");
+        self.mass_at_k[k as usize] = self.mass_at_k[k as usize].add_u128(mass_contribution);
         if self.mass_at_k[k as usize] > self.quota[k as usize] {
             panic!(
                 "level-{k} mass {} exceeded quota {}",
@@ -1067,7 +1185,11 @@ impl WorkerState {
             }
             return;
         }
-        if let Some(w) = self.output_writer.as_mut() {
+        if self.counts_only {
+            *self.counts_hist[k as usize]
+                .entry(info.aut_order)
+                .or_insert(0) += 1;
+        } else if let Some(w) = self.output_writer.as_mut() {
             w.write_class(info.aut_order, &rref)
                 .expect("BinaryWriter::write_class failed (seeder)");
         } else {
@@ -1080,9 +1202,7 @@ impl WorkerState {
             });
         }
         let mass_contribution = self.factorial_n / info.aut_order;
-        self.mass_at_k[k as usize] = self.mass_at_k[k as usize]
-            .checked_add(mass_contribution)
-            .expect("mass overflow");
+        self.mass_at_k[k as usize] = self.mass_at_k[k as usize].add_u128(mass_contribution);
         // D13-V4 cut 4: seeder emissions also contribute to the shared
         // mass counter so workers' mass-stop sees the full picture.
         // (Seeder itself does not mass-stop; see comment on traverse_seed.)
