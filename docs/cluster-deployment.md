@@ -215,8 +215,8 @@ unchanged against any local directory. For long local runs the same
 recipe applies:
 
 ```sh
-# Local long-running N=26 (5 min on a 13700K, 30 min on a smaller box):
-DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
+# Local long-running N=26 (under a minute on a 13700K post-2026-06 levers):
+DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=4 \
     DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
     uv run python scripts/run_streaming.py --N 26 \
     --output-dir /tmp/n26-local

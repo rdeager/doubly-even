@@ -1,12 +1,17 @@
 # Current bottleneck profile (living document)
 
-> **As of:** 2026-06-12 evening (external-feedback review session:
-> **autom-only canon SHIPPED** — `getcanon=FALSE` on the 80.7 % of
-> canon calls whose labelling no decision consumes; 1.09× seq across
-> N=22–26, decisions bit-identical, kill-switch
-> `DOUBLY_EVEN_CANON_LABELLING=full`) · **wheel:** `--features
-> parallel`, AVX2 build · **box:** 13700K-equivalent dev container
-> (24 logical, AVX2, no AVX-512), 62 GB.
+> **As of:** 2026-06-13 (**counts-only output mode SHIPPED** —
+> `enumerate_doubly_even_counts` + `scripts/run_counts.py` +
+> `dec progress`, per-rank {classes, mass, |Aut| histogram} with no
+> per-class records, the N ≥ 30 prerequisite; **mass spine widened to
+> 256-bit** — σ(30, ·) ≈ 2^136 overflows u128 (σ(29, ·) fit by ONE
+> bit), so the pre-existing streaming/in-memory entries were never
+> N ≥ 30-capable; decisions bit-identical, gate-verified. Same session:
+> lever-4 decomp/twin measurement + SVE2 ablation verdicts — see §4/§6.
+> Previous milestone 2026-06-12: autom-only canon, 1.09× seq,
+> kill-switch `DOUBLY_EVEN_CANON_LABELLING=full`.) · **wheel:**
+> `--features parallel`, AVX2 build · **box:** 13700K-equivalent dev
+> container (24 logical, AVX2, no AVX-512), 62 GB.
 >
 > **Maintenance checklist — when a lever ships, touch these in order:**
 > 1. The internal maintainers' writeup (see the note at the bottom of this
@@ -161,26 +166,43 @@ k=3 σ_Q calls** (~20–30 ms each), not parallelising inside one BFS.
    the pin alone moves nothing, the queued follow-up is an SVE2
    in-register histogram prototype for the φ v-half (HISTCNT/TBL — the
    65-bin histogram fits in Z-registers; external suggestion, see the
-   2026-06-12 feedback review): irrelevant at N ≤ 27 (~1.05× ceiling)
-   but φ is ~47 % of the N=32 floor.
-3. **Counts-only compact output mode** — required for the N=30 run
-   (output budget 100–200 MB; no per-class stream): fold per-rank
-   {classes, mass (bigint), |Aut| histogram} in the driver, emit one JSON.
-   Composes with lever 1 (counts mode needs no canonical labelling on any
-   accept). ~1–2 days.
-4. **Decomposability + twin-column logging experiment** (NEW 2026-06-12,
-   from the external-feedback review — the strongest external idea):
-   for every canon-call input at N=24/26 log support size, connected
-   components of the column matroid on the RREF, and twin-column
-   (identical k-bit column) classes; report fractions by rank, weighted
-   by per-rank nauty cost. Read-only, ~0.5 day. Promotes or kills two
-   exact structural canon levers at once — direct-sum component
-   canonicalisation (component canonical forms are *exact* keys, so the
-   dead cheap-rejector arithmetic does not apply; |Aut| assembles as
-   wreath products) and pre-nauty twin compression — plus the
-   component-convolution φ option at N=32. Promotion threshold: ≥ 30 %
-   of rank-weighted nauty time on decomposable inputs. Implementation
-   (if promoted) is decision-changing → D15-style audit gate.
+   2026-06-12 feedback review). **Ceiling measured 2026-06-13** (ablation
+   arm in `vhalf_sweep`, architecture-independent bound): the histogram
+   is 47–48 % of phase 0 ⇒ hist-free e2e ceiling **1.04× at N=26 /
+   ~1.07× at N=29 / 1.18–1.20× at N=32**; realistic (hist 3×) ~1.11× at
+   N=32. Prototype stays queued conditional on an N=32 commitment; the
+   external ">1.5×" figure is refuted. See
+   `markdown/notes/sve2-ablation-2026-06-13.md`.
+3. ✅ **Counts-only compact output mode — SHIPPED 2026-06-13.**
+   Fold-only drivers (`enumerate_doubly_even_counts` seq/parallel) emit
+   per-rank {classes, Σ N!/|Aut|, |Aut| histogram} and NO per-class
+   records; runner `scripts/run_counts.py` writes the n29.json-format
+   result; live progress via an in-kernel watcher (`progress.json`,
+   atomic rewrite) rendered by `uv run dec progress` (works for
+   streaming runs too). En-route fix that was a hard N=30 blocker:
+   **σ(30, ·) ≈ 2^136 overflows the u128 mass spine** (quota,
+   `mass_at_k`, `GlobalMassTracker`; σ(29, ·) fit by one bit) — all
+   mass accumulation is now 256-bit (`core/src/u256.rs`); quota travels
+   as decimal strings through pyo3 in the counts entry. Decisions
+   bit-identical (bench gate: canon calls 342/5248/39491 at N=18/22/24,
+   walls within noise). Equality-tested against the in-memory driver at
+   N=12/14/16, seq + par.
+4. **Twin-column compression pre-nauty — gated on a per-call A−B**
+   (re-scoped 2026-06-13: the logging experiment RAN; full verdict in
+   `markdown/notes/decomp-twin-logging-2026-06-13.md`). Measured at
+   N=24/26 (`DOUBLY_EVEN_DECOMP_LOG` hook + 
+   `scripts/experimental/decomp_log_audit.py`, 100 % nauty-ns coverage):
+   component canonicalisation and zero-column special-casing are DEAD
+   (§6 — proper direct sums carry 2.2 % of nauty time at N=26, falling
+   in N and k; zero-col deficit is 0.4 columns ns-weighted), but
+   **93.2 % of nauty time sits on twin-bearing inputs** with an
+   ns-weighted mean of 4.2/26 removable columns. If per-call cost tracks
+   column count: ~5–7 % e2e seq at N=26, ~8–10 % at N ≥ 28 — the
+   automorphism-only-canonicalisation tier. Next gate (~0.5 day): extend `nauty_decomp` to A−B original
+   vs twin-compressed colored graphs on real dumped inputs. Implementation
+   (if it clears ~5 % e2e) composes with automorphism-only canonicalisation — compress only on
+   autom-only calls so tie-break labelling is untouched — but orbits
+   feed σ_Q, so it still takes a coset-spectrum-style audit gate.
 5. **Dense-level direction-switch BFS** (sequential σ_Q candidate):
    blind-mark + extract on dense BFS levels (Beamer-style bottom-up).
    Portable, exact, ~1.15–1.25× BFS-local ≈ 1.04–1.06× end-to-end,
@@ -215,7 +237,7 @@ than geometric wall fits; use only same-wheel same-session label globs
 |---|---|---|
 | N=28 | well under the 61-min record; single c4a-72 | re-run is routine |
 | N=29 | 0.9–1.3 h on c4a-72 (41 core-h: kept-canon 28, φ 9, σ_Q 4) | count-anchored, re-fit 2026-06-12 on the v3 glob |
-| N=30 | **single Axion box, counts-only output**: ~250 ± 100 core-h (×6/step from N=29) ⇒ ~4–6 h on a 96-core c4a, ~$20–50 | needs the counts-only mode (§4 lever 3); the old "streaming + cluster, ~3 TB" plan is obsolete — the output budget is now 100–200 MB (per-rank table + certificate) |
+| N=30 | **single Axion box, counts-only output**: ~250 ± 100 core-h (×6/step from N=29) ⇒ ~4–6 h on a 96-core c4a, ~$20–50 | counts-only mode SHIPPED 2026-06-13 (§4 lever 3) — `run_counts.py` is the ONLY N=30-capable entry (the u128 mass spine of the older entries overflows at σ(30, ·) ≈ 2^136); the old "streaming + cluster, ~3 TB" plan is obsolete — output is one JSON (per-rank table + |Aut| histograms + certificate) |
 | N=31 | ~×6 again ⇒ ~1,500 core-h; feasible single-box over days, or a small cluster | candidate-count growth is the unknown |
 | N=32 | **floor ~44 core-h** single-thread by geometric carry (re-fit 2026-06-12; earlier vintages gave 63/475/174 — the method is a floor, not an estimate; count-anchored ×6/step says ~9,000 core-h) | cluster coordinator + the column-multiset engine for k ≤ 4 (σ_Q BFS universe/time explodes at low rank); re-anchor after the first post-lever cloud datapoint |
 
@@ -246,7 +268,7 @@ datapoint to re-anchor the fit.
 | Shared cross-worker canon LRU | intra-worker hit rate 3.13 % caps the win at ~4 %, under the engineering bar | 2026-05-23 |
 | Adaptive per-seed frontier depth | +43–56 % regression at N=24 (seed-set explosion + channel backpressure) | 2026-05-23 |
 | Class-fingerprint caches / cheap equivalence rejectors (whole family) | per-probe cost ≈ per-call cost; collision blocklists presuppose the enumeration | 2026-05-17/18, closed permanently |
-| Any further "fewer canon calls" idea | call count is exactly classes + tie-rejects (one call per emitted class is the floor — Aut is needed per class); ceiling = the 5.6 % tie-reject slice ≈ 2.9 % e2e | 2026-06-12, closed by arithmetic |
+| Any further "fewer canon calls" idea **via dedup** | call count is exactly classes + tie-rejects (one *Aut computation* per emitted class is the floor — Aut is needed per class for the mass certificate + next-level σ_Q); dedup ceiling = the 5.6 % tie-reject slice ≈ 2.9 % e2e. **Scope (2026-06-13): floors *dedup*, not *nauty-per-class*** — "need Aut" ≠ "need a fresh nauty call"; computing Aut without one (incremental Aut-group transfer along the augmentation tree, §4 tail) is the open escape — same `need-Aut ≠ need-canon` distinction the coset-spectrum parent rule used. | 2026-06-12, closed by arithmetic *for dedup* |
 | Fat LTO | 1.004×/0.997× at N=22/24 — noise (thin-LTO + codegen-units=1 already ship) | 2026-06-12 |
 | PGO on the nauty C side (gcc, trained N=22/24) | 1.012–1.016× (N=22/24/26), decisions bit-identical — below the ~5 % bar; refinement cost is data-dependent pointer-chasing, not mispredicts | 2026-06-12 |
 | Rust-side PGO | blocked locally (no llvm-profdata for rustc's LLVM); ceiling is the non-nauty 45 % in branch-light loops, expected ≲2 % | 2026-06-12 (cloud-idle curiosity at best) |
@@ -255,7 +277,10 @@ datapoint to re-anchor the fit.
 | Gleason-polynomial pre-φ candidate reject (external) | category error: candidate *validity* is decided in σ_Q generation (candidates are exactly the singular vectors = doubly-even extensions); φ rejection is parent *selection*, not validity. Gleason's ring also only constrains *self-dual* Type II enumerators, not general [N,k] doubly even. As a parent-test prefilter it's the dead cheap-rejector family | 2026-06-12, feedback review |
 | Cache-oblivious linear-sweep orbit closure (external) | attacks latency that isn't there: BFS is compute-bound on image generation (probe restructures 0.82–1.04×) and no cache cliff exists; the full-2^L sweep does strictly *more* image work than the BFS frontier | 2026-06-12, feedback review |
 | Delete the σ_Q lift sort via natural BFS ordering (external) | minima do emerge ascending in Q-coordinates, but the 5.5 % sort is on the *lifted* F_2^N values and the lift is not monotone; DFS consumes F_2^N order (decision-bearing). Make it faster (radix, lever 6), not absent | 2026-06-12, feedback review |
-| Trellis / split-DP φ histograms (external) | near-zero on generic full-width codes (trellis width ≈ k); residual φ is a compute-bound stream after the E-chain decides 43 % O(1). Conditional revival: only if the decomposability experiment (lever 4) finds components common AND N=32 is committed — and then component-spectrum *convolution* supersedes a trellis | 2026-06-12, feedback review (parked w/ condition) |
+| Trellis / split-DP φ histograms (external) | near-zero on generic full-width codes (trellis width ≈ k); residual φ is a compute-bound stream after the E-chain decides 43 % O(1). The 2026-06-13 revival condition FAILED: proper components are 2.2 % of nauty time at N=26 and falling — component-spectrum convolution has nothing to convolve | 2026-06-12; condition closed 2026-06-13 |
+| Direct-sum component canonicalisation (P1) | measured (decomp-log, N=24/26): proper direct sums carry 5.8 % / **2.2 %** of rank-weighted nauty time, falling in N and into the hot ranks (k=7–9: 1.6–2.0 %); the "decomposables are common" hypothesis holds only at low ranks, which carry no nauty time | 2026-06-13, `decomp-twin-logging` note |
+| Zero-column (support < N) canon special-casing | 23.5 % of nauty ns sits on support-deficient inputs but the ns-weighted mean deficit is 0.4 columns — smaller-graph win < 1 % e2e | 2026-06-13, same note |
+| SVE2 in-register φ histogram at N ≤ 29 | ablation arm (`vhalf_weights_nohist`): histogram = 47–48 % of phase 0 ⇒ hist-FREE ceiling 1.04×/1.07× e2e at N=26/29; N=32 ceiling 1.18–1.20× keeps the prototype queued there only | 2026-06-13, `sve2-ablation` note |
 | Singular-only σ_Q restriction (external, not dead — **already shipped**) | listed here to stop re-proposal: BFS seeds are exactly the singular reps (`orbit.rs::singular_reps_q` → `candidates.rs`); the "2^L universe" in older docs referred to the bitset index space, not the seed set | 2026-06-12 |
 
 External-feedback adjudications above are argued in full in

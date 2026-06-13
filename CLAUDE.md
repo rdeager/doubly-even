@@ -232,13 +232,22 @@ canon calls whose labelling no decision reads; 1.09–1.10× seq,
 decisions bit-identical): N=22 seq 0.623 s / par 0.24 s; N=24 seq
 5.72 s; N=26 seq 74.6 s / par 9.21 s (t=24 d=4 cap=500K). Cloud
 records (pre-lever: N=28 61 min, N=29 12.32 h on c4a-72) are due a
-cheap re-run — N=29 forecast ~0.8–1.2 h. **Next session: cloud
-profiling prep** (eval plan §1 steps 2–4: counts-only output mode,
-then the cloud days). The external GPT/Gemini feedback is adjudicated
-in `markdown/notes/external-feedback-review-2026-06-12.md` (one new
-keeper: the decomposability+twin logging experiment, bottlenecks §4
-lever 4); φ-tie collision exposition:
-`markdown/notes/tie-collisions-2026-06-12.md`.
+cheap re-run — N=29 forecast ~0.8–1.2 h. **Next session: the cloud
+days** (re-profile day then N=30 — bottlenecks §5 + the eval-plan §6
+runbook; entry point
+`markdown/notes/counts-mode-wrapup-2026-06-13.md`). 2026-06-13
+session: **counts-only output mode SHIPPED** (`run_counts.py` +
+`dec progress`; the ONLY N≥30-capable entry — σ(30,·) ≈ 2^136
+overflows the old u128 mass spine, now 256-bit, decisions
+gate-identical); lever-4 decomp/twin experiment RAN (P1 component
+canon DEAD at 2.2 % of N=26 nauty time; survivor = twin compression,
+93 % of nauty time twin-bearing, gated on a nauty A−B —
+`markdown/notes/decomp-twin-logging-2026-06-13.md`); SVE2 histogram
+ceiling measured (1.04×/1.07×/1.18–1.20× e2e at N=26/29/32 —
+`markdown/notes/sve2-ablation-2026-06-13.md`). External GPT/Gemini
+feedback adjudicated in
+`markdown/notes/external-feedback-review-2026-06-12.md`; φ-tie
+collision exposition: `markdown/notes/tie-collisions-2026-06-12.md`.
 
 Knob quick-reference (details in `docs/benchmarking.md` §3):
 
@@ -250,6 +259,7 @@ Knob quick-reference (details in `docs/benchmarking.md` §3):
 | `DOUBLY_EVEN_PARENT_RULE` | coset-spectrum | `legacy` = kill-switch, `audit` = measurement |
 | `DOUBLY_EVEN_CANON_LABELLING` | autom-only | `full` = D19 kill-switch (labelling on every call + per-class ccol in output) |
 | `DOUBLY_EVEN_TIE_DUMP` | unset | JSONL tie dump, sequential only (collision analysis) |
+| `DOUBLY_EVEN_DECOMP_LOG` | unset | JSONL decomp/twin record per canon call, sequential only (lever-4 measurement, 2026-06-13) |
 | `DOUBLY_EVEN_PHI_MAX_RANK` | 13 | legacy rule above (sound mixing) |
 | `DOUBLY_EVEN_SEEDER_THREADS` | = threads | 0 disables the seeder pool |
 | `DOUBLY_EVEN_SEEDER_PAR_MIN_L` | 22 | load-bearing; don't lower |

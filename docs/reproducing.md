@@ -170,13 +170,18 @@ scripts/gcp-bench.sh shakedown-c4a-72
 
 ```sh
 cd ~/doubly-even
-DOUBLY_EVEN_THREADS=72 DOUBLY_EVEN_FRONTIER_DEPTH=5 \
+DOUBLY_EVEN_THREADS=72 DOUBLY_EVEN_FRONTIER_DEPTH=4 \
     DOUBLY_EVEN_CANON_CACHE_CAP=300000 \
     uv run python scripts/run_streaming.py \
     --N 28 \
     --output-dir /home/$USER/n28-out \
     --label n28-c4a72-shakedown
 ```
+
+(The original 2026-05-21 record used `FRONTIER_DEPTH=5`; depth 4 has
+been the better setting at every benched `N` since the parent-rule
+levers landed — see `bottlenecks.md` §3. Walls quoted below are from
+the depth-5 era and should improve.)
 
 Per-worker binary files are written to `~/n28-out/out.w<wid>.bin`;
 peak RSS is ~71 GB. Wall time on c4a-72: ~61 min. On a smaller host
