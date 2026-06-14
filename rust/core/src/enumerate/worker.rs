@@ -19,7 +19,9 @@ use crate::subspace_orbit::subspace_in_orbit;
 use crate::types::BinVec;
 use crate::u256::U256;
 
-use super::cache::{canon_cache_capacity, weight_enum, BucketEntry, CachedInfo, LabelMode};
+use super::cache::{
+    canon_cache_capacity, canon_cache_enabled, weight_enum, BucketEntry, CachedInfo, LabelMode,
+};
 #[cfg(feature = "parallel")]
 use super::drivers::{GlobalMassTracker, SeedFrontier};
 
@@ -111,7 +113,11 @@ pub(crate) struct WorkerState {
     /// kept off the parallel workers regardless because they already have
     /// `quota = u128::MAX`. Ablation knob for the refactor profiling pass.
     pub(crate) skip_mass_stop: bool,
-    pub(crate) canon_cache: LruCache<Vec<BinVec>, Rc<CachedInfo>>,
+    /// Primary canon-info cache. `None` when the `DOUBLY_EVEN_CANON_CACHE`
+    /// kill-switch disables it — then no `LruCache` is allocated and
+    /// `canon_info` skips probe + insert (pure memoisation, so output is
+    /// decision-identical either way).
+    pub(crate) canon_cache: Option<LruCache<Vec<BinVec>, Rc<CachedInfo>>>,
     /// Per-k breakdown of `is_canonical_augmentation` outcomes. Indexed by
     /// the parent rank (i.e., rank of C; the child D has rank k+1). Used
     /// by the σ_Q-orbit-min rejection-rate audit
@@ -422,7 +428,7 @@ impl WorkerState {
             profile_enqueues: Vec::new(),
             #[cfg(feature = "parallel_profiling")]
             profile_sigma_spans: Vec::new(),
-            canon_cache: LruCache::new(canon_cache_capacity()),
+            canon_cache: canon_cache_enabled().then(|| LruCache::new(canon_cache_capacity())),
             stats_is_canon_aug_calls_by_k: vec![0u64; len],
             stats_parent_eq_hits_by_k: vec![0u64; len],
             stats_weight_enum_filtered_by_k: vec![0u64; len],

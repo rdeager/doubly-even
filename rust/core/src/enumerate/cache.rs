@@ -36,6 +36,26 @@ pub(crate) fn canon_cache_capacity() -> NonZeroUsize {
     NonZeroUsize::new(cap).expect("canon cache capacity must be non-zero")
 }
 
+/// Whether the primary per-worker canon cache is enabled. Read once at
+/// `WorkerState::new` from `DOUBLY_EVEN_CANON_CACHE` (the kill-switch for the
+/// 2026-06-14 cache-elimination A/B). Default ON; `0` / `off` / `false`
+/// (case-insensitive) disables it, in which case `WorkerState::canon_cache`
+/// is `None` — no `LruCache` is allocated (the memory win) and `canon_info`
+/// skips the probe + insert entirely. Decision-identical either way: the
+/// cache is pure memoisation of canon results, so disabling it changes only
+/// timing / memory, never the emitted class set / `canon_calls` / mass.
+/// Post-D15 its hit rate is ~0.003 % (703 / 23.1 M calls at N=28), so the
+/// default may flip OFF once the A/B confirms the bypass wins.
+pub(crate) fn canon_cache_enabled() -> bool {
+    match std::env::var("DOUBLY_EVEN_CANON_CACHE") {
+        Ok(raw) => !matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "0" | "off" | "false"
+        ),
+        Err(_) => true,
+    }
+}
+
 /// Internal cache row for canon info; mirrors `EnumeratedRaw` minus the
 /// `rref` (which is the cache key). Stored behind `Rc` so cache hits and
 /// recursion-state hand-off don't clone the heavy `Vec<Vec<u32>>` aut
@@ -155,8 +175,9 @@ impl WorkerState {
             || self.label_mode == LabelMode::Full
             || self.maintain_secondary_cache;
 
-        // Primary cache.
-        if let Some(info) = self.canon_cache.get(rref) {
+        // Primary cache (skipped entirely when the kill-switch disabled it —
+        // `canon_cache` is `None`, so `as_mut()` short-circuits to a miss).
+        if let Some(info) = self.canon_cache.as_mut().and_then(|c| c.get(rref)) {
             self.stats_primary_hits += 1;
             if !want_label || info.canonical_column_order.is_some() {
                 return Rc::clone(info);
@@ -175,8 +196,11 @@ impl WorkerState {
             let nauty_delta = nauty_t0.elapsed().as_nanos();
             self.stats_nauty_ns += nauty_delta;
             self.stats_nauty_ns_by_k[rref.len()] += nauty_delta as u64;
+            // The cache was `Some` on the hit above, so it is still `Some` here.
             let old = self
                 .canon_cache
+                .as_mut()
+                .expect("cache present on the hit path")
                 .get(rref)
                 .expect("entry present moments ago");
             // The group-level outputs are properties of Aut(C) and must not
@@ -198,7 +222,10 @@ impl WorkerState {
                 aut_order,
                 column_orbits: native.column_orbits,
             });
-            self.canon_cache.put(rref.to_vec(), Rc::clone(&upgraded));
+            self.canon_cache
+                .as_mut()
+                .expect("cache present on the hit path")
+                .put(rref.to_vec(), Rc::clone(&upgraded));
             return upgraded;
         }
 
@@ -266,7 +293,9 @@ impl WorkerState {
                         "verifier reconstruction produced wrong canonical form"
                     );
                 }
-                self.canon_cache.put(rref.to_vec(), Rc::clone(&new_info));
+                if let Some(c) = self.canon_cache.as_mut() {
+                    c.put(rref.to_vec(), Rc::clone(&new_info));
+                }
                 self.stats_verifier_hits += 1;
                 return new_info;
             }
@@ -300,7 +329,9 @@ impl WorkerState {
             aut_order,
             column_orbits: native.column_orbits,
         });
-        self.canon_cache.put(rref.to_vec(), Rc::clone(&info));
+        if let Some(c) = self.canon_cache.as_mut() {
+            c.put(rref.to_vec(), Rc::clone(&info));
+        }
 
         if let Some(key) = we_key {
             // Compute canonical form for secondary-cache membership. The
@@ -421,6 +452,12 @@ mod tests {
         );
         // Unit-test isolation: ignore any ambient env instrumentation.
         w.maintain_secondary_cache = false;
+        // These tests exercise the primary cache (hits / label upgrades), so
+        // force it on regardless of any ambient DOUBLY_EVEN_CANON_CACHE
+        // kill-switch in the test process environment.
+        if w.canon_cache.is_none() {
+            w.canon_cache = Some(lru::LruCache::new(canon_cache_capacity()));
+        }
         w
     }
 
