@@ -87,9 +87,16 @@ N ≥ 28 cloud run):
 | `DOUBLY_EVEN_PARENT_RULE` | default | `legacy` is the whole-rule kill-switch, `audit` the measurement mode |
 | `DOUBLY_EVEN_CANON_LABELLING` | default (`autom-only`) | `full` is the autom-only-lever kill-switch: computes nauty's canonical labelling on every call and restores per-class `canonical_column_order` in the output |
 | `DOUBLY_EVEN_TIE_DUMP` | unset | path to a JSONL sink for φ-tie records (collision analysis). **Sequential drivers only** — parallel drivers panic. Analysis: `scripts/experimental/tie_collision_analysis.py` |
-| `DOUBLY_EVEN_SELF_SUBDIVIDE` | off (branch `feature/tail-self-subdivision`) | demand-driven self-subdivision (D20): a busy worker at shallow depth donates an accepted child onto the seed channel when peers are idle, deepening the frontier adaptively in the heavy N>27 tail. Victim-initiated work-sharing, not work-stealing. **OFF byte-identical to main.** Local gate ladder PASS (class-set + per-rank mass identical ON/OFF at N=24,26; donations fire only at parent depth ≤ `frontier_depth+δ`; termination stable under cap=1 backpressure). Cloud N=29 collapse is the merge gate |
-| `DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA` | 1 | D20: donatable depth past `frontier_depth` — parent gate `k ≤ frontier_depth+δ`. Empirical; informed by the per-seed-work model, tuned at cloud |
+| `DOUBLY_EVEN_SELF_SUBDIVIDE` | off (merged to main, OFF default) | demand-driven self-subdivision (D20): a busy worker at shallow depth donates an accepted child onto the seed channel when peers are idle, deepening the frontier adaptively in the heavy N>27 tail. Victim-initiated work-sharing, not work-stealing. **OFF byte-identical to main.** Local ladder PASS; first scaled signal N=27 **1.30×** (contended, single run). Cloud `(d, δ)` sweep determines the production default |
+| `DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA` | 1 | D20: donatable depth past `frontier_depth` (parent gate `k ≤ frontier_depth+δ`; finest granularity `frontier_depth+δ+1`). Decouples granularity from seeder span — co-optimise via `scripts/cloud_depth_sweep.py` |
 | `DOUBLY_EVEN_SELF_SUBDIVIDE_POLL_MS` | 2 | D20: `recv_timeout` poll interval for the donation-aware worker loop (shutdown latency, negligible vs a minutes-long run) |
+
+The **`(frontier_depth × delta)` cloud sweep** is `scripts/cloud_depth_sweep.py`:
+a 2-D grid at the cheap N=27 size with a **hard ≤2 min per-arm budget**
+(kill-on-overrun), reporting wall + the tail metric (wall − time-to-90 %-mass,
+read live from `progress.json`) and a correctness gate vs the known class count.
+Run it on the clean 96-core box (the "d=5 knee" was a no-lever 1-D result;
+self-subdivision makes the optimum 2-D and likely shallower-static).
 
 Each invocation runs each `N` once and writes one JSON
 (`scripts/bench-results/<timestamp>-<label>.json`) keyed by `per_N`,

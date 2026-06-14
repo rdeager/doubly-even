@@ -276,8 +276,8 @@ Knob quick-reference (details in `docs/benchmarking.md` §3):
 | `DOUBLY_EVEN_SEEDER_PAR_MIN_L` | 22 | load-bearing; don't lower |
 | `DOUBLY_EVEN_NO_MASS_STOP` | off | ablation knob (mass-stop measured ~inert post-D19: ≤26 candidates pruned at N=27) |
 | `DOUBLY_EVEN_MASS_FLUSH_INTERVAL` | 2048 | parallel only: emissions/worker between shared-mass-tracker flushes; the 96-thread futex-storm fix. Contention knob, not pruning — classes+mass identical at any value |
-| `DOUBLY_EVEN_SELF_SUBDIVIDE` | **off** | **D20 demand-driven self-subdivision** (`feature/tail-self-subdivision`, default OFF). On: a busy worker at shallow depth donates an accepted child onto the seed channel when peers are idle (victim-initiated work-sharing) — adaptive tail depth for the N>27 load-imbalance. OFF byte-identical to main. Local ladder PASS (class-set+per-rank-mass identical ON/OFF N=24,26; donations fire shallow, max_k=frontier+δ); cloud N=29 win pending before merge |
-| `DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA` | 1 | D20 donatable depth past `frontier_depth` (parent gate `k ≤ frontier_depth+δ`); empirical, tune at cloud |
+| `DOUBLY_EVEN_SELF_SUBDIVIDE` | **off** | **D20 demand-driven self-subdivision** (MERGED to main, default OFF = byte-identical). On: a busy worker at shallow depth donates an accepted child onto the seed channel when peers are idle (victim-initiated work-sharing) — adaptive tail depth for the N>27 load-imbalance. Local ladder PASS; **first scaled signal N=27 1.30× / −23 %** (20-core, contended, single run). Not yet the production default — `(d, δ)` co-optimised on cloud (`scripts/cloud_depth_sweep.py`) then flip ON |
+| `DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA` | 1 | D20 donatable depth past `frontier_depth` (parent gate `k ≤ frontier_depth+δ`); sets adaptive granularity `frontier_depth+δ+1`. **Decouples seed granularity from seeder span** — co-optimise `(FRONTIER_DEPTH × δ)` on cloud; the old "d=5 knee" is a no-lever result |
 | `DOUBLY_EVEN_SELF_SUBDIVIDE_POLL_MS` | 2 | D20 worker `recv_timeout` poll for the donation-aware termination loop |
 | `M4R_MIN_L = 14` | const in `core/src/orbit.rs` | orbit-BFS byte-table crossover |
 

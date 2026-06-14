@@ -225,8 +225,9 @@ stealing; "still running shallow while peers idle" is the free, exact
 heavy-subtree signal — no proxy needed). Deeper uniform `FRONTIER_DEPTH`
 (d=6/7) is the substitutable zero-code granularity knob to A/B against it.
 
-**Status 2026-06-14: BUILT + locally gated on `feature/tail-self-subdivision`**
-(D20, knob `DOUBLY_EVEN_SELF_SUBDIVIDE`, default **OFF** ⇒ main byte-identical).
+**Status 2026-06-14: BUILT + MERGED to `main`** (D20, knob
+`DOUBLY_EVEN_SELF_SUBDIVIDE`, default **OFF** ⇒ main byte-identical; merged
+OFF-default for cloud spin-up convenience, NOT yet the production default).
 Shared `LoadBalancer { idle_workers, outstanding, seeder_done }`; shallow-gated
 `try_send` donation in `traverse` (`k ≤ frontier_depth+δ`, δ=1); reserve-before-send
 + `recv_timeout` termination (`seeder_done && outstanding==0`) factored into one
@@ -235,8 +236,31 @@ ladder PASS: OFF byte-identical (Rust suite + 552 pytest); ON correctness
 (class-set + per-rank mass identical at nt=2/4/8 and via `run_counts.py` at
 N=24,26); behavioral (profiling build: donations fire, scaling 3→13 with
 2→8 threads, `donation_max_k = frontier_depth+δ` — shallow gate held);
-termination stress (cap=1 / POLL=1 ms, 100 loops, no hang/underflow). **Merge
-gate = cloud N=29 on c4a-96-metal** (target 33 min → ~16 min), not yet run.
+termination stress (cap=1 / POLL=1 ms, 100 loops, no hang/underflow).
+
+**First scaled signal (N=27, 20-core 13700K, contended box, single runs):**
+OFF 41.6 s vs **ON 32.0 s = 1.30× / −23 %**, class-set + all-rank mass cert
+byte-identical (2,673,492). The win appears between N=24 (lever a slight *loss*
+— donation overhead > tail at small N) and N=27 (clear win) — consistent with
+"the tail grows with N". Local numbers are contention-noisy; the clean
+measurement is on cloud.
+
+**Reframing the depth question (this is the open cloud work).** The
+"d=5 is the 96-core knee" finding was measured *without* the lever. D20
+**decouples** the two jobs `FRONTIER_DEPTH` did with one number:
+`frontier_depth` now sets only the serial **seeder span**, while
+`frontier_depth + δ + 1` sets the finest **adaptive granularity** the lever
+reaches (deepest donated subtree). So the optimum is a 2-D point `(d, δ)` and
+likely shifts *shallower*: a cheap shallow static frontier + adequate δ should
+match a deep static frontier's balance without paying its seeder span.
+Known limit: the gate is a fixed depth cutoff, so a single subtree below
+`frontier_depth+δ+1` that is still huge stays a straggler — bump δ, or (v2) a
+"this worker has ground one seed too long" time-based gate. **Sweep harness:**
+`scripts/cloud_depth_sweep.py` (2-D `d × δ` grid at N=27, **hard ≤2 min/arm**
+budget with kill-on-overrun, tail metric = wall − time-to-90 %-mass from
+`progress.json`). Plan: sweep at N=27 → confirm the winner at N=28/N=29
+(separate >2 min runs) → set that `(d, δ)` as the default + flip the knob ON.
+**Cloud merge/ship gate = N=29 at the winning config** (target 33 min → ~16 min).
 
 **Side finding (deterministic counters, contention-immune):** mass-stop
 *pruning* is now **~inert** in the parallel path. At N=27, flushing every
