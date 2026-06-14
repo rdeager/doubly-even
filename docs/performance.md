@@ -10,9 +10,10 @@ Measured 2026-06-12 on a 13700K-equivalent dev container — a
 single-wheel knob A/B whose `DOUBLY_EVEN_CANON_LABELLING=full` control
 reproduced the 2026-06-11 walls (0.683 / 6.27 / 81.5 s sequential), so
 the "vs full labelling" column is exactly
-[`algorithm.md`](algorithm.md) lever 10's same-session delta. Each run
-starts from a cold canon cache; all DFGHILM Table 3 cells verified per
-run. `d = 4` is the best frontier depth at every benched `N`.
+[`algorithm.md`](algorithm.md) lever 10's same-session delta. All
+DFGHILM Table 3 cells verified per run. `d = 4` is the best frontier
+depth at every benched `N`. (The walls below predate the 2026-06-14
+canon-cache removal, which was wall-neutral — see "Memory" below.)
 
 | N  | classes   | sequential | parallel best           | vs full labelling |
 |----|----------:|-----------:|-------------------------|------------------------:|
@@ -21,10 +22,9 @@ run. `d = 4` is the best frontier depth at every benched `N`.
 | 22 |     5,118 |    0.623 s | **0.24 s** (t=24, d=4)  | 1.097× (seq) |
 | 24 |    37,496 |     5.72 s | **~1.7 s** (t=24, d=4)  | 1.096× (seq) |
 | 26 |   494,272 | **74.6 s** | **9.21 s** (t=24, d=4)  | 1.092× (seq), 1.035× (par) |
-| 27 | 2,673,492 |          — | **~63–66 s** (t=24, d=4, cap=500K) | ~1.0× (par; worker-bound, session noise ±10 %) |
+| 27 | 2,673,492 |          — | **~63–66 s** (t=24, d=4) | ~1.0× (par; worker-bound, session noise ±10 %) |
 
-`N = 26` sequential needs `DOUBLY_EVEN_CANON_CACHE_CAP=500000` (the
-uncapped run OOMs). The four-Russians + codegen epoch (2026-06-11):
+The four-Russians + codegen epoch (2026-06-11):
 `N = 22` 0.685 s seq / 0.24 s par; `N = 24` 6.26 s seq; `N = 26`
 81.4 s seq / 9.70 s par; `N = 27` 63.0 s par.
 The pair-structure-chain numbers (2026-06-10, same
@@ -46,7 +46,7 @@ why the chain's 1.30× sequential win showed up as only ~1.03× parallel
 on the desktop at those sizes — and why the four-Russians orbit BFS,
 which shortens the seeder span itself, *does* land 1.18× parallel at
 `N = 26`. One step up the chain's win emerged in full: at **`N = 27`**
-(same-hour A/B, median of 3, t=24 d=4 cap=500K) it took the parallel
+(same-hour A/B, median of 3, t=24 d=4) it took the parallel
 wall from 94.1 s to **66.1 s (1.42×)** — total work grows ~6× per step
 while the seeder span only roughly doubles, so the worker share
 recovers and the per-candidate saving (4.6× on spectrum evaluation at
@@ -70,11 +70,11 @@ The Emerald-Rapids cross-port has zero per-IPC penalty; the Axion
 port builds unchanged — the x86-only `popcnt` feature of
 `nauty-Traces-sys` is target-conditional in the manifest
 (`rust/core/Cargo.toml`; see the [`reproducing.md`](reproducing.md)
-ARM section). At `N = 29` on c4a-72 the per-worker LRU times 72
-workers grew tighter against the 288 GB headroom, so we ran with
-`DOUBLY_EVEN_CANON_CACHE_CAP = 200000` rather than the 300 K used at
-`N = 28` — this likely costs ~5–10 % wall to canon-cache thrash but
-fits comfortably.
+ARM section). (Historical: at `N = 29` on c4a-72 the per-worker LRU ×
+72 workers grew tight against the 288 GB headroom, so that run used
+`CANON_CACHE_CAP = 200000`. The canon cache was removed 2026-06-14, so
+this memory pressure — and the cap-thrash wall cost it implied — is
+gone; a post-removal N≥28 cloud re-run carries no cache footprint.)
 
 ## The `N = 28` cloud run (first reproducible result)
 
@@ -235,12 +235,15 @@ Gaborit mass formula at every rank. All checks passed:
 |  27 |   374.0 s |          2,673,492 | DFGHILM Table 3 ✓        |
 |  29 |  12.32 hr |        239,465,540 | mass-formula certificate (DFGHILM has no `N = 29` cells) |
 
-Configuration: `DOUBLY_EVEN_THREADS=72 DOUBLY_EVEN_FRONTIER_DEPTH=5
-DOUBLY_EVEN_CANON_CACHE_CAP=500000` for `N ≤ 27`, `CAP=200000` for
-`N = 29` (cgroup-tight RAM headroom). `N = 28` is documented
-separately above — the c4a-72 N=28 run on 2026-05-21 was used for
-the original DFGHILM Table 3 reproduction milestone and predates
-this sweep; its `CAP=300000` and class counts match.
+Configuration (as run, 2026-05): `DOUBLY_EVEN_THREADS=72
+DOUBLY_EVEN_FRONTIER_DEPTH=5 DOUBLY_EVEN_CANON_CACHE_CAP=500000` for
+`N ≤ 27`, `CAP=200000` for `N = 29` (cgroup-tight RAM headroom). `N =
+28` is documented separately above — the c4a-72 N=28 run on 2026-05-21
+was used for the original DFGHILM Table 3 reproduction milestone and
+predates this sweep; its `CAP=300000` and class counts match. (The
+`CANON_CACHE_CAP` settings are historical: the canon cache was removed
+2026-06-14, so current runs omit the var — there is no cache footprint
+to bound.)
 
 The corresponding per-`k` cells for `N ≤ 28` are in DFGHILM Table 3;
 the `N = 29` per-`k` breakdown is in
@@ -294,7 +297,7 @@ no effect when unset; defaults are the recommended values for `N ≤ 22`.
 |--------------------------------------|---------------|-------------|
 | `DOUBLY_EVEN_THREADS`                | unset (seq)   | `≥ 2` enables the parallel path; recommended `logical_cores − 2` at `N ≤ 22`, `logical_cores` at `N ≥ 24` |
 | `DOUBLY_EVEN_FRONTIER_DEPTH`         | 4             | DFS depth at which the seeder yields seeds to the worker pool; `4` is the measured best at every benched `N` since the split-frame lever (the older "raise to 5 for `N ≥ 24`" guidance is obsolete) |
-| `DOUBLY_EVEN_CANON_CACHE_CAP`        | 1,000,000     | per-worker LRU size (entries); load-bearing at `N ≥ 26` to keep the per-worker × N-workers footprint under host memory |
+| ~~`DOUBLY_EVEN_CANON_CACHE_CAP`~~    | **removed**   | the per-worker canon cache was deleted 2026-06-14 (post-D15 ~0.003 % hit = inert for speed, ~90 % of process RSS); the var is now ignored — no footprint to bound |
 | `DOUBLY_EVEN_NO_MASS_STOP`           | unset         | set to `1` to disable mass-stop pruning (ablation only) |
 | `DOUBLY_EVEN_PARENT_RULE`            | `coset-spectrum` | parent-selection rule: `coset-spectrum` (default), `legacy` (σ-based rule, kill-switch / A-B control), `audit` (legacy behaviour + φ instrumentation) |
 | `DOUBLY_EVEN_PHI_MAX_RANK`           | 13            | child-rank cap for the coset-spectrum cascade; above it the kernel uses the legacy rule per rank (only relevant at `N ≥ 30`) |
@@ -304,24 +307,26 @@ no effect when unset; defaults are the recommended values for `N ≤ 22`.
 Recommended config table (after the 2026-06-10 split-frame re-tune —
 `d = 4` everywhere; the seeder-pool knobs are best left at defaults):
 
-| host                            | N    | THREADS | FRONTIER_DEPTH | CANON_CACHE_CAP |
-|---------------------------------|------|--------:|---------------:|----------------:|
-| 13700K (24 logical / 16 phys)   | ≤22  |      20 |              4 |       1,000,000 |
-| 13700K                          |   24 |      24 |              4 |       1,000,000 |
-| 13700K                          |   26 |      24 |              4 |         500,000 |
-| 13700K (N=28 — cgroup-tight)    |   28 |      20 |              4 |         200,000 |
-| c4-standard-24 (Intel, 12 phys) |   26 |      24 |              4 |         500,000 |
-| c4a-standard-72 (Axion, 72 phys)|   28 |      72 |              4 |         300,000 |
+| host                            | N    | THREADS | FRONTIER_DEPTH |
+|---------------------------------|------|--------:|---------------:|
+| 13700K (24 logical / 16 phys)   | ≤22  |      20 |              4 |
+| 13700K                          |   24 |      24 |              4 |
+| 13700K                          |   26 |      24 |              4 |
+| 13700K (N=28)                   |   28 |      20 |              4 |
+| c4-standard-24 (Intel, 12 phys) |   26 |      24 |              4 |
+| c4a-standard-72 (Axion, 72 phys)|   28 |      72 |              4 |
 
 (The cloud rows above were *measured* at `d = 5` pre-split-frame; the
 `d = 4` recommendation extrapolates the 13700K re-tune and should be
 spot-checked in the first post-split-frame cloud shakedown.)
 
-At `N = 28` on the 13700K, the per-worker canon caches `× 22 threads`
-exceeded the 52 GiB cgroup limit on the dev host; the local run OOM'd
-under the default `CANON_CACHE_CAP = 500,000`. Drop to `200,000` to
-fit, or run on a memory-larger machine. The c4a-72 run used
-`CAP = 300,000` against 288 GB RAM and peaked at 71 GB.
+**Memory (post-2026-06-14):** the primary canon cache has been removed,
+so the per-worker × N-workers footprint that used to dominate RAM is
+gone — N=26 runs in ~60 MB seq / ~295 MB par. The earlier OOM caveats
+(the 13700K N=28 cgroup OOM under `CANON_CACHE_CAP = 500,000`; the
+c4a-72 71 GB peak) no longer apply; the steady-state RSS is now small,
+and the binding memory cost at large N is the seed set / output stream,
+not a cache.
 
 **Build note (x86 codegen).** x86 wheels are built with
 `-C target-cpu=x86-64-v3` via `rust/.cargo/config.toml` — cargo's

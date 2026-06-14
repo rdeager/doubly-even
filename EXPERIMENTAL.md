@@ -225,7 +225,7 @@ queues; not thread-safe under HAVE_TLS=1).
 |---------|-----------------|----------|
 | `DOUBLY_EVEN_NO_MASS_STOP=1` | The D5 mass-stop branches in `WorkerState::traverse` (sequential path only; parallel workers already get `u128::MAX` quota) | Step 0 of this refactor; 4-11 % regression confirmed |
 | `DOUBLY_EVEN_SECONDARY_CACHE_INSTRUMENTATION=1` | (Inverse — *enables* the secondary weight-enum bucket cache; off in default builds without the `equivalence_verifier` feature) | Verifier-mode plumbing |
-| `DOUBLY_EVEN_CANON_CACHE_CAP=<N>` | LRU canon cache capacity (default 500 000) | Memory-bound at N ≥ 26 |
+| ~~`DOUBLY_EVEN_CANON_CACHE_CAP=<N>`~~ | (removed 2026-06-14 — the primary canon cache was deleted; var now inert) | — |
 | `DOUBLY_EVEN_THREADS=<N>` | Worker count for the parallel kernel | Active perf knob |
 | `DOUBLY_EVEN_FRONTIER_DEPTH=<N>` | Outer-DFS seed depth (default 4) | Tune at N ≥ 24 |
 | `DOUBLY_EVEN_CANON_BACKEND=feulner` / `=sage_partn_ref` | Spine canonicaliser dispatch | Opt into a quarantined backend for cross-check |

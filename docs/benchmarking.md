@@ -64,12 +64,11 @@ readelf -d "$(.venv/bin/python -c 'import doubly_even_kernel as k; print(k.__fil
 ```sh
 # sequential, small N
 uv run python scripts/bench.py --label <arm>-seq --N 18,22,24
-# sequential N=26 — the cache cap is mandatory (uncapped OOMs)
-DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
-  uv run python scripts/bench.py --label <arm>-seq-n26 --N 26
+# sequential N=26 (since 2026-06-14 the canon cache is gone — N=26 fits
+# in ~60 MB, no cap to set)
+uv run python scripts/bench.py --label <arm>-seq-n26 --N 26
 # parallel N>=24 — full logical-core count, frontier depth 4
 DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=4 \
-  DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
   uv run python scripts/bench.py --label <arm>-par-n26 --N 26
 ```
 
@@ -80,7 +79,7 @@ N ≥ 28 cloud run):
 |---|---|---|
 | `DOUBLY_EVEN_THREADS` | cores − 2 at N ≤ 22; full logical count at N ≥ 24 | hybrid topologies are empirical |
 | `DOUBLY_EVEN_FRONTIER_DEPTH` | 4 | d=4 best ≤24 cores; **d=5 is the knee at 96 cores** (N=28 d=4/5/6 = 301.6/139.8/220.1 s, cloud 2026-06-14) — a granularity knob, deeper splits the tail finer for a longer serial seeder walk |
-| `DOUBLY_EVEN_CANON_CACHE_CAP` | 500000 at N=26 local; 100000 on 96-core cloud; 200000 on ≥200-core machines | per-worker cap; **inert for speed** (0.003 % hit post-D15), a memory/OOM knob only |
+| ~~`DOUBLY_EVEN_CANON_CACHE_CAP`~~ | **removed 2026-06-14** | The primary canon cache was deleted (post-D15 ~0.003 % hit = inert for speed, but ~90 % of process RSS). No cap to set; the var is now ignored. N=26 fits in 60 MB seq / 295 MB par |
 | `DOUBLY_EVEN_SEEDER_THREADS` | default (= threads) | 0 disables the seeder pool (A/B control) |
 | `DOUBLY_EVEN_SEEDER_PAR_MIN_L` | 22 (default) | load-bearing; lowering it loses to helper-vs-worker contention |
 | `DOUBLY_EVEN_MASS_FLUSH_INTERVAL` | 2048 | parallel only: emissions per worker between shared-mass-tracker flushes. Larger = fewer tracker locks (the 96-thread contention fix). A **contention** knob, not a pruning knob — mass-stop is ~inert post-D19 (≤26 candidates / 5 canon calls pruned at N=27 even at interval=1), so classes + mass are identical at any value; tune only for cloud `sy`-time |
@@ -275,11 +274,12 @@ the dominant unknown.
 - Same-session A/B, interleaved arms; the box drifts a few percent
   between sessions, so **ratios are the result, absolutes are not**.
 - Median of 3 per configuration; pin microbenches with `taskset`.
-- Sequential N=26 is OOM-adjacent on a 62 GB box even with
-  `CANON_CACHE_CAP=500000`: a mid-enumeration SIGKILL is *silent* in
-  non-interactive shells (output just stops, no JSON). If a rep goes
-  missing, that's what happened — re-run it, and use an RSS poller if it
-  recurs.
+- (Historical, pre-2026-06-14: sequential N=26 was OOM-adjacent on a
+  62 GB box because of the per-worker canon cache. That cache is now
+  removed — N=26 fits in ~60 MB — so this is no longer a concern.) A
+  mid-enumeration SIGKILL (e.g. host contention) is still *silent* in
+  non-interactive shells: output just stops, no JSON. If a rep goes
+  missing, re-run it.
 - Cloud quirks live in [`reproducing.md`](reproducing.md) (build
   bootstrap) and `../CLAUDE.md` (GCP gotchas: quota, per-machine cache
   caps, `kernel_build_info()` reporting).

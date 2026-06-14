@@ -36,7 +36,6 @@
 #   N                  code length            (default: $1 or 28)
 #   DEPTHS             frontier depths to A/B (default: "4 5")
 #   THREADS            worker threads         (default: nproc)
-#   CACHE_CAP          canon cache cap        (default: 300000; cloud value)
 #   MPSTAT_INTERVAL    seconds between mpstat samples (default: 10)
 #   PROGRESS_INTERVAL  progress.json cadence  (default: 30)
 #   OUT_ROOT           output root            (default: $HOME/n<N>-profile)
@@ -51,7 +50,6 @@ cd "$(dirname "$0")/.."
 N="${N:-${1:-28}}"
 DEPTHS="${DEPTHS:-4 5}"
 THREADS="${THREADS:-$(nproc)}"
-CACHE_CAP="${CACHE_CAP:-300000}"
 MPSTAT_INTERVAL="${MPSTAT_INTERVAL:-10}"
 PROGRESS_INTERVAL="${PROGRESS_INTERVAL:-30}"
 OUT_ROOT="${OUT_ROOT:-$HOME/n${N}-profile}"
@@ -79,7 +77,6 @@ cat <<EOF
   build_info:       $BUILD_INFO
   N:                $N
   depths (A/B):     $DEPTHS
-  canon cache cap:  $CACHE_CAP
   mpstat interval:  ${MPSTAT_INTERVAL}s     progress: ${PROGRESS_INTERVAL}s
   output root:      $OUT_ROOT
 
@@ -108,7 +105,6 @@ run_arm() {
     t0=$(date +%s)
     DOUBLY_EVEN_THREADS="$THREADS" \
         DOUBLY_EVEN_FRONTIER_DEPTH="$depth" \
-        DOUBLY_EVEN_CANON_CACHE_CAP="$CACHE_CAP" \
         .venv/bin/python scripts/run_counts.py \
             --N "$N" \
             --output-dir "$arm_dir" \

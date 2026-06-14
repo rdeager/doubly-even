@@ -12,7 +12,6 @@ Usage::
 
     # GCP c4a-standard-72 (Axion ARM) N=29:
     DOUBLY_EVEN_THREADS=72 DOUBLY_EVEN_FRONTIER_DEPTH=4 \\
-        DOUBLY_EVEN_CANON_CACHE_CAP=300000 \\
         uv run python scripts/run_streaming.py --N 29 \\
         --output-dir /mnt/scratch/n29
 
@@ -103,7 +102,6 @@ def main() -> int:
 
     nt = _parse_thread_env(os.environ.get("DOUBLY_EVEN_THREADS")) or 0
     frontier_depth = os.environ.get("DOUBLY_EVEN_FRONTIER_DEPTH", "default")
-    canon_cap = os.environ.get("DOUBLY_EVEN_CANON_CACHE_CAP", "default (500000)")
     # Decision-bearing knobs: recorded so cloud A/Bs are
     # attributable from stats.json alone. "default" = the env var is
     # unset and the kernel uses its built-in default.
@@ -125,7 +123,6 @@ def main() -> int:
     print(f"  output_dir:      {output_dir.resolve()}")
     print(f"  threads:         {nt} (from DOUBLY_EVEN_THREADS)")
     print(f"  frontier depth:  {frontier_depth}")
-    print(f"  canon cache cap: {canon_cap}")
     for var, val in knobs.items():
         if val != "default":
             print(f"  {var}: {val}")
@@ -169,7 +166,6 @@ def main() -> int:
         "max_k": max_k,
         "num_threads": nt,
         "frontier_depth": frontier_depth,
-        "canon_cache_cap": canon_cap,
         "env_knobs": knobs,
         "timestamp_utc": datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
         "git_sha": git_sha(),

@@ -266,7 +266,7 @@ Knob quick-reference (details in `docs/benchmarking.md` §3):
 |---|---|---|
 | `DOUBLY_EVEN_THREADS` | unset (seq) | cores−2 at N≤22, full count at N≥24 |
 | `DOUBLY_EVEN_FRONTIER_DEPTH` | 4 | d=4 best ≤24 cores; **d=5 is the knee at 96 cores** (N=28 d=4/5/6 = 301.6/139.8/220.1 s, cloud 2026-06-14). Granularity knob — deeper splits the tail finer at the cost of a longer serial seeder walk |
-| `DOUBLY_EVEN_CANON_CACHE_CAP` | 1M | **INERT for speed** (0.003 % hit rate post-D15 — `canon_calls` ≈ classes+ties). A memory knob only: 100K on 96-core cloud, 200K on ≥200-core boxes |
+| ~~`DOUBLY_EVEN_CANON_CACHE_CAP`~~ | — | **REMOVED 2026-06-14.** The primary per-worker canon cache was deleted: post-D15 hit rate ~0.003 % (inert for speed) but ~90 % of process RSS (N=26: 793→60 MB seq, 1416→295 MB par t=24). No cap to tune; OOM headroom is now automatic. Was the worker-count ceiling at N≥28 |
 | `DOUBLY_EVEN_PARENT_RULE` | coset-spectrum | `legacy` = kill-switch, `audit` = measurement |
 | `DOUBLY_EVEN_CANON_LABELLING` | autom-only | `full` = D19 kill-switch (labelling on every call + per-class ccol in output) |
 | `DOUBLY_EVEN_TIE_DUMP` | unset | JSONL tie dump, sequential only (collision analysis) |
@@ -315,7 +315,6 @@ scripts/install-kernel.sh parallel       # build + install the wheel
 uv run pytest                            # 549 passed + 41 slow-skipped
 uv run python scripts/bench.py --label <arm>-seq --N 18,22,24
 DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=4 \
-  DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
   uv run python scripts/bench.py --label <arm>-par-n26 --N 26
 ```
 
@@ -330,8 +329,9 @@ GCP gotchas (full recipe: `docs/reproducing.md`):
   `kernel_target_features()` for the codegen.
 - Fresh GCP projects cap at 24 global vCPUs; the first quota bump is
   denied with a 48-h cooldown. Plan ahead.
-- On c4-288-metal set `DOUBLY_EVEN_CANON_CACHE_CAP=200000` (288
-  workers × 500K would eat the 2160 GB ceiling).
+- Canon cache removed 2026-06-14, so there is no per-worker cache
+  footprint to bound — the old c4-288-metal `CANON_CACHE_CAP=200000`
+  workaround for the 2160 GB ceiling is obsolete (the var is now inert).
 
 ## Useful commands
 

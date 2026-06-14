@@ -17,7 +17,6 @@ Usage::
 
     # GCP c4a (Axion) N=30:
     DOUBLY_EVEN_THREADS=96 DOUBLY_EVEN_FRONTIER_DEPTH=4 \\
-        DOUBLY_EVEN_CANON_CACHE_CAP=300000 \\
         uv run python scripts/run_counts.py --N 30 \\
         --output-dir /mnt/scratch/n30
 
@@ -117,7 +116,6 @@ def main() -> int:
         var: os.environ.get(var, "default")
         for var in (
             "DOUBLY_EVEN_FRONTIER_DEPTH",
-            "DOUBLY_EVEN_CANON_CACHE_CAP",
             "DOUBLY_EVEN_PARENT_RULE",
             "DOUBLY_EVEN_CANON_LABELLING",
             "DOUBLY_EVEN_PHI_MAX_RANK",

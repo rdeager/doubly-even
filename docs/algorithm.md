@@ -220,8 +220,9 @@ the full table):
   `FRONTIER_DEPTH=5` advice from this lever's era is obsolete — the
   default `d = 4` is the measured best everywhere since the
   coset-spectrum rule.)
-- `N ≥ 26`: also `DOUBLY_EVEN_CANON_CACHE_CAP` — the per-worker LRU is
-  load-bearing for memory ceiling.
+  (The per-worker canon cache that `DOUBLY_EVEN_CANON_CACHE_CAP` used to
+  bound was removed 2026-06-14 — it was inert for speed at ~0.003 % hits
+  and ~90 % of process RSS — so there is no longer a memory knob to set.)
 
 Code: `rust/core/src/enumerate/drivers.rs::enumerate_doubly_even_parallel`. The
 parallel build is an opt-in Cargo feature (`parallel`) so the sequential

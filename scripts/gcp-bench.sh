@@ -76,7 +76,6 @@ DOUBLY_EVEN_THREADS=1 \
 echo ">>> Run B — half-sub (t=$HALF_CORES, depth=4) — N=16,24,26"
 DOUBLY_EVEN_THREADS=$HALF_CORES \
     DOUBLY_EVEN_FRONTIER_DEPTH=4 \
-    DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
     scripts/run-bench.sh --label "B-t${HALF_CORES}-d4-${LABEL_SUFFIX}" --N 16,24,26
 
 # --- Run C: fully-subscribed parallel ---------------------------------------
@@ -86,7 +85,6 @@ DOUBLY_EVEN_THREADS=$HALF_CORES \
 echo ">>> Run C — full-sub (t=$LOGICAL_CORES, depth=4) — N=24,26"
 DOUBLY_EVEN_THREADS=$LOGICAL_CORES \
     DOUBLY_EVEN_FRONTIER_DEPTH=4 \
-    DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
     scripts/run-bench.sh --label "C-t${LOGICAL_CORES}-d4-${LABEL_SUFFIX}" --N 24,26
 
 echo

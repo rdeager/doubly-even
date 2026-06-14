@@ -88,8 +88,9 @@ DOUBLY_EVEN_THREADS=24 \
 DOUBLY_EVEN_THREADS=24 \
     uv run python scripts/bench.py --label par-t24-n24 --N 24
 
-# Parallel at N=26 (~10 s with the canon-cache cap)
-DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
+# Parallel at N=26 (~10 s; the canon cache was removed 2026-06-14, so
+# N=26 runs in ~295 MB — no cap to set)
+DOUBLY_EVEN_THREADS=24 \
     uv run python scripts/bench.py --label par-t24-n26 --N 26
 ```
 
@@ -170,8 +171,8 @@ scripts/gcp-bench.sh shakedown-c4a-72
 
 ```sh
 cd ~/doubly-even
+# Canon cache removed 2026-06-14: no CANON_CACHE_CAP to set.
 DOUBLY_EVEN_THREADS=72 DOUBLY_EVEN_FRONTIER_DEPTH=4 \
-    DOUBLY_EVEN_CANON_CACHE_CAP=300000 \
     uv run python scripts/run_streaming.py \
     --N 28 \
     --output-dir /home/$USER/n28-out \
@@ -239,7 +240,7 @@ The streaming pipeline isn't cloud-specific. For local `N = 26` /
 
 ```sh
 # Terminal 1 — long-running kernel:
-DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
+DOUBLY_EVEN_THREADS=24 \
     uv run python scripts/run_streaming.py --N 26 \
     --output-dir /tmp/n26-local
 
@@ -294,10 +295,12 @@ fallback Python wheel: `uv pip install libclang` then
 - `DOUBLY_EVEN_THREADS` is set ≥ 2; the sequential path is taken
   when it's unset.
 
-**OOM at `N = 26` or `N = 28`.** Lower `DOUBLY_EVEN_CANON_CACHE_CAP`.
-The per-worker cache × thread count is the dominant memory user; at
-`N = 28` on a memory-tight host (e.g. cgroup-limited dev box), drop
-to `CAP = 200000`.
+**OOM at `N = 26` or `N = 28`.** This used to be the per-worker canon
+cache × thread count, tuned via `DOUBLY_EVEN_CANON_CACHE_CAP`. That
+cache was **removed 2026-06-14** (N=26 now ~60 MB seq / ~295 MB par),
+so steady-state RSS is small. If you still OOM at large `N`, the
+binding cost is the seed set / streamed output — lower `THREADS` or use
+a memory-larger host; the old `CANON_CACHE_CAP` knob is now inert.
 
 **Class counts don't match DFGHILM Table 3.** This is a kernel bug —
 file an issue with the bench JSON output, your platform info, and

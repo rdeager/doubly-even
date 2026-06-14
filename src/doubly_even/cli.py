@@ -31,7 +31,6 @@ def _info() -> int:
     for var in (
         "DOUBLY_EVEN_THREADS",
         "DOUBLY_EVEN_FRONTIER_DEPTH",
-        "DOUBLY_EVEN_CANON_CACHE_CAP",
         "DOUBLY_EVEN_PARENT_RULE",
         "DOUBLY_EVEN_CANON_LABELLING",
         "DOUBLY_EVEN_PHI_MAX_RANK",

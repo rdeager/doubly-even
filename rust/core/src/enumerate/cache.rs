@@ -1,9 +1,12 @@
-//! Two-tier canon-info cache: primary RREF-keyed LRU + secondary
-//! weight-enumerator buckets (equivalence transfer via the McKay BFS,
-//! or the paired-iso verifier when that feature is on). Bodies are
-//! verbatim from the original `enumerate.rs`.
+//! Canon-info computation + the secondary weight-enumerator cache
+//! (equivalence transfer via the McKay BFS, or the paired-iso verifier when
+//! that feature is on). The primary per-worker RREF-keyed LRU was REMOVED
+//! 2026-06-14: post-D15 its hit rate was ~0.003 % (a pure memory cost —
+//! ~90 % of process RSS at N=26), so it was inert for speed and a ceiling on
+//! the worker count at N ≥ 28. See git history (`b737fb7`, the kill-switch
+//! A/B) for the measurements. Bodies are otherwise verbatim from the
+//! original `enumerate.rs`.
 
-use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 use crate::canon::{canon_info_native, NativeCanonInfo, QD_GRAPH_THRESHOLD};
@@ -20,41 +23,6 @@ use crate::qd_graph::canon_info_qd_native;
 use crate::types::BinVec;
 
 use super::worker::WorkerState;
-
-/// Per-worker primary canon cache capacity. Read once at `WorkerState::new`
-/// from `DOUBLY_EVEN_CANON_CACHE_CAP` (parsed as a positive integer); else
-/// defaults to 500,000 entries, which is ~500 MB at N=26 and keeps a
-/// 20-worker run well under a 50 GB cgroup ceiling. Hit rate measured at
-/// 3–5 % across N=18–24, so eviction barely affects wall time.
-pub(crate) fn canon_cache_capacity() -> NonZeroUsize {
-    const DEFAULT_CAP: usize = 500_000;
-    let cap = std::env::var("DOUBLY_EVEN_CANON_CACHE_CAP")
-        .ok()
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(DEFAULT_CAP);
-    NonZeroUsize::new(cap).expect("canon cache capacity must be non-zero")
-}
-
-/// Whether the primary per-worker canon cache is enabled. Read once at
-/// `WorkerState::new` from `DOUBLY_EVEN_CANON_CACHE` (the kill-switch for the
-/// 2026-06-14 cache-elimination A/B). Default ON; `0` / `off` / `false`
-/// (case-insensitive) disables it, in which case `WorkerState::canon_cache`
-/// is `None` — no `LruCache` is allocated (the memory win) and `canon_info`
-/// skips the probe + insert entirely. Decision-identical either way: the
-/// cache is pure memoisation of canon results, so disabling it changes only
-/// timing / memory, never the emitted class set / `canon_calls` / mass.
-/// Post-D15 its hit rate is ~0.003 % (703 / 23.1 M calls at N=28), so the
-/// default may flip OFF once the A/B confirms the bypass wins.
-pub(crate) fn canon_cache_enabled() -> bool {
-    match std::env::var("DOUBLY_EVEN_CANON_CACHE") {
-        Ok(raw) => !matches!(
-            raw.trim().to_ascii_lowercase().as_str(),
-            "0" | "off" | "false"
-        ),
-        Err(_) => true,
-    }
-}
 
 /// Internal cache row for canon info; mirrors `EnumeratedRaw` minus the
 /// `rref` (which is the cache key). Stored behind `Rc` so cache hits and
@@ -153,20 +121,17 @@ impl WorkerState {
         rr
     }
 
-    /// Compute canon info for the code given by `rref`, or recover from cache.
+    /// Compute canon info (Aut group + orbits, optionally the canonical
+    /// labelling) for the code given by `rref`. Every call recomputes — the
+    /// primary memoisation cache was removed 2026-06-14 (post-D15 ~0.003 %
+    /// hit, pure memory cost).
     ///
     /// `need_label`: whether the caller will consume
     /// `canonical_column_order`. With [`LabelMode::AutomOnly`] (default) a
     /// `false` here runs nauty with `getcanon = FALSE` — the autom-only
-    /// lever. A cache hit on an autom-only entry by a label-needing caller
-    /// recomputes with the label and **replaces** the entry (never mutates:
-    /// in-flight `Rc` holders keep a valid autom-only snapshot they only
-    /// read gens / aut_order / orbits from). Stats contract: an upgrade
-    /// counts as a primary hit (bit-identical `canon_calls` /
-    /// `primary_hits` vs `LabelMode::Full`), tallied separately in
-    /// `stats_canon_label_upgrades`; the nauty tree counters
-    /// (numnodes/tctotal/maxlevel/generators) are NOT re-accumulated on
-    /// upgrades, so they keep meaning "per true miss".
+    /// lever. `stats_primary_hits` / `stats_canon_label_upgrades` are now
+    /// vestigial (always 0); they are retained only so the exported stats
+    /// layout stays stable.
     pub(crate) fn canon_info(&mut self, rref: &[BinVec], need_label: bool) -> Rc<CachedInfo> {
         // The secondary cache computes `canonical_form` on every true miss,
         // so maintaining it forces the label on every call (the feature /
@@ -175,62 +140,8 @@ impl WorkerState {
             || self.label_mode == LabelMode::Full
             || self.maintain_secondary_cache;
 
-        // Primary cache (skipped entirely when the kill-switch disabled it —
-        // `canon_cache` is `None`, so `as_mut()` short-circuits to a miss).
-        if let Some(info) = self.canon_cache.as_mut().and_then(|c| c.get(rref)) {
-            self.stats_primary_hits += 1;
-            if !want_label || info.canonical_column_order.is_some() {
-                return Rc::clone(info);
-            }
-            // Label upgrade: recompute full, replace the entry.
-            self.stats_canon_label_upgrades += 1;
-            let nauty_t0 = std::time::Instant::now();
-            let native = self.canon_dispatch(rref, true);
-            let aut_order = aut_order_exact(
-                native.grpsize1,
-                native.grpsize2,
-                &native.aut_generators,
-                self.n,
-                self.factorial_n,
-            );
-            let nauty_delta = nauty_t0.elapsed().as_nanos();
-            self.stats_nauty_ns += nauty_delta;
-            self.stats_nauty_ns_by_k[rref.len()] += nauty_delta as u64;
-            // The cache was `Some` on the hit above, so it is still `Some` here.
-            let old = self
-                .canon_cache
-                .as_mut()
-                .expect("cache present on the hit path")
-                .get(rref)
-                .expect("entry present moments ago");
-            // The group-level outputs are properties of Aut(C) and must not
-            // depend on getcanon; the generator *list* may differ (nauty can
-            // discover a different generating set of the same group), which
-            // is decision-neutral — orbits and orbit minima are
-            // generating-set-independent.
-            assert_eq!(
-                old.aut_order, aut_order,
-                "autom-only and full canon disagree on |Aut|"
-            );
-            debug_assert_eq!(
-                old.column_orbits, native.column_orbits,
-                "autom-only and full canon disagree on column orbits"
-            );
-            let upgraded = Rc::new(CachedInfo {
-                canonical_column_order: native.canonical_column_order,
-                aut_generators: native.aut_generators,
-                aut_order,
-                column_orbits: native.column_orbits,
-            });
-            self.canon_cache
-                .as_mut()
-                .expect("cache present on the hit path")
-                .put(rref.to_vec(), Rc::clone(&upgraded));
-            return upgraded;
-        }
-
-        // True miss. Decide whether to maintain the secondary cache for
-        // either the verifier dispatch or the env-gated instrumentation.
+        // Decide whether to maintain the secondary cache for either the
+        // verifier dispatch or the env-gated instrumentation.
         self.stats_canon_calls += 1;
         if !want_label {
             self.stats_canon_autom_only_calls += 1;
@@ -293,9 +204,6 @@ impl WorkerState {
                         "verifier reconstruction produced wrong canonical form"
                     );
                 }
-                if let Some(c) = self.canon_cache.as_mut() {
-                    c.put(rref.to_vec(), Rc::clone(&new_info));
-                }
                 self.stats_verifier_hits += 1;
                 return new_info;
             }
@@ -329,9 +237,6 @@ impl WorkerState {
             aut_order,
             column_orbits: native.column_orbits,
         });
-        if let Some(c) = self.canon_cache.as_mut() {
-            c.put(rref.to_vec(), Rc::clone(&info));
-        }
 
         if let Some(key) = we_key {
             // Compute canonical form for secondary-cache membership. The
@@ -452,59 +357,43 @@ mod tests {
         );
         // Unit-test isolation: ignore any ambient env instrumentation.
         w.maintain_secondary_cache = false;
-        // These tests exercise the primary cache (hits / label upgrades), so
-        // force it on regardless of any ambient DOUBLY_EVEN_CANON_CACHE
-        // kill-switch in the test process environment.
-        if w.canon_cache.is_none() {
-            w.canon_cache = Some(lru::LruCache::new(canon_cache_capacity()));
-        }
         w
     }
 
     /// The extended Hamming [8,4,4] basis from canon.rs's tests.
     const E8: [BinVec; 4] = [0xE1, 0xD2, 0xB4, 0x78];
 
-    /// Upgrade path: an autom-only cache entry hit by a label-needing
-    /// caller is recomputed full and REPLACED; the stats contract keeps
-    /// `canon_calls` / `primary_hits` bit-identical to Full-mode history
-    /// and tallies the recompute in `canon_label_upgrades` only.
+    /// Without the primary cache, repeated calls on the same code recompute
+    /// (no hits, no upgrades) — the autom-only lever still decides the label
+    /// per call, and the group-level outputs are getcanon-independent.
     #[test]
-    fn label_upgrade_replaces_entry_and_counts_once() {
+    fn repeated_calls_recompute_consistently() {
         let mut w = fresh_worker(LabelMode::AutomOnly);
 
         let first = w.canon_info(&E8, false);
-        assert!(first.canonical_column_order.is_none());
+        assert!(first.canonical_column_order.is_none(), "autom-only: no label");
         assert_eq!(w.stats_canon_calls, 1);
-        assert_eq!(w.stats_primary_hits, 0);
+        assert_eq!(w.stats_primary_hits, 0, "no primary cache => never hits");
         assert_eq!(w.stats_canon_autom_only_calls, 1);
+        assert_eq!(w.stats_canon_label_upgrades, 0, "no cache => no upgrades");
+
+        // A label-needing call recomputes from scratch (a fresh canon call).
+        let labelled = w.canon_info(&E8, true);
+        assert!(labelled.canonical_column_order.is_some());
+        assert_eq!(w.stats_canon_calls, 2, "recompute, not a hit");
+        assert_eq!(w.stats_primary_hits, 0);
         assert_eq!(w.stats_canon_label_upgrades, 0);
+        // Group-level outputs are getcanon-independent.
+        assert_eq!(labelled.aut_order, first.aut_order);
+        assert_eq!(labelled.column_orbits, first.column_orbits);
 
-        let upgraded = w.canon_info(&E8, true);
-        let sigma = upgraded
-            .canonical_column_order
-            .as_ref()
-            .expect("upgrade must produce the label");
-        assert_eq!(w.stats_canon_calls, 1, "upgrade is not a new canon call");
-        assert_eq!(w.stats_primary_hits, 1, "upgrade counts as a primary hit");
-        assert_eq!(w.stats_canon_label_upgrades, 1);
-        assert_eq!(upgraded.aut_order, first.aut_order);
-        assert_eq!(upgraded.column_orbits, first.column_orbits);
-
-        // The upgraded label matches a from-scratch Full compute.
+        // The label matches a from-scratch Full compute.
         let mut w_full = fresh_worker(LabelMode::Full);
         let oracle = w_full.canon_info(&E8, false); // Full mode forces the label
         assert_eq!(
-            Some(sigma),
-            oracle.canonical_column_order.as_ref().into(),
-            "upgraded label differs from a fresh full compute"
+            labelled.canonical_column_order, oracle.canonical_column_order,
+            "label differs from a fresh full compute"
         );
-
-        // Subsequent label-needing hits are plain hits — no re-upgrade.
-        let again = w.canon_info(&E8, true);
-        assert!(again.canonical_column_order.is_some());
-        assert_eq!(w.stats_canon_calls, 1);
-        assert_eq!(w.stats_primary_hits, 2);
-        assert_eq!(w.stats_canon_label_upgrades, 1);
     }
 
     /// Full mode (the kill-switch) never produces label-less entries,

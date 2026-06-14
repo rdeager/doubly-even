@@ -175,7 +175,9 @@ The measured 12.3 hr on `c4a-standard-72` is heavier than the
 pre-run forecast (~7.5 hr) — the slack came from two effects we did
 not fully account for: (a) the `DOUBLY_EVEN_CANON_CACHE_CAP` had to
 drop from 500 K to 200 K to fit the 288 GB ceiling at 72 workers,
-which likely costs ~5–10 % wall to canon-cache thrash, and (b) the
+which likely cost ~5–10 % wall to canon-cache thrash (**this effect is
+gone post-2026-06-14: the canon cache was removed**, so a re-run carries
+no cache footprint or thrash), and (b) the
 calls-per-class growth from `N = 26` (91) to `N = 29` (364) was
 faster than the 2026-05-21 forecast accounted for. The other rows
 in the table have been revised proportionally; treat them as
@@ -215,9 +217,9 @@ unchanged against any local directory. For long local runs the same
 recipe applies:
 
 ```sh
-# Local long-running N=26 (under a minute on a 13700K post-2026-06 levers):
+# Local long-running N=26 (under a minute on a 13700K post-2026-06 levers;
+# canon cache removed 2026-06-14, so no CANON_CACHE_CAP to set):
 DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=4 \
-    DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
     uv run python scripts/run_streaming.py --N 26 \
     --output-dir /tmp/n26-local
 

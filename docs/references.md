@@ -186,9 +186,9 @@ We reproduce DFGHILM Table 3 with:
 - An Apple Silicon M5 / M5 Pro MacBook with 64 GB of unified memory
   is *predicted* (not measured) to handle the same workload up to
   `N = 28` overnight: per-thread throughput on M5 P-cores is
-  competitive with the 13700K, the unified memory comfortably fits
-  the per-worker LRU at `CANON_CACHE_CAP ≈ 200 000`, and the same
-  target-conditional `Cargo.toml` patch used on the c4a-72 ARM
+  competitive with the 13700K, memory is no longer a constraint now
+  that the per-worker canon cache has been removed (2026-06-14), and
+  the same target-conditional `Cargo.toml` patch used on the c4a-72 ARM
   build is already on `main`. Total throughput on a 14-core M5 Pro
   is still well below the 72-core c4a-72, so `N = 29` remains a
   cloud-scale problem.

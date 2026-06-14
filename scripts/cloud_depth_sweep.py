@@ -140,7 +140,6 @@ def run_one(cfg: dict, args, out_dir: Path) -> dict:
     env = os.environ.copy()
     env["DOUBLY_EVEN_THREADS"] = str(args.threads)
     env["DOUBLY_EVEN_FRONTIER_DEPTH"] = str(cfg["depth"])
-    env["DOUBLY_EVEN_CANON_CACHE_CAP"] = str(args.cache_cap)
     if cfg["mode"] == "on":
         env["DOUBLY_EVEN_SELF_SUBDIVIDE"] = "1"
         env["DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA"] = str(cfg["delta"])
@@ -247,8 +246,6 @@ def main() -> int:
                    help="worker threads (default nproc)")
     p.add_argument("--timeout", type=float, default=120.0,
                    help="HARD per-run budget in seconds (default 120 = 2 min)")
-    p.add_argument("--cache-cap", type=int, default=100_000,
-                   help="DOUBLY_EVEN_CANON_CACHE_CAP per worker (cloud default)")
     p.add_argument("--progress-interval", type=int, default=1,
                    help="progress.json cadence; sets tail-metric resolution")
     p.add_argument("--poll-ms", type=int, default=None,
@@ -270,8 +267,7 @@ def main() -> int:
     ).stdout.strip()
 
     print(f"# D20 depth x delta sweep | N={args.N} threads={args.threads} "
-          f"timeout={args.timeout:g}s cache_cap={args.cache_cap} "
-          f"repeats={args.repeats} git={git_sha}")
+          f"timeout={args.timeout:g}s repeats={args.repeats} git={git_sha}")
     print(f"# expected classes N={args.N}: "
           f"{EXPECTED_CLASSES.get(args.N, 'UNKNOWN')}")
     print(f"# tail metric from progress.json (interval={args.progress_interval}s); "

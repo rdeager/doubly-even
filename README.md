@@ -115,10 +115,12 @@ took 12.3 h below).
 |  28 |    **3669 s (61.2 min)**    |  **21,505,546** |
 |  29 |    **44 356 s (12.3 hr)**   | **239,465,540** |
 
-`N ≤ 26` uses `CANON_CACHE_CAP=500 000`; the `N = 28` run used
-`CAP=300 000`; the `N = 29` run used `CAP=200 000` to stay inside the
-288 GB ceiling. The `N = 28` result was measured 2026-05-21 in a
-dedicated run; `N ≤ 27` and `N = 29` come from the 2026-05-22/23 sweep.
+(These 2026-05 runs tuned a per-worker canon cache via
+`CANON_CACHE_CAP` — 500 K for `N ≤ 26`, 300 K at `N = 28`, 200 K at
+`N = 29` — to stay inside the 288 GB ceiling. That cache was **removed
+2026-06-14**; current runs carry no cache footprint, so the knob is
+gone.) The `N = 28` result was measured 2026-05-21 in a dedicated run;
+`N ≤ 27` and `N = 29` come from the 2026-05-22/23 sweep.
 
 At `N = 29` the kernel made 87.2 billion canonicalisation calls at a
 mean of 29.5 µs/call — about 364 calls per emitted equivalence class.
@@ -255,12 +257,14 @@ live bottleneck profile.
 For `N ≥ 26` the in-memory `Vec` output approach used by `bench.py`
 becomes memory-heavy, and at `N ≥ 29` it is infeasible. The streaming
 output path writes per-worker binary files to a local directory and
-runs the mass-formula gate in-Rust; peak RSS is dominated by the
-per-worker canon caches.
+runs the mass-formula gate in-Rust. (Before 2026-06-14 peak RSS was
+dominated by the per-worker canon caches; that cache has since been
+removed, so steady-state RSS is small and the binding memory cost at
+large `N` is the seed set / output stream.)
 
 ```sh
 # Long-running kernel (locally or in a cloud VM):
-DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_CANON_CACHE_CAP=500000 \
+DOUBLY_EVEN_THREADS=24 \
     uv run python scripts/run_streaming.py --N 26 \
     --output-dir /tmp/n26-out
 
@@ -276,8 +280,10 @@ the output directory changes.
 
 On Apple Silicon (e.g. M5 / M5 Pro, 64 GB unified memory) the same
 streaming path should comfortably handle `N = 27` and `N = 28`
-overnight at `CANON_CACHE_CAP ≈ 200 000`. This is an extrapolation
-from the 13700K and c4a-72 measurements, not a measurement.
+overnight — and with the canon cache removed (2026-06-14) the
+steady-state RSS is small, so memory is no longer the constraint there.
+This is an extrapolation from the 13700K and c4a-72 measurements, not a
+measurement.
 
 For multi-node or `>256`-core deployment hints, see
 [`docs/cluster-deployment.md`](docs/cluster-deployment.md). The kernel
