@@ -79,14 +79,17 @@ N ≥ 28 cloud run):
 | knob | value | note |
 |---|---|---|
 | `DOUBLY_EVEN_THREADS` | cores − 2 at N ≤ 22; full logical count at N ≥ 24 | hybrid topologies are empirical |
-| `DOUBLY_EVEN_FRONTIER_DEPTH` | 4 | d=4 beats d=5 at every benched N under the current parent rule |
-| `DOUBLY_EVEN_CANON_CACHE_CAP` | 500000 at N=26 local; 200000 on ≥200-core machines | per-worker cap; the OOM unlock |
+| `DOUBLY_EVEN_FRONTIER_DEPTH` | 4 | d=4 best ≤24 cores; **d=5 is the knee at 96 cores** (N=28 d=4/5/6 = 301.6/139.8/220.1 s, cloud 2026-06-14) — a granularity knob, deeper splits the tail finer for a longer serial seeder walk |
+| `DOUBLY_EVEN_CANON_CACHE_CAP` | 500000 at N=26 local; 100000 on 96-core cloud; 200000 on ≥200-core machines | per-worker cap; **inert for speed** (0.003 % hit post-D15), a memory/OOM knob only |
 | `DOUBLY_EVEN_SEEDER_THREADS` | default (= threads) | 0 disables the seeder pool (A/B control) |
 | `DOUBLY_EVEN_SEEDER_PAR_MIN_L` | 22 (default) | load-bearing; lowering it loses to helper-vs-worker contention |
 | `DOUBLY_EVEN_MASS_FLUSH_INTERVAL` | 2048 | parallel only: emissions per worker between shared-mass-tracker flushes. Larger = fewer tracker locks (the 96-thread contention fix). A **contention** knob, not a pruning knob — mass-stop is ~inert post-D19 (≤26 candidates / 5 canon calls pruned at N=27 even at interval=1), so classes + mass are identical at any value; tune only for cloud `sy`-time |
 | `DOUBLY_EVEN_PARENT_RULE` | default | `legacy` is the whole-rule kill-switch, `audit` the measurement mode |
 | `DOUBLY_EVEN_CANON_LABELLING` | default (`autom-only`) | `full` is the autom-only-lever kill-switch: computes nauty's canonical labelling on every call and restores per-class `canonical_column_order` in the output |
 | `DOUBLY_EVEN_TIE_DUMP` | unset | path to a JSONL sink for φ-tie records (collision analysis). **Sequential drivers only** — parallel drivers panic. Analysis: `scripts/experimental/tie_collision_analysis.py` |
+| `DOUBLY_EVEN_SELF_SUBDIVIDE` | off (branch `feature/tail-self-subdivision`) | demand-driven self-subdivision (D20): a busy worker at shallow depth donates an accepted child onto the seed channel when peers are idle, deepening the frontier adaptively in the heavy N>27 tail. Victim-initiated work-sharing, not work-stealing. **OFF byte-identical to main.** Local gate ladder PASS (class-set + per-rank mass identical ON/OFF at N=24,26; donations fire only at parent depth ≤ `frontier_depth+δ`; termination stable under cap=1 backpressure). Cloud N=29 collapse is the merge gate |
+| `DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA` | 1 | D20: donatable depth past `frontier_depth` — parent gate `k ≤ frontier_depth+δ`. Empirical; informed by the per-seed-work model, tuned at cloud |
+| `DOUBLY_EVEN_SELF_SUBDIVIDE_POLL_MS` | 2 | D20: `recv_timeout` poll interval for the donation-aware worker loop (shutdown latency, negligible vs a minutes-long run) |
 
 Each invocation runs each `N` once and writes one JSON
 (`scripts/bench-results/<timestamp>-<label>.json`) keyed by `per_N`,

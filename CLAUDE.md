@@ -226,16 +226,27 @@ the section below.
 
 **Live numbers, phase shares, ranked next levers and the dead list are
 in `docs/bottlenecks.md` — that file, not this one, is the single
-source for "where the time goes".** Headline as of 2026-06-12 evening
-(**D19 autom-only canon SHIPPED**: getcanon=FALSE on the 80.7 % of
+source for "where the time goes".** Desktop seq headline (2026-06-12,
+**D19 autom-only canon SHIPPED**: getcanon=FALSE on the 80.7 % of
 canon calls whose labelling no decision reads; 1.09–1.10× seq,
 decisions bit-identical): N=22 seq 0.623 s / par 0.24 s; N=24 seq
-5.72 s; N=26 seq 74.6 s / par 9.21 s (t=24 d=4 cap=500K). Cloud
-records (pre-lever: N=28 61 min, N=29 12.32 h on c4a-72) are due a
-cheap re-run — N=29 forecast ~0.8–1.2 h. **Next session: the cloud
-days** (re-profile day then N=30 — bottlenecks §5 + the eval-plan §6
-runbook; entry point
-`markdown/notes/counts-mode-wrapup-2026-06-13.md`). 2026-06-13
+5.72 s; N=26 seq 74.6 s / par 9.21 s (t=24 d=4 cap=500K).
+
+**Cloud days DONE 2026-06-14.** The parallel mass-mutex futex storm
+(D13 single global `Mutex`, 85 % `sy` at 96t) is FIXED and
+cloud-confirmed on c4a-highmem-96-metal (`a957200`, batched writes +
+atomic full-flags; `sy`~0 %/`us`~92 %). Counts sweep N=24→29 at
+**d=5/96t** done: **N=29 in 33.1 min** (239,465,540 classes, 22× over
+the 12.32 h pre-fix run, all ranks `mass==σ` certified). **d=5 is the
+96-core knee** (N=28 d=4/5/6 = 301.6/139.8/220.1 s); the old "d=4 best /
+d=5 loses" was a ≤24-core + mutex-storm artifact. The live N>27 frontier
+is now **tail load-imbalance** (N=29: ~92 % mass by 13 min, 33 min total
+— the heavy-subtree tail ~doubled the wall). Chosen lever (DESIGNED
+2026-06-14): **demand-driven self-subdivision** (victim-initiated
+work-sharing — idle workers fed via `try_send` off the existing channel,
+not classic work-stealing), to be built next session on
+`feature/tail-self-subdivision` (entry point:
+`markdown/notes/self-subdivision-build-next-session-2026-06-14.md`). 2026-06-13
 session: **counts-only output mode SHIPPED** (`run_counts.py` +
 `dec progress`; the ONLY N≥30-capable entry — σ(30,·) ≈ 2^136
 overflows the old u128 mass spine, now 256-bit, decisions
@@ -254,8 +265,8 @@ Knob quick-reference (details in `docs/benchmarking.md` §3):
 | knob | default | note |
 |---|---|---|
 | `DOUBLY_EVEN_THREADS` | unset (seq) | cores−2 at N≤22, full count at N≥24 |
-| `DOUBLY_EVEN_FRONTIER_DEPTH` | 4 | d=4 best at every benched N |
-| `DOUBLY_EVEN_CANON_CACHE_CAP` | 1M | 500K at N=26 local (OOM unlock); 200K on ≥200-core boxes |
+| `DOUBLY_EVEN_FRONTIER_DEPTH` | 4 | d=4 best ≤24 cores; **d=5 is the knee at 96 cores** (N=28 d=4/5/6 = 301.6/139.8/220.1 s, cloud 2026-06-14). Granularity knob — deeper splits the tail finer at the cost of a longer serial seeder walk |
+| `DOUBLY_EVEN_CANON_CACHE_CAP` | 1M | **INERT for speed** (0.003 % hit rate post-D15 — `canon_calls` ≈ classes+ties). A memory knob only: 100K on 96-core cloud, 200K on ≥200-core boxes |
 | `DOUBLY_EVEN_PARENT_RULE` | coset-spectrum | `legacy` = kill-switch, `audit` = measurement |
 | `DOUBLY_EVEN_CANON_LABELLING` | autom-only | `full` = D19 kill-switch (labelling on every call + per-class ccol in output) |
 | `DOUBLY_EVEN_TIE_DUMP` | unset | JSONL tie dump, sequential only (collision analysis) |
@@ -265,6 +276,9 @@ Knob quick-reference (details in `docs/benchmarking.md` §3):
 | `DOUBLY_EVEN_SEEDER_PAR_MIN_L` | 22 | load-bearing; don't lower |
 | `DOUBLY_EVEN_NO_MASS_STOP` | off | ablation knob (mass-stop measured ~inert post-D19: ≤26 candidates pruned at N=27) |
 | `DOUBLY_EVEN_MASS_FLUSH_INTERVAL` | 2048 | parallel only: emissions/worker between shared-mass-tracker flushes; the 96-thread futex-storm fix. Contention knob, not pruning — classes+mass identical at any value |
+| `DOUBLY_EVEN_SELF_SUBDIVIDE` | **off** | **D20 demand-driven self-subdivision** (`feature/tail-self-subdivision`, default OFF). On: a busy worker at shallow depth donates an accepted child onto the seed channel when peers are idle (victim-initiated work-sharing) — adaptive tail depth for the N>27 load-imbalance. OFF byte-identical to main. Local ladder PASS (class-set+per-rank-mass identical ON/OFF N=24,26; donations fire shallow, max_k=frontier+δ); cloud N=29 win pending before merge |
+| `DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA` | 1 | D20 donatable depth past `frontier_depth` (parent gate `k ≤ frontier_depth+δ`); empirical, tune at cloud |
+| `DOUBLY_EVEN_SELF_SUBDIVIDE_POLL_MS` | 2 | D20 worker `recv_timeout` poll for the donation-aware termination loop |
 | `M4R_MIN_L = 14` | const in `core/src/orbit.rs` | orbit-BFS byte-table crossover |
 
 Internal-label index (the label↔name map; one line per lever, full
@@ -279,7 +293,10 @@ D14 fingerprint cache (REVERTED) · **D15 coset-spectrum parent rule** ·
 **D18 m4r orbit BFS** · 2026-06-11: workspace restructure +
 x86-64-v3 codegen (no label) · **D19 autom-only canon**
 (getcanon=FALSE on accepts; public name "automorphism-only
-canonicalisation", algorithm.md lever 10). Public docs use the descriptive names
+canonicalisation", algorithm.md lever 10) · **D20 demand-driven
+self-subdivision** (victim-initiated tail work-sharing,
+`feature/tail-self-subdivision`, default OFF; public name
+"demand-driven self-subdivision"). Public docs use the descriptive names
 only.
 
 History of this section: the long narrative that lived here was

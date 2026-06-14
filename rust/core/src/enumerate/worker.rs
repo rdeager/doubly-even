@@ -73,6 +73,23 @@ pub(crate) struct WorkerState {
     /// already saturated). `None` ⇒ exact pre-D16 sequential calls.
     #[cfg(feature = "parallel")]
     pub(crate) seeder_pool: Option<std::sync::Arc<crate::seeder_pool::SeederPool>>,
+    /// D20 demand-driven self-subdivision. When `self_subdivide` is set
+    /// (the `DOUBLY_EVEN_SELF_SUBDIVIDE` knob), a busy worker at shallow
+    /// depth (`k <= frontier_depth + subdivide_delta`) donates an accepted
+    /// child onto `task_tx` instead of recursing it, but only when
+    /// `balancer.idle_workers > 0`. On the seeder these are installed too
+    /// (with `task_tx = None`) so its send path reserves `outstanding`.
+    /// All `None`/`false` ⇒ exact pre-D20 behaviour.
+    #[cfg(feature = "parallel")]
+    pub(crate) task_tx: Option<crossbeam_channel::Sender<SeedFrontier>>,
+    #[cfg(feature = "parallel")]
+    pub(crate) balancer: Option<std::sync::Arc<super::drivers::LoadBalancer>>,
+    #[cfg(feature = "parallel")]
+    pub(crate) frontier_depth: u32,
+    #[cfg(feature = "parallel")]
+    pub(crate) self_subdivide: bool,
+    #[cfg(feature = "parallel")]
+    pub(crate) subdivide_delta: u32,
     /// Seeder-timeline instrumentation (profiling builds only). When the
     /// profile driver arms `profile_epoch`, [`traverse_seed`] records
     /// epoch-relative seed-enqueue timestamps and per-rank σ_Q call spans
@@ -389,6 +406,16 @@ impl WorkerState {
             mass_flush_interval: mass_flush_interval_from_env(),
             #[cfg(feature = "parallel")]
             seeder_pool: None,
+            #[cfg(feature = "parallel")]
+            task_tx: None,
+            #[cfg(feature = "parallel")]
+            balancer: None,
+            #[cfg(feature = "parallel")]
+            frontier_depth: 0,
+            #[cfg(feature = "parallel")]
+            self_subdivide: false,
+            #[cfg(feature = "parallel")]
+            subdivide_delta: 1,
             #[cfg(feature = "parallel_profiling")]
             profile_epoch: None,
             #[cfg(feature = "parallel_profiling")]
@@ -1070,6 +1097,27 @@ impl WorkerState {
         self.global_mass = Some(gm);
     }
 
+    /// D20: arm demand-driven self-subdivision on this state. Workers pass
+    /// `task_tx = Some(channel clone)` (they donate accepted children); the
+    /// seeder passes `None` (it is the producer — it only needs `balancer`
+    /// so its send path can reserve `outstanding`). Sets `self_subdivide`,
+    /// which flips on the donation gate in [`Self::traverse`] and the
+    /// reservation in [`Self::traverse_seed`].
+    #[cfg(feature = "parallel")]
+    pub(crate) fn install_self_subdivide(
+        &mut self,
+        balancer: std::sync::Arc<super::drivers::LoadBalancer>,
+        task_tx: Option<crossbeam_channel::Sender<SeedFrontier>>,
+        frontier_depth: u32,
+        delta: u32,
+    ) {
+        self.balancer = Some(balancer);
+        self.task_tx = task_tx;
+        self.frontier_depth = frontier_depth;
+        self.subdivide_delta = delta;
+        self.self_subdivide = true;
+    }
+
     /// Accumulate a per-class mass contribution into the local pending
     /// buffer, flushing to the shared `global_mass` tracker every
     /// `mass_flush_interval` emissions. No-op on the sequential path
@@ -1199,6 +1247,66 @@ impl WorkerState {
             else {
                 continue;
             };
+            // D20 demand-driven self-subdivision: donate this accepted
+            // child to an idle peer instead of recursing it ourselves —
+            // but only shallow (near a seed root, where a child is a
+            // substantial subtree) and only when a peer is actually idle.
+            // Cold path: one relaxed load per shallow parent when armed.
+            #[cfg(feature = "parallel")]
+            if self.self_subdivide
+                && k <= self.frontier_depth + self.subdivide_delta
+                && self
+                    .balancer
+                    .as_ref()
+                    .map_or(false, |b| {
+                        b.idle_workers.load(std::sync::atomic::Ordering::Relaxed) > 0
+                    })
+            {
+                // Arc + Sender clones (cheap) so we don't hold a borrow of
+                // `self` across the `self.traverse(...)` on the Full path.
+                let bal = self.balancer.clone().unwrap();
+                let tx = self.task_tx.clone().unwrap();
+                // Own the CachedInfo (same idiom traverse_seed uses): the
+                // Rc wrapper isn't Send, but CachedInfo is.
+                let info_owned: CachedInfo = match Rc::try_unwrap(info_d) {
+                    Ok(i) => i,
+                    Err(rc) => (*rc).clone(),
+                };
+                // Reserve BEFORE the seed becomes visible: a peer must not
+                // be able to dequeue + complete it (fetch_sub) before our
+                // fetch_add lands, or `outstanding` underflows.
+                bal.outstanding
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let seed = SeedFrontier {
+                    rref: d_rref,
+                    pivots: d_pivots,
+                    info: info_owned,
+                    #[cfg(feature = "parallel_profiling")]
+                    seed_id: 0,
+                };
+                match tx.try_send(seed) {
+                    // Donated; a peer will emit + recurse it.
+                    Ok(()) => {
+                        #[cfg(feature = "parallel_profiling")]
+                        {
+                            bal.donations
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            bal.donation_max_k
+                                .fetch_max(k as usize, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        continue;
+                    }
+                    // Channel full (already balanced) or disconnected: roll
+                    // back the reservation and recurse the child ourselves.
+                    Err(e) => {
+                        bal.outstanding
+                            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        let seed = e.into_inner();
+                        self.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
+                        continue;
+                    }
+                }
+            }
             self.traverse(d_rref, d_pivots, info_d);
         }
     }
@@ -1242,6 +1350,17 @@ impl WorkerState {
                 ),
                 None => (0, 0),
             };
+            // D20: reserve this seed's termination count BEFORE the
+            // (blocking) send makes it visible to a worker. Mirrors the
+            // donor's reserve-before-send; harmless when self-subdivision
+            // is off (the count is just never consulted).
+            if self.self_subdivide {
+                self.balancer
+                    .as_ref()
+                    .expect("self_subdivide set without balancer")
+                    .outstanding
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             task_tx
                 .send(SeedFrontier {
                     rref,

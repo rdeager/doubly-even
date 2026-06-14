@@ -56,6 +56,32 @@ fn timeline_payload_consistent_n14() {
             "per-rank class counts diverge at threads={threads}"
         );
 
+        // D20: when self-subdivision donated children, the shallow gate
+        // must have held (deepest donating parent <= frontier_depth+delta),
+        // and the seeder-timeline consistency below — which is defined for
+        // seeder-produced seeds only (donated seeds re-enter the channel
+        // without a seeder enqueue record and carry seed_id 0) — is skipped.
+        if profile.donations > 0 {
+            let delta: u32 = std::env::var("DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA")
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(1);
+            assert!(
+                profile.donation_max_k <= profile.frontier_depth + delta,
+                "donation at parent depth {} exceeded shallow gate \
+                 frontier_depth({}) + delta({})",
+                profile.donation_max_k,
+                profile.frontier_depth,
+                delta
+            );
+            eprintln!(
+                "[D20] threads={threads} donations={} donation_max_k={} \
+                 frontier_depth={}",
+                profile.donations, profile.donation_max_k, profile.frontier_depth
+            );
+            continue;
+        }
+
         let tl = &profile.seeder;
         // Seed counts agree: enqueues == worker seed rows == Σ seed_count.
         assert_eq!(tl.enqueues.len(), profile.seeds.len());

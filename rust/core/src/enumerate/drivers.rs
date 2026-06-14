@@ -125,6 +125,156 @@ impl GlobalMassTracker {
     }
 }
 
+/// D20 demand-driven self-subdivision: shared tail load-balancing state.
+///
+/// After the 2026-06-14 mass-mutex fix the last N>27 bottleneck is the
+/// tail — the seeder emits a *fixed* depth-`d` frontier with wildly
+/// varying subtree weights, so near the end a handful of workers grind
+/// the heaviest subtrees while the rest idle on an empty channel. This
+/// lever lets a busy worker, at shallow recursion depth, donate one
+/// not-yet-expanded accepted child back onto the *existing* seed channel
+/// (`try_send`) instead of recursing it — victim-initiated work-*sharing*,
+/// not thief-initiated work-stealing. "Still running shallow while peers
+/// idle" is the heavy-subtree signal, so the selector is free (static
+/// weight proxies are measured dead).
+///
+/// The struct is dormant unless `DOUBLY_EVEN_SELF_SUBDIVIDE` is set; with
+/// it unset the parallel drivers behave byte-identically to before
+/// (workers don't even hold a `task_tx` clone, so the old `drop(task_tx)`
+/// disconnect termination is used verbatim — see [`run_worker_loop`]).
+#[cfg(feature = "parallel")]
+pub(crate) struct LoadBalancer {
+    /// Workers currently blocked in `recv_timeout`. A *hint* read with a
+    /// relaxed load by donors; a stale value only makes a donor donate (or
+    /// not) slightly off, never incorrect.
+    pub(crate) idle_workers: std::sync::atomic::AtomicUsize,
+    /// Seeds produced (by the seeder OR a donor) whose top-level
+    /// `traverse` has not yet returned. The termination counter: every
+    /// in-progress seed holds exactly one count. Producers `fetch_add`
+    /// *before* the seed becomes visible (reserve-before-send); the worker
+    /// that finishes a dequeued seed `fetch_sub`s.
+    pub(crate) outstanding: std::sync::atomic::AtomicUsize,
+    /// Set true after the seeder's `traverse_seed` returns. Gates the
+    /// `outstanding == 0` exit so a worker doesn't terminate during a
+    /// transient lull between two seeder emissions.
+    pub(crate) seeder_done: std::sync::atomic::AtomicBool,
+    /// Behavioral-test instrumentation (profiling builds only): count of
+    /// children actually handed off, and the deepest *parent* depth at
+    /// which a hand-off happened. The latter must stay
+    /// `<= frontier_depth + subdivide_delta` — the shallow-gate invariant.
+    #[cfg(feature = "parallel_profiling")]
+    pub(crate) donations: std::sync::atomic::AtomicUsize,
+    #[cfg(feature = "parallel_profiling")]
+    pub(crate) donation_max_k: std::sync::atomic::AtomicUsize,
+}
+
+#[cfg(feature = "parallel")]
+impl LoadBalancer {
+    pub(crate) fn new() -> Self {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        Self {
+            idle_workers: AtomicUsize::new(0),
+            outstanding: AtomicUsize::new(0),
+            seeder_done: AtomicBool::new(false),
+            #[cfg(feature = "parallel_profiling")]
+            donations: AtomicUsize::new(0),
+            #[cfg(feature = "parallel_profiling")]
+            donation_max_k: AtomicUsize::new(0),
+        }
+    }
+}
+
+/// D20 knob bundle, resolved once per parallel run from the environment.
+/// `enabled` defaults OFF, so a default build is unchanged from `main`.
+#[cfg(feature = "parallel")]
+pub(crate) struct SelfSubdivideCfg {
+    pub enabled: bool,
+    /// Donate accepted children only while the *parent* is at depth
+    /// `k <= frontier_depth + delta`. Bounds donation to shallow nodes
+    /// (substantial subtrees) and caps re-donation depth.
+    pub delta: u32,
+    /// `recv_timeout` poll interval for the donation-aware worker loop.
+    pub poll: std::time::Duration,
+}
+
+#[cfg(feature = "parallel")]
+impl SelfSubdivideCfg {
+    pub(crate) fn from_env() -> Self {
+        let enabled = std::env::var("DOUBLY_EVEN_SELF_SUBDIVIDE")
+            .ok()
+            .map(|s| {
+                let s = s.trim();
+                !(s.is_empty() || s == "0" || s.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(false);
+        let delta = std::env::var("DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(1);
+        let poll_ms = std::env::var("DOUBLY_EVEN_SELF_SUBDIVIDE_POLL_MS")
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|&m| m >= 1)
+            .unwrap_or(2);
+        Self {
+            enabled,
+            delta,
+            poll: std::time::Duration::from_millis(poll_ms),
+        }
+    }
+}
+
+/// The parallel worker receive loop, shared by all three drivers (and
+/// mirrored, with timing, in `experimental/parallel_profile.rs`).
+///
+/// With self-subdivision OFF this is byte-identical to the pre-D20 loop:
+/// a blocking `recv()` that ends when the seeder's `drop(task_tx)`
+/// disconnects the channel (workers hold no sender clone in that mode).
+///
+/// With it ON, workers hold a `task_tx` clone (to donate), so the channel
+/// never disconnects while any worker lives. Termination instead uses the
+/// [`LoadBalancer`] counters: a worker exits on a `recv_timeout` timeout
+/// iff `seeder_done && outstanding == 0`. See the module/struct docs for
+/// the reserve-before-send correctness argument.
+#[cfg(feature = "parallel")]
+pub(crate) fn run_worker_loop(
+    worker: &mut WorkerState,
+    task_rx: &crossbeam_channel::Receiver<SeedFrontier>,
+    balancer: &std::sync::Arc<LoadBalancer>,
+    self_subdivide: bool,
+    poll: std::time::Duration,
+) {
+    use std::sync::atomic::Ordering;
+    if !self_subdivide {
+        while let Ok(seed) = task_rx.recv() {
+            worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
+        }
+        return;
+    }
+    loop {
+        balancer.idle_workers.fetch_add(1, Ordering::Relaxed);
+        match task_rx.recv_timeout(poll) {
+            Ok(seed) => {
+                balancer.idle_workers.fetch_sub(1, Ordering::Relaxed);
+                worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
+                // Top-level traverse of this seed is done; release its count.
+                balancer.outstanding.fetch_sub(1, Ordering::AcqRel);
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                balancer.idle_workers.fetch_sub(1, Ordering::Relaxed);
+                if balancer.seeder_done.load(Ordering::Acquire)
+                    && balancer.outstanding.load(Ordering::Acquire) == 0
+                {
+                    break;
+                }
+            }
+            // Safety net: only reachable if every sender clone dropped,
+            // which under self-subdivision means all workers have exited.
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
 /// Driver: enumerate canonical-augmentation representatives of doubly-even
 /// codes of length `n` up to rank `max_k`.
 ///
@@ -467,6 +617,8 @@ pub fn enumerate_doubly_even_parallel_with_seeder(
     reject_tie_dump_in_parallel();
     // One labelling-mode resolution for seeder + all workers.
     let labelling = LabelMode::from_env();
+    // D20 demand-driven self-subdivision (default OFF ⇒ unchanged path).
+    let ss = SelfSubdivideCfg::from_env();
 
     // Worker pool spawns first and waits on the (initially empty)
     // task channel. The bounded cap doubles as backpressure once the
@@ -483,6 +635,7 @@ pub fn enumerate_doubly_even_parallel_with_seeder(
     // The worker's *local* quota stays U256::MAX (the local panic check
     // would otherwise race; global counter is the authoritative one).
     let global_mass = std::sync::Arc::new(GlobalMassTracker::new(quota.clone()));
+    let balancer = std::sync::Arc::new(LoadBalancer::new());
 
     let mut handles = Vec::with_capacity(num_threads);
     for _ in 0..num_threads {
@@ -492,13 +645,17 @@ pub fn enumerate_doubly_even_parallel_with_seeder(
         let nn = n;
         let fact = factorial_n;
         let gm = std::sync::Arc::clone(&global_mass);
+        let bal = std::sync::Arc::clone(&balancer);
+        let donor_tx = if ss.enabled { Some(task_tx.clone()) } else { None };
+        let (ss_on, ss_poll, ss_delta, fd) = (ss.enabled, ss.poll, ss.delta, frontier_depth);
         handles.push(std::thread::spawn(move || {
             let inf_quota = vec![U256::MAX; (mk + 1) as usize];
             let mut worker = WorkerState::new(nn, mk, inf_quota, fact, rule, labelling);
             worker.install_global_mass(gm);
-            while let Ok(seed) = task_rx.recv() {
-                worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
+            if ss_on {
+                worker.install_self_subdivide(std::sync::Arc::clone(&bal), donor_tx, fd, ss_delta);
             }
+            run_worker_loop(&mut worker, &task_rx, &bal, ss_on, ss_poll);
             worker.flush_global_mass();
             let _ = result_tx.send(worker.finalize());
         }));
@@ -515,6 +672,11 @@ pub fn enumerate_doubly_even_parallel_with_seeder(
     let mut seed_state =
         WorkerState::new(n, max_k, quota.clone(), factorial_n, rule, labelling);
     seed_state.install_global_mass(std::sync::Arc::clone(&global_mass));
+    // D20: the seeder reserves `outstanding` on each send (task_tx = None;
+    // it produces, it doesn't donate).
+    if ss.enabled {
+        seed_state.install_self_subdivide(std::sync::Arc::clone(&balancer), None, frontier_depth, ss.delta);
+    }
     // D16 lever B: helper pool for the seeder's σ_Q calls, alive only
     // for the seeding span (helpers exit before the worker-dominated
     // tail; the main worker pool is starved during this span anyway).
@@ -537,6 +699,14 @@ pub fn enumerate_doubly_even_parallel_with_seeder(
     }
     seed_state.clear_seeder_pool();
     seed_state.flush_global_mass();
+    // D20: no more seeder production. Workers may now exit once the last
+    // outstanding seed drains (run_worker_loop's timeout gate). When OFF
+    // this flag is never read; the drop below disconnects the channel.
+    if ss.enabled {
+        balancer
+            .seeder_done
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
     drop(task_tx);
 
     // Drain results.
@@ -669,6 +839,9 @@ pub fn enumerate_doubly_even_parallel_streaming(
     reject_tie_dump_in_parallel();
     let quota_for_assert = quota.clone();
     let global_mass = std::sync::Arc::new(GlobalMassTracker::new(quota.clone()));
+    let balancer = std::sync::Arc::new(LoadBalancer::new());
+    // D20 demand-driven self-subdivision (default OFF ⇒ unchanged path).
+    let ss = SelfSubdivideCfg::from_env();
 
     // One rule + labelling-mode resolution for seeder + all workers.
     let rule = ParentRule::from_env();
@@ -682,6 +855,9 @@ pub fn enumerate_doubly_even_parallel_streaming(
         let nn = n;
         let fact = factorial_n;
         let gm = std::sync::Arc::clone(&global_mass);
+        let bal = std::sync::Arc::clone(&balancer);
+        let donor_tx = if ss.enabled { Some(task_tx.clone()) } else { None };
+        let (ss_on, ss_poll, ss_delta, fd) = (ss.enabled, ss.poll, ss.delta, frontier_depth);
         let path = output_dir.join(format!("out.w{:03}.bin", worker_id));
         handles.push(std::thread::spawn(move || {
             let writer = BinaryWriter::create(&path, nn, worker_id as u32)
@@ -690,9 +866,10 @@ pub fn enumerate_doubly_even_parallel_streaming(
             let mut worker = WorkerState::new(nn, mk, inf_quota, fact, rule, labelling);
             worker.install_global_mass(gm);
             worker.install_output_writer(writer);
-            while let Ok(seed) = task_rx.recv() {
-                worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
+            if ss_on {
+                worker.install_self_subdivide(std::sync::Arc::clone(&bal), donor_tx, fd, ss_delta);
             }
+            run_worker_loop(&mut worker, &task_rx, &bal, ss_on, ss_poll);
             worker.flush_global_mass();
             let (_empty, stats, per_k) = worker.finalize();
             let _ = result_tx.send((stats, per_k));
@@ -710,6 +887,9 @@ pub fn enumerate_doubly_even_parallel_streaming(
         WorkerState::new(n, max_k, quota.clone(), factorial_n, rule, labelling);
     seed_state.install_global_mass(std::sync::Arc::clone(&global_mass));
     seed_state.install_output_writer(seeder_writer);
+    if ss.enabled {
+        seed_state.install_self_subdivide(std::sync::Arc::clone(&balancer), None, frontier_depth, ss.delta);
+    }
     // D16 lever B (same wiring as the in-memory parallel driver).
     let (seeder_threads, seeder_min_l) =
         crate::seeder_pool::SeederPool::env_defaults(num_threads);
@@ -732,6 +912,11 @@ pub fn enumerate_doubly_even_parallel_streaming(
     }
     seed_state.clear_seeder_pool();
     seed_state.flush_global_mass();
+    if ss.enabled {
+        balancer
+            .seeder_done
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
     drop(task_tx);
 
     let (_empty, mut combined_stats, mut combined_per_k) = seed_state.finalize();
@@ -974,6 +1159,9 @@ pub fn enumerate_doubly_even_parallel_counts(
     reject_tie_dump_in_parallel();
     let quota_for_assert = quota.clone();
     let global_mass = std::sync::Arc::new(GlobalMassTracker::new(quota.clone()));
+    let balancer = std::sync::Arc::new(LoadBalancer::new());
+    // D20 demand-driven self-subdivision (default OFF ⇒ unchanged path).
+    let ss = SelfSubdivideCfg::from_env();
     let watcher = progress.map(|sink| {
         spawn_progress_watcher(
             std::sync::Arc::clone(&global_mass),
@@ -995,14 +1183,18 @@ pub fn enumerate_doubly_even_parallel_counts(
         let nn = n;
         let fact = factorial_n;
         let gm = std::sync::Arc::clone(&global_mass);
+        let bal = std::sync::Arc::clone(&balancer);
+        let donor_tx = if ss.enabled { Some(task_tx.clone()) } else { None };
+        let (ss_on, ss_poll, ss_delta, fd) = (ss.enabled, ss.poll, ss.delta, frontier_depth);
         handles.push(std::thread::spawn(move || {
             let inf_quota = vec![U256::MAX; (mk + 1) as usize];
             let mut worker = WorkerState::new(nn, mk, inf_quota, fact, rule, labelling);
             worker.counts_only = true;
             worker.install_global_mass(gm);
-            while let Ok(seed) = task_rx.recv() {
-                worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
+            if ss_on {
+                worker.install_self_subdivide(std::sync::Arc::clone(&bal), donor_tx, fd, ss_delta);
             }
+            run_worker_loop(&mut worker, &task_rx, &bal, ss_on, ss_poll);
             worker.flush_global_mass();
             let (classes, hist) = worker.take_counts();
             let (_empty, stats, per_k) = worker.finalize();
@@ -1016,6 +1208,9 @@ pub fn enumerate_doubly_even_parallel_counts(
         WorkerState::new(n, max_k, quota.clone(), factorial_n, rule, labelling);
     seed_state.counts_only = true;
     seed_state.install_global_mass(std::sync::Arc::clone(&global_mass));
+    if ss.enabled {
+        seed_state.install_self_subdivide(std::sync::Arc::clone(&balancer), None, frontier_depth, ss.delta);
+    }
     let (seeder_threads, seeder_min_l) =
         crate::seeder_pool::SeederPool::env_defaults(num_threads);
     if seeder_threads >= 2 {
@@ -1037,6 +1232,11 @@ pub fn enumerate_doubly_even_parallel_counts(
     }
     seed_state.clear_seeder_pool();
     seed_state.flush_global_mass();
+    if ss.enabled {
+        balancer
+            .seeder_done
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
     drop(task_tx);
 
     let (mut classes, mut hist) = seed_state.take_counts();

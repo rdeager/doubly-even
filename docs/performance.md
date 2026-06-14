@@ -63,7 +63,8 @@ run the sequential savings carry into the core-hours directly.
 |---------------------------|---------------------|--------|--------|-----------|-------|
 | GCP `c4-standard-24` (Emerald Rapids 8581C, x86_64) | 12 phys + SMT | 90 GB  | 26 | 285 s     | per-thread 1.65× slower than 13700K = pure clock ratio |
 | GCP `c4a-standard-72` (Axion / Neoverse V2, aarch64) | 72 phys (no SMT) | 288 GB | 28 | **3669 s (61.2 min)** | first reproducible N=28 enumeration; ~$3 of compute; `CAP=300K` |
-| GCP `c4a-standard-72` (Axion, aarch64) | 72 phys | 288 GB | 29 | **44 356 s (12.3 hr)** | **first publicly reproducible N=29 enumeration**; mass-formula certified; ~$35 of compute; `CAP=200K` (cgroup-tight) |
+| GCP `c4a-standard-72` (Axion, aarch64) | 72 phys | 288 GB | 29 | **44 356 s (12.3 hr)** | **first publicly reproducible N=29 enumeration**; mass-formula certified; ~$35 of compute; `CAP=200K` (cgroup-tight); **pre-mutex-fix** |
+| GCP `c4a-highmem-96-metal` (Axion, aarch64) | 96 phys | 768 GB | 29 | **1 986 s (33.1 min)** | **post-mutex-fix re-run 2026-06-14** (`a957200`, d=5/96t, counts mode): **22×** the c4a-72 row above; same 239,465,540 classes, mass cert PASSED; `sy`~0 % (futex storm gone). Live limiter now = tail load-imbalance |
 
 The Emerald-Rapids cross-port has zero per-IPC penalty; the Axion
 port builds unchanged — the x86-only `popcnt` feature of

@@ -26,8 +26,8 @@
 use std::rc::Rc;
 
 use crate::enumerate::{
-    enumerate_doubly_even, merge_finalized, EnumeratedRaw, GlobalMassTracker, SeedFrontier,
-    WorkerState,
+    enumerate_doubly_even, merge_finalized, EnumeratedRaw, GlobalMassTracker, LoadBalancer,
+    SeedFrontier, SelfSubdivideCfg, WorkerState,
 };
 use crate::types::BinVec;
 use crate::u256::U256;
@@ -81,6 +81,11 @@ pub struct ParallelProfile {
     pub frontier_depth: u32,
     pub total_wall_ns: u64,
     pub seeder: SeederTimeline,
+    /// D20 behavioral check: total children donated and the deepest parent
+    /// depth at which a donation fired. With self-subdivision off both are
+    /// 0; on, `donation_max_k <= frontier_depth + delta` must hold.
+    pub donations: u64,
+    pub donation_max_k: u32,
 }
 
 /// Profiling variant of `enumerate::enumerate_doubly_even_parallel`.
@@ -127,6 +132,8 @@ pub fn enumerate_doubly_even_parallel_with_profile(
             frontier_depth,
             total_wall_ns: total_ns,
             seeder: SeederTimeline::default(),
+            donations: 0,
+            donation_max_k: 0,
         };
         return (out, stats, per_k, profile);
     }
@@ -154,6 +161,9 @@ pub fn enumerate_doubly_even_parallel_with_profile(
     let (result_tx, result_rx) = unbounded::<WorkerResult>();
 
     let global_mass = std::sync::Arc::new(GlobalMassTracker::new(quota.clone()));
+    let balancer = std::sync::Arc::new(LoadBalancer::new());
+    // D20 demand-driven self-subdivision (default OFF ⇒ original loop).
+    let ss = SelfSubdivideCfg::from_env();
 
     let mut handles = Vec::with_capacity(num_threads);
     for worker_id in 0..num_threads as u32 {
@@ -163,23 +173,52 @@ pub fn enumerate_doubly_even_parallel_with_profile(
         let nn = n;
         let fact = factorial_n;
         let gm = std::sync::Arc::clone(&global_mass);
+        let bal = std::sync::Arc::clone(&balancer);
+        let donor_tx = if ss.enabled { Some(task_tx.clone()) } else { None };
+        let (ss_on, ss_poll, ss_delta, fd) = (ss.enabled, ss.poll, ss.delta, frontier_depth);
         let epoch = total_t0; // Instant is Copy; one shared epoch.
         handles.push(std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
             let inf_quota = vec![U256::MAX; (mk + 1) as usize];
             let mut worker = WorkerState::new(nn, mk, inf_quota, fact, rule, labelling);
             worker.install_global_mass(gm);
+            if ss_on {
+                worker.install_self_subdivide(std::sync::Arc::clone(&bal), donor_tx, fd, ss_delta);
+            }
             let mut seed_profiles: Vec<SeedProfile> = Vec::new();
             let mut active_ns: u64 = 0;
             let mut idle_ns: u64 = 0;
             let mut seed_count: u32 = 0;
             loop {
+                if ss_on {
+                    bal.idle_workers.fetch_add(1, Ordering::Relaxed);
+                }
                 let recv_t0 = Instant::now();
-                let item = task_rx.recv();
+                // OFF: blocking recv (ends on seeder's drop, original shape).
+                // ON: timed poll; exit only when seeder_done && outstanding==0.
+                let item = if ss_on {
+                    task_rx.recv_timeout(ss_poll)
+                } else {
+                    task_rx
+                        .recv()
+                        .map_err(|_| crossbeam_channel::RecvTimeoutError::Disconnected)
+                };
                 let idle_dt = recv_t0.elapsed().as_nanos() as u64;
                 idle_ns += idle_dt;
+                if ss_on {
+                    bal.idle_workers.fetch_sub(1, Ordering::Relaxed);
+                }
                 let seed = match item {
                     Ok(x) => x,
-                    Err(_) => break,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        if bal.seeder_done.load(Ordering::Acquire)
+                            && bal.outstanding.load(Ordering::Acquire) == 0
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 };
                 let start_ns = epoch.elapsed().as_nanos() as u64;
                 let seed_id = seed.seed_id;
@@ -189,6 +228,9 @@ pub fn enumerate_doubly_even_parallel_with_profile(
                 worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
                 let active_dt = active_t0.elapsed().as_nanos() as u64;
                 active_ns += active_dt;
+                if ss_on {
+                    bal.outstanding.fetch_sub(1, Ordering::AcqRel);
+                }
                 seed_count += 1;
                 seed_profiles.push(SeedProfile {
                     worker_id,
@@ -217,6 +259,9 @@ pub fn enumerate_doubly_even_parallel_with_profile(
     // with the epoch armed so traverse_seed records the timeline.
     let mut seed_state = WorkerState::new(n, max_k, quota.clone(), factorial_n, rule, labelling);
     seed_state.install_global_mass(std::sync::Arc::clone(&global_mass));
+    if ss.enabled {
+        seed_state.install_self_subdivide(std::sync::Arc::clone(&balancer), None, frontier_depth, ss.delta);
+    }
     let (seeder_threads, seeder_min_l) = crate::seeder_pool::SeederPool::env_defaults(num_threads);
     if seeder_threads >= 2 {
         seed_state.install_seeder_pool(std::sync::Arc::new(
@@ -232,6 +277,11 @@ pub fn enumerate_doubly_even_parallel_with_profile(
     }
     seed_state.clear_seeder_pool();
     seed_state.flush_global_mass();
+    if ss.enabled {
+        balancer
+            .seeder_done
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
     let seeder_done_ns = total_t0.elapsed().as_nanos() as u64;
     drop(task_tx);
 
@@ -260,12 +310,20 @@ pub fn enumerate_doubly_even_parallel_with_profile(
     all_seeds.sort_by_key(|s| (s.worker_id, s.seed_id));
 
     let total_wall_ns = total_t0.elapsed().as_nanos() as u64;
+    let donations = balancer
+        .donations
+        .load(std::sync::atomic::Ordering::Relaxed) as u64;
+    let donation_max_k = balancer
+        .donation_max_k
+        .load(std::sync::atomic::Ordering::Relaxed) as u32;
     let profile = ParallelProfile {
         workers: worker_profiles,
         seeds: all_seeds,
         frontier_depth,
         total_wall_ns,
         seeder: seeder_timeline,
+        donations,
+        donation_max_k,
     };
     (combined.0, combined.1, combined.2, profile)
 }

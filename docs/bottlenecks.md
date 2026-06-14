@@ -212,9 +212,31 @@ box only proved correctness; the metal redeploy proved the `sy` collapse.
 **Remaining 96-core limiter is now the TAIL load-imbalance, not the lock**
 — at N=29 d=5 the run hit ~92 % mass by ~13 min but took 33 min total
 (the low-mass heavy-subtree tail ~doubled the wall, collapsing to a
-single straggler core). That is the next parallel lever (heavy-subtree
-work-stealing / split the last few subtrees), not the seeder (which was
-<1 min at N=29 d=5).
+single straggler core). That is the next parallel lever, **not** the
+seeder (<1 min at N=29 d=5). Weighed 2026-06-14: classic thief-initiated
+work-stealing (per-worker deque rewrite) and cheap-proxy
+targeted-deepening are both out — every *static* heavy-seed proxy is
+measured uncorrelated with subtree weight (|Aut| Spearman +0.06, σ_Q
+branching +0.03). **Chosen approach: demand-driven self-subdivision** — a
+busy worker, observing idle cores via a shared `idle_workers` atomic
+(relaxed load at shallow depth), donates an un-expanded child onto the
+existing channel with `try_send` (victim-initiated work-*sharing*, not
+stealing; "still running shallow while peers idle" is the free, exact
+heavy-subtree signal — no proxy needed). Deeper uniform `FRONTIER_DEPTH`
+(d=6/7) is the substitutable zero-code granularity knob to A/B against it.
+
+**Status 2026-06-14: BUILT + locally gated on `feature/tail-self-subdivision`**
+(D20, knob `DOUBLY_EVEN_SELF_SUBDIVIDE`, default **OFF** ⇒ main byte-identical).
+Shared `LoadBalancer { idle_workers, outstanding, seeder_done }`; shallow-gated
+`try_send` donation in `traverse` (`k ≤ frontier_depth+δ`, δ=1); reserve-before-send
++ `recv_timeout` termination (`seeder_done && outstanding==0`) factored into one
+`run_worker_loop`, wired into all three drivers + the profiling mirror. Local
+ladder PASS: OFF byte-identical (Rust suite + 552 pytest); ON correctness
+(class-set + per-rank mass identical at nt=2/4/8 and via `run_counts.py` at
+N=24,26); behavioral (profiling build: donations fire, scaling 3→13 with
+2→8 threads, `donation_max_k = frontier_depth+δ` — shallow gate held);
+termination stress (cap=1 / POLL=1 ms, 100 loops, no hang/underflow). **Merge
+gate = cloud N=29 on c4a-96-metal** (target 33 min → ~16 min), not yet run.
 
 **Side finding (deterministic counters, contention-immune):** mass-stop
 *pruning* is now **~inert** in the parallel path. At N=27, flushing every
@@ -320,7 +342,7 @@ than geometric wall fits; use only same-wheel same-session label globs
 |---|---|---|
 | N=28 | well under the 61-min record; single c4a-72 | re-run is routine |
 | N=29 | **MEASURED 2026-06-14: 33.1 min on c4a-highmem-96-metal** (d=5/96t, counts-only, `a957200`) — beat the 0.9–1.3 h c4a-72 forecast on the bigger box | done; 239,465,540 classes, mass cert PASSED |
-| N=30 | **single Axion box, counts-only output**: from the measured d=5/96t curve, `canon_calls` grows ~×11/step (N=28→29 = ×11.2) ⇒ N=30 ~2.8 B calls; **wall ~6–9 h on a c4a-96-metal at d=5** (N=29 wall grew ×14.2 — faster than the ×11.2 work growth — because the **tail load-imbalance is widening**; ~$50–90). The tail work-stealing lever (§3) is what brings this back toward ~4–5 h. | counts-only mode is the ONLY N=30-capable entry (u128 mass spine overflows at σ(30, ·) ≈ 2^136); output is one JSON (per-rank table + |Aut| histograms + certificate). Drop `CANON_CACHE_CAP` to ~100K (cache hit rate 0.003 %, non-lever) for memory headroom; watch seed-set RAM in the first 3 min |
+| N=30 | **single Axion box, counts-only output**: from the measured d=5/96t curve, `canon_calls` grows ~×11/step (N=28→29 = ×11.2) ⇒ N=30 ~2.8 B calls; **wall ~6–9 h on a c4a-96-metal at d=5** (N=29 wall grew ×14.2 — faster than the ×11.2 work growth — because the **tail load-imbalance is widening**; ~$50–90). The tail self-subdivision lever (§3) is what brings this back toward ~4–5 h. | counts-only mode is the ONLY N=30-capable entry (u128 mass spine overflows at σ(30, ·) ≈ 2^136); output is one JSON (per-rank table + |Aut| histograms + certificate). Drop `CANON_CACHE_CAP` to ~100K (cache hit rate 0.003 %, non-lever) for memory headroom; watch seed-set RAM in the first 3 min |
 | N=31 | ~×6 again ⇒ ~1,500 core-h; feasible single-box over days, or a small cluster | candidate-count growth is the unknown |
 | N=32 | **floor ~44 core-h** single-thread by geometric carry (re-fit 2026-06-12; earlier vintages gave 63/475/174 — the method is a floor, not an estimate; count-anchored ×6/step says ~9,000 core-h) | cluster coordinator + the column-multiset engine for k ≤ 4 (σ_Q BFS universe/time explodes at low rank); re-anchor after the first post-lever cloud datapoint |
 

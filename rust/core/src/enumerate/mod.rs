@@ -57,7 +57,7 @@ pub use worker::EnumeratedRaw;
 #[cfg(feature = "equivalence_verifier")]
 pub(crate) use cache::{BucketEntry, CachedInfo};
 #[cfg(feature = "parallel_profiling")]
-pub(crate) use drivers::{GlobalMassTracker, SeedFrontier};
+pub(crate) use drivers::{GlobalMassTracker, LoadBalancer, SeedFrontier, SelfSubdivideCfg};
 #[cfg(feature = "parallel_profiling")]
 pub(crate) use stats::merge_finalized;
 #[cfg(feature = "parallel_profiling")]
