@@ -3,9 +3,14 @@
 > **As of:** 2026-06-14 (**parallel mass-mutex contention fixed** —
 > batched per-worker writes + atomic full-flags replace the per-emit
 > `GlobalMassTracker` lock that capped scaling at ~24 threads (85 % `sy`
-> at 96t on c4a-96-metal). Correctness gated locally; cure is cloud-only.
-> Side finding: mass-stop pruning is ~inert post-D19. See §3
-> "High-core wall". Previous: 2026-06-13 — **counts-only output mode SHIPPED** —
+> at 96t on c4a-96-metal). **CURE CONFIRMED on c4a-highmem-96-metal
+> 2026-06-14: `sy` ~0 % at 96t (was 85 %); the futex storm is gone.**
+> With it gone, the optimal **frontier depth flipped — d=5 now BEATS d=4
+> at 96 cores** (N=28 counts: 301.6 s d=4 → 139.8 s d=5; the old "d=5
+> loses at 96 cores" was THIS mutex, not the depth). Full counts sweep
+> **N=24→29 at d=5/96t captured — N=29 in 33.1 min (22× over the 12.32 h
+> paid pre-fix)**. Side finding: mass-stop pruning is ~inert post-D19.
+> See §3 "High-core wall". Previous: 2026-06-13 — **counts-only output mode SHIPPED** —
 > `enumerate_doubly_even_counts` + `scripts/run_counts.py` +
 > `dec progress`, per-rank {classes, mass, |Aut| histogram} with no
 > per-class records, the N ≥ 30 prerequisite; **mass spine widened to
@@ -70,10 +75,31 @@ restructure** (perf-neutral) and the **x86-64-v3 codegen flag**
 it is OOM-adjacent on a 62 GB box (silent mid-run SIGKILLs observed —
 use an RSS poller if a rep goes missing).
 
-Cloud records (both predate every lever shipped since 2026-06-10, so a
-re-run is cheap): N=28 in 61 min on GCP c4a-standard-72 (~$3); N=29 in
-12.32 h on the same platform (~$35), 239,465,540 classes, certificate at
-[`results/n29.json`](results/n29.json).
+Cloud records (the 2026-05 pre-lever runs): N=28 in 61 min on GCP
+c4a-standard-72 (~$3); N=29 in 12.32 h on the same platform (~$35),
+239,465,540 classes, certificate at [`results/n29.json`](results/n29.json).
+
+**Post-fix counts sweep — 2026-06-14, GCP c4a-highmem-96-metal (Axion
+aarch64, 96 cores / 768 GB), `a957200`, d=5, counts-only mode, all ranks
+`mass == σ` certified:**
+
+| N  | wall (d=5/96t) | classes      | canon_calls |
+|----|---------------:|-------------:|------------:|
+| 24 | 2.50 s         | 37,496       | 39,491      |
+| 26 | 13.0 s         | 494,272      | 523,356     |
+| 27 | 30.0 s         | 2,673,492    | 2,846,782   |
+| 28 | 139.8 s        | 21,505,546   | 23,129,911  |
+| 29 | **1986.8 s (33.1 min)** | **239,465,540** | 258,831,571 |
+
+N=29 is **22× faster** than the 12.32 h pre-fix run. N≤27 walls at 96t
+are seeder/startup-dominated (too small to saturate — read `canon_calls`
+for work growth, not the wall). **N=28 depth A/B at 96t: d=4 301.6 s /
+d=5 139.8 s / d=6 220.1 s** — U-shaped, knee at d=5 (d=4 under-seeds, d=6
+over-seeds into the serial seeder walk). `canon_calls` is identical ±3
+across d=4/5/6 → depth is pure scheduling. Canon cache hit rate at 96t is
+**0.003 %** (703 hits / 23.1 M calls at N=28) — D15+ removed the
+redundant calls the cache used to catch, so the cap is a non-lever; lower
+it freely for N=30 memory headroom.
 
 ## 2. Phase shares (sequential N=26; post-autom-only, 2026-06-12 evening, wall 74.6 s)
 
@@ -144,7 +170,13 @@ N ≤ 27**:
 | 27 | 19.1/24 | seeder itself blocked 30.3 s of its 51 s span on a full channel — wall is worker-throughput-bound, so seeder-side σ_Q speedups don't move it |
 
 Standing results: frontier depth **d=4 beats d=5 at every benched N**
-(the deeper cut resurrects the serial-seeder ceiling); the pooled-seeder
+(the deeper cut resurrects the serial-seeder ceiling) — **but this is a
+≤24-core result**. At **96 cores (post-mutex-fix, 2026-06-14) d=5 WINS**
+(N=28 d=4/d=5/d=6 = 301.6 / 139.8 / 220.1 s, U-shaped, knee at d=5):
+above ~24 cores d=4's coarse seeds starve the box, and the deeper cut
+saturates it instead of resurrecting the seeder ceiling. The old "d=5
+loses at 96 cores" reading was the mass-mutex storm, not the depth. The
+pooled-seeder
 gate `DOUBLY_EVEN_SEEDER_PAR_MIN_L=22` is load-bearing (lowering to 20
 loses 6–7 % at N=26 — pooling past the workers-idle window contends with
 saturated workers); an adaptive workers-starved gate was measured dead
@@ -170,9 +202,19 @@ futex contention, not work.
 ~2000× fewer lock acquisitions; the read is a relaxed load. Classes + the
 mass-formula certificate stay exact (gated parallel-vs-sequential at
 N=18/20 and the N=12/14/16 determinism suites). The dev container is
-20-core CFS-capped so it cannot reproduce the `sy` collapse — the
-contention cure is confirmed on a fresh c4a-96-metal redeploy (low `sy`
-at 96t), the local box only proves correctness.
+20-core CFS-capped so it cannot reproduce the `sy` collapse.
+
+**CURE CONFIRMED 2026-06-14 on a fresh c4a-highmem-96-metal:** N=28 counts
+at 96t ran at **`sy` ~0 % / `us` ~92 %** (d=5; `top` aggregate `0.0 us,
+0.0 sy` at d=4's low-occupancy phases too) — the futex storm is gone,
+classes exact (21,505,546, mass cert PASSED), N=29 in 33.1 min. The local
+box only proved correctness; the metal redeploy proved the `sy` collapse.
+**Remaining 96-core limiter is now the TAIL load-imbalance, not the lock**
+— at N=29 d=5 the run hit ~92 % mass by ~13 min but took 33 min total
+(the low-mass heavy-subtree tail ~doubled the wall, collapsing to a
+single straggler core). That is the next parallel lever (heavy-subtree
+work-stealing / split the last few subtrees), not the seeder (which was
+<1 min at N=29 d=5).
 
 **Side finding (deterministic counters, contention-immune):** mass-stop
 *pruning* is now **~inert** in the parallel path. At N=27, flushing every
@@ -277,8 +319,8 @@ than geometric wall fits; use only same-wheel same-session label globs
 | target | forecast | confidence / blocker |
 |---|---|---|
 | N=28 | well under the 61-min record; single c4a-72 | re-run is routine |
-| N=29 | 0.9–1.3 h on c4a-72 (41 core-h: kept-canon 28, φ 9, σ_Q 4) | count-anchored, re-fit 2026-06-12 on the v3 glob |
-| N=30 | **single Axion box, counts-only output**: ~250 ± 100 core-h (×6/step from N=29) ⇒ ~4–6 h on a 96-core c4a, ~$20–50 | counts-only mode SHIPPED 2026-06-13 (§4 lever 3) — `run_counts.py` is the ONLY N=30-capable entry (the u128 mass spine of the older entries overflows at σ(30, ·) ≈ 2^136); the old "streaming + cluster, ~3 TB" plan is obsolete — output is one JSON (per-rank table + |Aut| histograms + certificate) |
+| N=29 | **MEASURED 2026-06-14: 33.1 min on c4a-highmem-96-metal** (d=5/96t, counts-only, `a957200`) — beat the 0.9–1.3 h c4a-72 forecast on the bigger box | done; 239,465,540 classes, mass cert PASSED |
+| N=30 | **single Axion box, counts-only output**: from the measured d=5/96t curve, `canon_calls` grows ~×11/step (N=28→29 = ×11.2) ⇒ N=30 ~2.8 B calls; **wall ~6–9 h on a c4a-96-metal at d=5** (N=29 wall grew ×14.2 — faster than the ×11.2 work growth — because the **tail load-imbalance is widening**; ~$50–90). The tail work-stealing lever (§3) is what brings this back toward ~4–5 h. | counts-only mode is the ONLY N=30-capable entry (u128 mass spine overflows at σ(30, ·) ≈ 2^136); output is one JSON (per-rank table + |Aut| histograms + certificate). Drop `CANON_CACHE_CAP` to ~100K (cache hit rate 0.003 %, non-lever) for memory headroom; watch seed-set RAM in the first 3 min |
 | N=31 | ~×6 again ⇒ ~1,500 core-h; feasible single-box over days, or a small cluster | candidate-count growth is the unknown |
 | N=32 | **floor ~44 core-h** single-thread by geometric carry (re-fit 2026-06-12; earlier vintages gave 63/475/174 — the method is a floor, not an estimate; count-anchored ×6/step says ~9,000 core-h) | cluster coordinator + the column-multiset engine for k ≤ 4 (σ_Q BFS universe/time explodes at low rank); re-anchor after the first post-lever cloud datapoint |
 
