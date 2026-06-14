@@ -263,7 +263,8 @@ Knob quick-reference (details in `docs/benchmarking.md` §3):
 | `DOUBLY_EVEN_PHI_MAX_RANK` | 13 | legacy rule above (sound mixing) |
 | `DOUBLY_EVEN_SEEDER_THREADS` | = threads | 0 disables the seeder pool |
 | `DOUBLY_EVEN_SEEDER_PAR_MIN_L` | 22 | load-bearing; don't lower |
-| `DOUBLY_EVEN_NO_MASS_STOP` | off | ablation knob |
+| `DOUBLY_EVEN_NO_MASS_STOP` | off | ablation knob (mass-stop measured ~inert post-D19: ≤26 candidates pruned at N=27) |
+| `DOUBLY_EVEN_MASS_FLUSH_INTERVAL` | 2048 | parallel only: emissions/worker between shared-mass-tracker flushes; the 96-thread futex-storm fix. Contention knob, not pruning — classes+mass identical at any value |
 | `M4R_MIN_L = 14` | const in `core/src/orbit.rs` | orbit-BFS byte-table crossover |
 
 Internal-label index (the label↔name map; one line per lever, full

@@ -36,51 +36,81 @@ pub(crate) struct SeedFrontier {
 
 /// D13-V4 cut 4: shared cross-worker mass tracker for the parallel path.
 ///
-/// Each worker (and the seeder) atomically adds `N!/|Aut|` to `mass[k]`
-/// when it emits a code at rank `k`. Workers then consult
-/// `is_full(k+1)` before descending — once any subset of workers has
-/// collectively emitted enough mass at rank `k+1` to hit `quota[k+1]`,
-/// the remaining workers can prune that subtree just as the sequential
-/// mass-stop does. The invariant is one-directional: skipping when
-/// `global_mass >= quota` can only over-search relative to the optimum
-/// (workers may briefly continue past the tipping point before noticing),
-/// never under-search. The class count is still correct.
+/// Each worker (and the seeder) accumulates `N!/|Aut|` into a *local*
+/// per-rank pending buffer as it emits, and flushes that buffer into
+/// `mass[k]` here in batches (see `WorkerState::flush_global_mass`).
+/// Workers consult the lock-free `is_full(k+1)` before descending —
+/// once the collective mass at rank `k+1` hits `quota[k+1]`, the
+/// remaining workers prune that subtree just as the sequential
+/// mass-stop does. The invariant is one-directional: a *stale* full
+/// flag (batching delays when it flips) can only over-search relative
+/// to the optimum, never under-search — the class count and the final
+/// mass are exact regardless of flush timing.
 ///
-/// `std::sync::Mutex<Vec<U256>>` rather than a per-rank atomic because
-/// (a) wide ints have no native atomic op on x86-64 and (b) the lock is
-/// held for nanoseconds per emission — well under nauty's ≥ 78 µs/call
-/// cost. U256 since 2026-06-13: σ(30, ·) ≈ 2^136 overflows u128 (and a
-/// 72-way worker split of it still does).
+/// Batched writes + atomic read flags replaced a per-emit
+/// `Mutex<Vec<U256>>` lock (2026-06-14): post-D15→D19 each class costs
+/// ~50 µs, so the per-class write-lock + per-candidate read-lock became
+/// a futex storm past ~24 threads (85 % `sy` at 96 threads on
+/// c4a-96-metal — effective ~14 of 96 cores). The lock now fires once
+/// per ~`DOUBLY_EVEN_MASS_FLUSH_INTERVAL` emissions; the per-candidate
+/// read is a relaxed atomic load. U256 since 2026-06-13: σ(30, ·) ≈
+/// 2^136 overflows u128 (and a 72-way worker split of it still does).
 #[cfg(feature = "parallel")]
 pub(crate) struct GlobalMassTracker {
     mass: std::sync::Mutex<Vec<U256>>,
     quota: Vec<U256>,
+    /// Monotonic per-rank `mass[k] >= quota[k]` flags. Set during
+    /// `add_batch` (mass only grows, so once true they stay true) and
+    /// read lock-free by `is_full` — this is what removes the
+    /// per-candidate read-lock that caused the 96-thread futex storm.
+    full: Vec<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(feature = "parallel")]
 impl GlobalMassTracker {
     pub(crate) fn new(quota: Vec<U256>) -> Self {
         let len = quota.len();
+        // A rank whose quota is zero (σ(N, k) == 0) is "full" from the
+        // start, matching the pre-batch `mass[k] (== 0) >= quota[k]`.
+        let full = quota
+            .iter()
+            .map(|q| std::sync::atomic::AtomicBool::new(*q == U256::ZERO))
+            .collect();
         Self {
             mass: std::sync::Mutex::new(vec![U256::ZERO; len]),
             quota,
+            full,
         }
     }
 
-    /// Atomically add `delta` to `mass[k]`. (Per-class contributions
-    /// `N!/|Aut| ≤ N!` always fit u128; only the sum needs width.)
-    pub(crate) fn add(&self, k: usize, delta: u128) {
+    /// Add a worker's accumulated per-rank `deltas` under a single lock,
+    /// then refresh the monotonic `full` flags. Called once per
+    /// ~`DOUBLY_EVEN_MASS_FLUSH_INTERVAL` emissions per worker (plus a
+    /// final flush before its result is read), not once per emitted
+    /// class — ~2000× fewer lock acquisitions than the pre-2026-06-14
+    /// per-emit `add`. `deltas` is U256 because a 2048-batch sum of
+    /// per-class `N!/|Aut|` overflows u128 at N ≥ 31.
+    pub(crate) fn add_batch(&self, deltas: &[U256]) {
         let mut m = self.mass.lock().expect("global mass tracker poisoned");
-        m[k] = m[k].add_u128(delta);
+        for (k, d) in deltas.iter().enumerate() {
+            if *d == U256::ZERO {
+                continue;
+            }
+            m[k] = m[k].checked_add(*d);
+            if m[k] >= self.quota[k] {
+                self.full[k].store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
 
-    /// True iff `mass[k] >= quota[k]`. Returns `false` for out-of-range `k`.
+    /// True iff rank `k`'s mass has reached `quota[k]`. Lock-free: reads
+    /// the monotonic atomic flag set by `add_batch`. Returns `false` for
+    /// out-of-range `k`.
     pub(crate) fn is_full(&self, k: usize) -> bool {
-        if k >= self.quota.len() {
+        if k >= self.full.len() {
             return false;
         }
-        let m = self.mass.lock().expect("global mass tracker poisoned");
-        m[k] >= self.quota[k]
+        self.full[k].load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Snapshot of the per-k mass totals. Called after all workers have
@@ -469,6 +499,7 @@ pub fn enumerate_doubly_even_parallel_with_seeder(
             while let Ok(seed) = task_rx.recv() {
                 worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
             }
+            worker.flush_global_mass();
             let _ = result_tx.send(worker.finalize());
         }));
     }
@@ -505,6 +536,7 @@ pub fn enumerate_doubly_even_parallel_with_seeder(
         );
     }
     seed_state.clear_seeder_pool();
+    seed_state.flush_global_mass();
     drop(task_tx);
 
     // Drain results.
@@ -661,6 +693,7 @@ pub fn enumerate_doubly_even_parallel_streaming(
             while let Ok(seed) = task_rx.recv() {
                 worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
             }
+            worker.flush_global_mass();
             let (_empty, stats, per_k) = worker.finalize();
             let _ = result_tx.send((stats, per_k));
         }));
@@ -698,6 +731,7 @@ pub fn enumerate_doubly_even_parallel_streaming(
         );
     }
     seed_state.clear_seeder_pool();
+    seed_state.flush_global_mass();
     drop(task_tx);
 
     let (_empty, mut combined_stats, mut combined_per_k) = seed_state.finalize();
@@ -969,6 +1003,7 @@ pub fn enumerate_doubly_even_parallel_counts(
             while let Ok(seed) = task_rx.recv() {
                 worker.traverse(seed.rref, seed.pivots, Rc::new(seed.info));
             }
+            worker.flush_global_mass();
             let (classes, hist) = worker.take_counts();
             let (_empty, stats, per_k) = worker.finalize();
             let _ = result_tx.send((stats, per_k, classes, hist));
@@ -1001,6 +1036,7 @@ pub fn enumerate_doubly_even_parallel_counts(
         );
     }
     seed_state.clear_seeder_pool();
+    seed_state.flush_global_mass();
     drop(task_tx);
 
     let (mut classes, mut hist) = seed_state.take_counts();

@@ -30,6 +30,7 @@ use crate::enumerate::{
     WorkerState,
 };
 use crate::types::BinVec;
+use crate::u256::U256;
 
 #[derive(Clone, Debug)]
 pub struct WorkerProfile {
@@ -133,6 +134,11 @@ pub fn enumerate_doubly_even_parallel_with_profile(
     let rule = crate::parent_rule::ParentRule::from_env();
     let labelling = crate::enumerate::LabelMode::from_env();
 
+    // The U256 migration (2026-06-13) widened GlobalMassTracker / WorkerState
+    // quotas; this experimental profiling driver was missed, so widen here too
+    // (the sequential fallback above already consumed the u128 `quota`).
+    let quota: Vec<U256> = quota.into_iter().map(U256::from).collect();
+
     // Worker pool spawns first and waits on the (initially empty) bounded
     // channel — identical shape to the production driver, so seeder DFS
     // overlaps worker recursion and backpressure is real.
@@ -159,7 +165,7 @@ pub fn enumerate_doubly_even_parallel_with_profile(
         let gm = std::sync::Arc::clone(&global_mass);
         let epoch = total_t0; // Instant is Copy; one shared epoch.
         handles.push(std::thread::spawn(move || {
-            let inf_quota = vec![u128::MAX; (mk + 1) as usize];
+            let inf_quota = vec![U256::MAX; (mk + 1) as usize];
             let mut worker = WorkerState::new(nn, mk, inf_quota, fact, rule, labelling);
             worker.install_global_mass(gm);
             let mut seed_profiles: Vec<SeedProfile> = Vec::new();
@@ -193,6 +199,7 @@ pub fn enumerate_doubly_even_parallel_with_profile(
                     emitted: worker.output.len() as u32 - emitted_before,
                 });
             }
+            worker.flush_global_mass();
             let (out, stats, per_k) = worker.finalize();
             let profile = WorkerProfile {
                 worker_id,
@@ -224,6 +231,7 @@ pub fn enumerate_doubly_even_parallel_with_profile(
         seed_state.traverse_seed(zero_rref, zero_pivots, zero_info, frontier_depth, &task_tx);
     }
     seed_state.clear_seeder_pool();
+    seed_state.flush_global_mass();
     let seeder_done_ns = total_t0.elapsed().as_nanos() as u64;
     drop(task_tx);
 

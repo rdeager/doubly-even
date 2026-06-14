@@ -83,6 +83,7 @@ N ≥ 28 cloud run):
 | `DOUBLY_EVEN_CANON_CACHE_CAP` | 500000 at N=26 local; 200000 on ≥200-core machines | per-worker cap; the OOM unlock |
 | `DOUBLY_EVEN_SEEDER_THREADS` | default (= threads) | 0 disables the seeder pool (A/B control) |
 | `DOUBLY_EVEN_SEEDER_PAR_MIN_L` | 22 (default) | load-bearing; lowering it loses to helper-vs-worker contention |
+| `DOUBLY_EVEN_MASS_FLUSH_INTERVAL` | 2048 | parallel only: emissions per worker between shared-mass-tracker flushes. Larger = fewer tracker locks (the 96-thread contention fix). A **contention** knob, not a pruning knob — mass-stop is ~inert post-D19 (≤26 candidates / 5 canon calls pruned at N=27 even at interval=1), so classes + mass are identical at any value; tune only for cloud `sy`-time |
 | `DOUBLY_EVEN_PARENT_RULE` | default | `legacy` is the whole-rule kill-switch, `audit` the measurement mode |
 | `DOUBLY_EVEN_CANON_LABELLING` | default (`autom-only`) | `full` is the autom-only-lever kill-switch: computes nauty's canonical labelling on every call and restores per-class `canonical_column_order` in the output |
 | `DOUBLY_EVEN_TIE_DUMP` | unset | path to a JSONL sink for φ-tie records (collision analysis). **Sequential drivers only** — parallel drivers panic. Analysis: `scripts/experimental/tie_collision_analysis.py` |

@@ -1,6 +1,11 @@
 # Current bottleneck profile (living document)
 
-> **As of:** 2026-06-13 (**counts-only output mode SHIPPED** —
+> **As of:** 2026-06-14 (**parallel mass-mutex contention fixed** —
+> batched per-worker writes + atomic full-flags replace the per-emit
+> `GlobalMassTracker` lock that capped scaling at ~24 threads (85 % `sy`
+> at 96t on c4a-96-metal). Correctness gated locally; cure is cloud-only.
+> Side finding: mass-stop pruning is ~inert post-D19. See §3
+> "High-core wall". Previous: 2026-06-13 — **counts-only output mode SHIPPED** —
 > `enumerate_doubly_even_counts` + `scripts/run_counts.py` +
 > `dec progress`, per-rank {classes, mass, |Aut| histogram} with no
 > per-class records, the N ≥ 30 prerequisite; **mass spine widened to
@@ -147,6 +152,40 @@ saturated workers); an adaptive workers-starved gate was measured dead
 parallel lever is **fanning out across the ~200 independent per-parent
 k=3 σ_Q calls** (~20–30 ms each), not parallelising inside one BFS.
 
+### High-core wall: the global mass mutex (found 2026-06-14, c4a-96-metal)
+
+The §3 table is a ≤24-core (desktop) picture. The first 96-core cloud
+outing exposed a *different* binding constraint above ~24 threads: the
+single `GlobalMassTracker` mutex. Every emitted class write-locked it and
+every candidate read-locked it; harmless until D15→D19 cut compute/class
+to ~50 µs, after which the lock is hit a few µs apart globally. Thread
+ladder at N=28/29 counts d=4 on c4a-96-metal: **24t → 2.8 % `sy`, 48t →
+34 %, 96t → 85 %** (effective ~14 of 96 cores — *slower* than the 24-thread
+desktop). Diagnose by `top` **us vs sy**, not load-average: high `sy` =
+futex contention, not work.
+
+**Fix (2026-06-14, this branch):** batched per-worker writes (flush every
+`DOUBLY_EVEN_MASS_FLUSH_INTERVAL=2048` emissions) + a monotonic
+`Vec<AtomicBool>` "full" flag the per-candidate read consults lock-free.
+~2000× fewer lock acquisitions; the read is a relaxed load. Classes + the
+mass-formula certificate stay exact (gated parallel-vs-sequential at
+N=18/20 and the N=12/14/16 determinism suites). The dev container is
+20-core CFS-capped so it cannot reproduce the `sy` collapse — the
+contention cure is confirmed on a fresh c4a-96-metal redeploy (low `sy`
+at 96t), the local box only proves correctness.
+
+**Side finding (deterministic counters, contention-immune):** mass-stop
+*pruning* is now **~inert** in the parallel path. At N=27, flushing every
+emission (interval=1, tightest pruning) skips **26 candidates / 5 canon
+calls** out of 2.85 M; at interval ≥ 2048 it skips **0**. canon_calls are
+byte-identical OFF / i256 / i2048 / i16384 (calls ≈ classes + ties post-D19
+— nothing left to prune). So `MASS_FLUSH_INTERVAL` is a *contention* knob,
+not a pruning knob, and the batch delay erodes no real win. The tracker
+stays (it carries the live progress signal + the correctness certificate);
+only the *mass-stop* could be dropped from the parallel path as dead weight
+— a future simplification, not done here. The legacy "4–11 % mass-stop win"
+(D5) was sequential + pre-D15.
+
 ## 4. Ranked next levers (re-ranked 2026-06-12; ceilings from §2 shares)
 
 1. ✅ **Autom-only canon on non-tie accepts — SHIPPED 2026-06-12
@@ -159,9 +198,11 @@ k=3 σ_Q calls** (~20–30 ms each), not parallelising inside one BFS.
    PASSED; label upgrades 0). Larger effect expected at N ≥ 28 where
    canon is ~68 % of forecast core-hours. Kill-switch
    `DOUBLY_EVEN_CANON_LABELLING=full`. Writeup: algorithm.md lever 10.
-2. **N ≥ 28 cloud re-run** — the highest-value datapoint. N=29
-   count-anchored forecast: **0.9–1.3 h on c4a-72** (~$3–5) vs the
-   12.32 h actually paid pre-levers. Re-verify d on the first N ≥ 28 run;
+2. **N ≥ 28 cloud re-run** — the highest-value datapoint, now unblocked
+   above 24 cores by the §3 mass-mutex fix (redeploy + confirm low `sy`
+   at 96t first). N=29 count-anchored forecast: **0.9–1.3 h on c4a-72**
+   (~$3–5) vs the 12.32 h actually paid pre-levers. Re-verify d on the
+   first N ≥ 28 run;
    A/B the aarch64 `target-cpu=neoverse-v2` pin (SVE2) while there. If
    the pin alone moves nothing, the queued follow-up is an SVE2
    in-register histogram prototype for the φ v-half (HISTCNT/TBL — the

@@ -52,6 +52,20 @@ pub(crate) struct WorkerState {
     /// sequential path (no-op cost when absent).
     #[cfg(feature = "parallel")]
     pub(crate) global_mass: Option<std::sync::Arc<GlobalMassTracker>>,
+    /// Per-rank mass emitted by this worker but not yet flushed to
+    /// `global_mass`. Batched to avoid the per-emit lock that became a
+    /// 96-thread futex storm (see `GlobalMassTracker`). U256 because a
+    /// full batch of per-class `N!/|Aut|` overflows u128 at N ≥ 31.
+    #[cfg(feature = "parallel")]
+    pending_mass: Vec<U256>,
+    /// Emissions since the last `flush_global_mass`; a flush fires at
+    /// `mass_flush_interval`.
+    #[cfg(feature = "parallel")]
+    emits_since_flush: u64,
+    /// Batch size for `global_mass` flushes
+    /// (`DOUBLY_EVEN_MASS_FLUSH_INTERVAL`, default 2048), resolved once.
+    #[cfg(feature = "parallel")]
+    mass_flush_interval: u64,
     /// D16 lever B: helper pool the SEEDER's σ_Q calls fan out onto
     /// (`doubly_even_candidates_q_pooled`). Installed only on the
     /// seeder's `WorkerState` by the parallel drivers and dropped right
@@ -312,6 +326,25 @@ pub(crate) struct WorkerState {
     pub(crate) output_writer: Option<BinaryWriter<std::fs::File>>,
 }
 
+/// Default `global_mass` flush batch size (emissions per worker between
+/// shared-tracker pushes). Overridable via `DOUBLY_EVEN_MASS_FLUSH_INTERVAL`.
+/// Larger = fewer tracker locks but the shared full-flag flips later →
+/// more mass-stop over-search. Parallel path only.
+#[cfg(feature = "parallel")]
+const DEFAULT_MASS_FLUSH_INTERVAL: u64 = 2048;
+
+/// Resolve the flush interval once at `WorkerState::new` (workers + seeder
+/// all read the same env). Floor of 1 (flush every emission) is legal and
+/// is the tightest-pruning, most-lock ablation point.
+#[cfg(feature = "parallel")]
+fn mass_flush_interval_from_env() -> u64 {
+    std::env::var("DOUBLY_EVEN_MASS_FLUSH_INTERVAL")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&v| v >= 1)
+        .unwrap_or(DEFAULT_MASS_FLUSH_INTERVAL)
+}
+
 /// `D = ⟨C, v⟩`: append `v` to the parent basis and re-RREF.
 fn extend_rref(rref: &[BinVec], v: BinVec, n: u32) -> (Vec<BinVec>, Vec<u32>) {
     let mut new_basis = Vec::with_capacity(rref.len() + 1);
@@ -348,6 +381,12 @@ impl WorkerState {
             skip_mass_stop,
             #[cfg(feature = "parallel")]
             global_mass: None,
+            #[cfg(feature = "parallel")]
+            pending_mass: vec![U256::ZERO; len],
+            #[cfg(feature = "parallel")]
+            emits_since_flush: 0,
+            #[cfg(feature = "parallel")]
+            mass_flush_interval: mass_flush_interval_from_env(),
             #[cfg(feature = "parallel")]
             seeder_pool: None,
             #[cfg(feature = "parallel_profiling")]
@@ -1031,6 +1070,41 @@ impl WorkerState {
         self.global_mass = Some(gm);
     }
 
+    /// Accumulate a per-class mass contribution into the local pending
+    /// buffer, flushing to the shared `global_mass` tracker every
+    /// `mass_flush_interval` emissions. No-op on the sequential path
+    /// (`global_mass` is `None`). Replaces the old per-emit `gm.add`,
+    /// which locked the tracker on every class.
+    #[cfg(feature = "parallel")]
+    #[inline]
+    fn contribute_global_mass(&mut self, k: usize, delta: u128) {
+        if self.global_mass.is_none() {
+            return;
+        }
+        self.pending_mass[k] = self.pending_mass[k].add_u128(delta);
+        self.emits_since_flush += 1;
+        if self.emits_since_flush >= self.mass_flush_interval {
+            self.flush_global_mass();
+        }
+    }
+
+    /// Push this worker's pending per-rank mass into the shared tracker
+    /// under a single lock and reset the buffer. Called at the flush
+    /// interval and **once more before the worker/seeder's result is
+    /// read** by the driver, so the post-join `snapshot()` (the
+    /// mass-formula correctness gate) is exact. No-op when `global_mass`
+    /// is `None`.
+    #[cfg(feature = "parallel")]
+    pub(crate) fn flush_global_mass(&mut self) {
+        if let Some(gm) = self.global_mass.as_ref() {
+            gm.add_batch(&self.pending_mass);
+            for p in self.pending_mass.iter_mut() {
+                *p = U256::ZERO;
+            }
+            self.emits_since_flush = 0;
+        }
+    }
+
     /// D16 lever B: wire the seeder helper pool into this state (seeder
     /// only). Cleared via [`Self::clear_seeder_pool`] before the run's
     /// worker-dominated tail so helper threads exit promptly.
@@ -1079,11 +1153,10 @@ impl WorkerState {
             );
         }
         // D13-V4 cut 4: contribute to the shared cross-worker mass counter
-        // so peer workers can mass-stop based on the global total.
+        // (batched — see `contribute_global_mass`) so peer workers can
+        // mass-stop based on the global total.
         #[cfg(feature = "parallel")]
-        if let Some(gm) = self.global_mass.as_ref() {
-            gm.add(k as usize, mass_contribution);
-        }
+        self.contribute_global_mass(k as usize, mass_contribution);
         if k >= self.max_k {
             return;
         }
@@ -1204,11 +1277,9 @@ impl WorkerState {
         let mass_contribution = self.factorial_n / info.aut_order;
         self.mass_at_k[k as usize] = self.mass_at_k[k as usize].add_u128(mass_contribution);
         // D13-V4 cut 4: seeder emissions also contribute to the shared
-        // mass counter so workers' mass-stop sees the full picture.
-        // (Seeder itself does not mass-stop; see comment on traverse_seed.)
-        if let Some(gm) = self.global_mass.as_ref() {
-            gm.add(k as usize, mass_contribution);
-        }
+        // (batched) mass counter so workers' mass-stop sees the full
+        // picture. (Seeder itself does not mass-stop; see traverse_seed.)
+        self.contribute_global_mass(k as usize, mass_contribution);
         if k >= self.max_k {
             return;
         }
