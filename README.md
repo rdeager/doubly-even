@@ -8,11 +8,12 @@ Gaborit's mass formula.
 The current release reproduces the [DFGHILM Appendix
 B](docs/references.md#dfghilm-2011--the-algorithmic-spec) Table 3 cells
 through `N = 28` — 21,505,546 equivalence classes at `N = 28`, in
-61 minutes on a single GCP `c4a-standard-72` VM. It also adds a
+**54.8 seconds** on a 96-core GCP `c4a` (Axion) VM. It also adds a
 mass-certified `N = 29` enumeration: **239,465,540 equivalence
-classes** in **12.3 hours** on the same VM, the first publicly
-reproducible enumeration at this length. The per-rank certificate is
-at [`docs/results/n29.json`](docs/results/n29.json).
+classes** in **12.5 minutes** on the same VM, the first publicly
+reproducible enumeration at this length — both with the shipped
+defaults. The per-rank certificate is at
+[`docs/results/n29.json`](docs/results/n29.json).
 
 ## Highlights
 
@@ -71,7 +72,7 @@ uv sync --all-extras --dev
 # codegen flag in rust/.cargo/config.toml applies)
 scripts/install-kernel.sh parallel
 
-# Test suite (590 collected: 549 pass + 41 slow-skipped by default)
+# Test suite (593 collected: 552 pass + 41 slow-skipped by default)
 uv run pytest
 
 # Benchmark at N = 22, parallel
@@ -93,53 +94,40 @@ cloud run) is in [`docs/reproducing.md`](docs/reproducing.md).
 
 ## Performance
 
-Single platform for reproducibility: **GCP `c4a-standard-72`** (Axion /
-Arm Neoverse V2, aarch64, 72 physical cores, 288 GB), parallel Rust
-kernel at `t=72 d=5`. All wall times below are kernel-only:
+Reference platform: a **96-core GCP `c4a`** (Axion / Arm Neoverse V2,
+aarch64), parallel Rust kernel at the shipped defaults (demand-driven
+self-subdivision on, `frontier_depth = 3`, `δ = 3`). All wall times are
+kernel-only, counts-mode (the `N ≥ 28` output mode), every rank
+mass-formula certified:
 
-All cloud rows below predate the **coset-spectrum parent rule** and its
-two follow-on spectrum-evaluation levers (2026-06-10, now the default —
-see [Algorithmic levers](#algorithmic-levers)), which together cut
-canonicalisation calls 15–87× at `N = 22–26` and walls ~9–15× on the
-development host; a re-run of the large-`N` rows is pending (the
-count-anchored `N = 29` forecast is **1.0–1.5 h** on the same box that
-took 12.3 h below).
+| `N` | wall                  | classes       |
+|----:|----------------------:|--------------:|
+|  27 |                7.4 s  |     2,673,492 |
+|  28 |       **54.8 s**      |    21,505,546 |
+|  29 | **12.46 min (748 s)** |   239,465,540 |
 
-| `N` | wall                        | classes       |
-|----:|----------------------------:|--------------:|
-|  20 |                     0.21 s  |         1,211 |
-|  22 |                     0.87 s  |         5,118 |
-|  24 |                     5.34 s  |        37,496 |
-|  26 |                     53.5 s  |       494,272 |
-|  27 |             374 s (6.2 min) |     2,673,492 |
-|  28 |    **3669 s (61.2 min)**    |  **21,505,546** |
-|  29 |    **44 356 s (12.3 hr)**   | **239,465,540** |
+On a 24-core desktop (13700K) the same defaults do `N = 24` in 0.75 s
+and `N = 26` in 5.3 s (counts-mode).
 
-(These 2026-05 runs tuned a per-worker canon cache via
-`CANON_CACHE_CAP` — 500 K for `N ≤ 26`, 300 K at `N = 28`, 200 K at
-`N = 29` — to stay inside the 288 GB ceiling. That cache was **removed
-2026-06-14**; current runs carry no cache footprint, so the knob is
-gone.) The `N = 28` result was measured 2026-05-21 in a dedicated run;
-`N ≤ 27` and `N = 29` come from the 2026-05-22/23 sweep.
+These walls are **~50–67× faster than the project's first reproducible
+cloud runs** (`N = 28` in 61 min, `N = 29` in 12.3 hr on a 72-core
+`c4a-standard-72`, 2026-05). The gain is two epochs of work: the
+**coset-spectrum parent rule** and its spectrum-evaluation levers, which
+reject most candidates by an exact weight-spectrum comparison *before*
+any canonicalisation (canonicalisation calls drop 15–87× at
+`N = 22–26`); a 96-core futex-contention fix (the old `N > 27` parallel
+wall was ~85 % kernel time in a mass-tracker mutex); and the
+**demand-driven self-subdivision** tail lever — now the default — which
+keeps all cores fed through the heavy-subtree tail for ~2.6× at `N = 29`
+(byte-identical: pure scheduling, classes and mass unchanged). A
+per-worker canon cache used by the 2026-05 runs was removed 2026-06-14,
+so current runs carry no cache footprint and the old `CANON_CACHE_CAP`
+knob is gone.
 
-At `N = 29` the kernel made 87.2 billion canonicalisation calls at a
-mean of 29.5 µs/call — about 364 calls per emitted equivalence class.
-The scaling bottleneck at this length is the number of calls, not the
-per-call cost — which is precisely what the coset-spectrum parent rule
-now attacks: most candidates are rejected by an exact weight-spectrum
-comparison before any canonicalisation (canon calls drop 87× at
-`N = 26`), two follow-on levers cut the spectrum evaluation itself
-~7× per candidate (split-frame sharing with a one-comparison reject,
-then a pair-structure chain that decides ~43 % of all candidates in
-O(1) past the first stratum), a method-of-four-Russians rewrite of
-the orbit-min BFS makes candidate generation ~1.9× faster at its
-core, an x86-64-v3 codegen flag lets LLVM auto-vectorise the
-popcount loops, and automorphism-only canonicalisation skips nauty's
-canonical-labelling pass on the ~80 % of calls where no decision
-reads it. Desktop measurements (`N = 22` in 0.24 s parallel /
-0.62 s sequential, `N = 26` in **9.2 s** parallel / 75 s sequential,
-`N = 27` in ~63 s parallel) and the cross-platform Sage comparison
-(~1500× at `N = 22`) live in
+The full per-lever ablation is in
+[`docs/algorithm.md`](docs/algorithm.md); measured walls, tuning knobs,
+and the Sage comparison (single-threaded **≈584×** at `N = 22` in Sage's
+doubly-even mode `d = 4`; ≈1500× with all 24 desktop threads) are in
 [`docs/performance.md`](docs/performance.md).
 
 ### `N = 29` per-rank class counts
@@ -187,8 +175,9 @@ doubly-even linear-algebra optimisations of Corollary B.1, and McKay
 engineering changes on top of that recipe. The per-lever multipliers
 below are desktop measurements (the development platform used for
 ablation); the cumulative effect is roughly 640× over the
-pure-Python baseline at `N = 22` and ~1535× faster than Sage
-`self_orthogonal_binary_codes`.
+pure-Python baseline at `N = 22`, and versus Sage
+`self_orthogonal_binary_codes` (doubly-even mode, `d = 4`) ≈584×
+single-threaded / ≈1500× with all 24 desktop threads.
 
 - **Quotient-space orbit-min prefilter** — work in the
   `(N − 2k)`-dimensional quotient `C⊥/C` (Gray-code walk over
@@ -274,9 +263,12 @@ uv run python scripts/stream_progress.py --N 26 \
 ```
 
 The sidecar prints a per-`k` mass-vs-σ table at the configured interval
-and exits when the kernel finishes. The same recipe applies to a
-30-minute local `N = 24` run and a multi-hour cloud `N = 28` run; only
-the output directory changes.
+and exits when the kernel finishes. The same recipe scales from a local
+`N = 24` run up to a cloud `N = 28`/`N = 29` run; only the output
+directory changes. (The streaming path emits every canonical
+representative, so it is slower and more I/O-heavy than the counts-only
+mode behind the headline walls above — use it when you need the codes
+themselves, not just the counts.)
 
 On Apple Silicon (e.g. M5 / M5 Pro, 64 GB unified memory) the same
 streaming path should comfortably handle `N = 27` and `N = 28`
@@ -293,11 +285,11 @@ implementation.
 
 ## Status
 
-- `N ≤ 26` is reproducible on a 13700K desktop in seconds to minutes
-  (or on `c4a-standard-72` in under a minute).
-- `N = 28` is reproducible on GCP `c4a-standard-72` in 61 minutes.
-- `N = 29` is complete: 239,465,540 classes in 12.3 hr on the same VM,
-  mass-formula certified at every rank
+- `N ≤ 26` is reproducible on a 13700K desktop in seconds (`N = 26` in
+  5.3 s at 24 threads), faster still on a 96-core `c4a`.
+- `N = 28` is reproducible on a 96-core GCP `c4a` in **54.8 seconds**.
+- `N = 29` is complete: 239,465,540 classes in **12.5 minutes** on the
+  same VM, mass-formula certified at every rank
   ([`docs/results/n29.json`](docs/results/n29.json)).
 - `N ≥ 30` requires either a much bigger single machine
   (`c4-standard-288-metal` or similar) or a small cluster. The per-node
@@ -348,9 +340,10 @@ This package follows several foundational works:
 
 Full credits and the validation hierarchy are in
 [`docs/references.md`](docs/references.md). Sage's
-`self_orthogonal_binary_codes` is the prior open-source bar
-(single-threaded Cython); the parallel Rust kernel here runs ~1535×
-faster at `N = 22`.
+`self_orthogonal_binary_codes` (in its doubly-even mode, `d = 4` — the
+same set we enumerate) is the prior open-source bar (single-threaded
+Cython); the kernel here runs **≈584× faster single-threaded** at
+`N = 22`, ≈1500× with all 24 desktop threads.
 
 ## Opt-in branches
 

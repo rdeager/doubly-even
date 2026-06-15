@@ -4,8 +4,9 @@ This doc walks through what `doubly-even` adds on top of the DFGHILM
 Appendix B canonical-augmentation recipe to make the enumeration tractable
 on a desktop or modest cloud VM. Ten levers carry the load; each delivered
 a measurable wall-time reduction on its own, and they compose to roughly
-~640× over the pure-Python baseline at `N = 22` and ~1500× over Sage's
-`self_orthogonal_binary_codes` at the same length.
+~640× over the pure-Python baseline at `N = 22` and, versus Sage's
+`self_orthogonal_binary_codes` (doubly-even mode, `d = 4`), ≈584×
+single-threaded / ≈1500× with all 24 desktop threads at the same length.
 
 Cumulative wall-time ablation on the 13700K development host (sequential
 unless noted; rows from the coset-spectrum rule down are a

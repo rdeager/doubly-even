@@ -78,15 +78,17 @@ doubly-even ones — but the doubly-even slice is reachable with
 Comparisons (single-threaded on a 13700K, the only platform Sage runs
 practically):
 
-| N  | Sage wall  | `doubly-even` seq | `doubly-even` parallel |
-|----|-----------:|------------------:|-----------------------:|
-| 22 |   363.85 s |            6.64 s |                0.691 s |
+| N  | Sage wall  | `doubly-even` kernel     | seq     | parallel | speedup vs Sage            |
+|----|-----------:|--------------------------|--------:|---------:|---------------------------:|
+| 22 |   363.85 s | current (coset-spectrum) | 0.623 s | 0.24 s   | **≈584× seq / ≈1516× par** |
+| 22 |   363.85 s | legacy rule (engine A/B) | 6.64 s  | 0.691 s  | ≈55× seq / ≈525× par       |
 
-(Epoch note: the `doubly-even` columns are the *legacy-parent-rule*
-walls, retained because they isolate the canonicaliser-and-kernel
-comparison like-for-like; the current kernel — coset-spectrum parent
-rule and the levers after it — is faster still, `N = 22` in 0.24 s
-parallel.)
+(Epoch note: the legacy-rule row is retained because it isolates the
+canonicaliser-and-kernel comparison like-for-like — both Sage and the
+legacy rule canonicalise every candidate. The current kernel adds the
+coset-spectrum parent rule on top, deleting most of those
+canonicalisation calls for a further ~10.6× sequentially. Both `doubly-even`
+columns are doubly-even mode against Sage's `d = 4` — the same set.)
 
 Sage's enumeration in `sage/coding/binary_code.pyx` (Miller 2007,
 NICE-based partition refinement) is **column-augmentation**: it adds
@@ -177,12 +179,16 @@ reproducible result at that length, mass-formula certified (see
 
 We reproduce DFGHILM Table 3 with:
 
-- A single 13700K desktop (cumulative ~1500× faster than Sage at
-  `N = 22`) for `N ≤ 26` in seconds-to-minutes; `N = 27` in about a
-  minute (63 s parallel).
-- A single GCP `c4a-standard-72` cloud VM (~$3 of on-demand compute,
-  72 Neoverse V2 cores) for `N = 28` in 61 min and (~$35) for
-  `N = 29` in 12.3 hr.
+- A single 13700K desktop (≈584× faster than Sage single-threaded at
+  `N = 22`, ≈1500× parallel) for `N ≤ 26` in seconds (`N = 26` in 5.3 s
+  at 24 threads).
+- A single 96-core GCP `c4a` cloud VM (Axion / Neoverse V2) for `N = 28`
+  in **54.8 s** and `N = 29` in **12.46 min**, with the shipped defaults.
+  (The first reproducible cloud runs — 2026-05, on a 72-core
+  `c4a-standard-72` — took 61 min and 12.3 hr respectively, ~50–67×
+  slower; the gain is the coset-spectrum parent rule, a 96-core futex
+  fix, and the demand-driven self-subdivision tail lever now on by
+  default.)
 - An Apple Silicon M5 / M5 Pro MacBook with 64 GB of unified memory
   is *predicted* (not measured) to handle the same workload up to
   `N = 28` overnight: per-thread throughput on M5 P-cores is

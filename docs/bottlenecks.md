@@ -1,5 +1,16 @@
 # Current bottleneck profile (living document)
 
+> **As of:** 2026-06-15 (**D20 demand-driven self-subdivision flipped to
+> default-ON** with `frontier_depth=3`/`δ=3`, after the cloud `(d,δ)` sweep
+> picked that point). Byte-identical (pure scheduling; 552 tests pass). New
+> headline at 96 cores: **N=29 in 12.46 min** (2.66× over the 33.1 min
+> d=5/no-lever run below; ~59× over the original 12.3 h c4a-72), **N=28 in
+> 54.8 s** (tail 2.75 s). Desktop too: in-mem par N=24 1.7→0.70 s, N=26
+> 9.21→6.29 s. **This supersedes the "d=5 knee" reading below** — with the
+> lever ON the shallow d=3 frontier + δ=3 is the universal best, and the
+> live N>27 limiter (tail load-imbalance) is exactly what the lever
+> attacks. See §3.
+>
 > **As of:** 2026-06-14 (**parallel mass-mutex contention fixed** —
 > batched per-worker writes + atomic full-flags replace the per-emit
 > `GlobalMassTracker` lock that capped scaling at ~24 threads (85 % `sy`
@@ -230,9 +241,12 @@ stealing; "still running shallow while peers idle" is the free, exact
 heavy-subtree signal — no proxy needed). Deeper uniform `FRONTIER_DEPTH`
 (d=6/7) is the substitutable zero-code granularity knob to A/B against it.
 
-**Status 2026-06-14: BUILT + MERGED to `main`** (D20, knob
-`DOUBLY_EVEN_SELF_SUBDIVIDE`, default **OFF** ⇒ main byte-identical; merged
-OFF-default for cloud spin-up convenience, NOT yet the production default).
+**Status 2026-06-15: BUILT + MERGED + DEFAULT-ON** (D20, knob
+`DOUBLY_EVEN_SELF_SUBDIVIDE`, default **ON** since 2026-06-15 with
+`frontier_depth=3`/`δ=3` ⇒ byte-identical pure scheduling; `=0` restores the
+pre-D20 blocking-recv loop). Merged OFF-default 2026-06-14 for cloud
+spin-up; flipped ON after the `(d,δ)` sweep confirmed d=3/δ=3 (2.66× N=29
+to 12.46 min, 1.33–1.43× desktop, 552 tests byte-identical).
 Shared `LoadBalancer { idle_workers, outstanding, seeder_done }`; shallow-gated
 `try_send` donation in `traverse` (`k ≤ frontier_depth+δ`, δ=1); reserve-before-send
 + `recv_timeout` termination (`seeder_done && outstanding==0`) factored into one

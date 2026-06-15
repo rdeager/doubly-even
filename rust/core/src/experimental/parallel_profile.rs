@@ -112,7 +112,7 @@ pub fn enumerate_doubly_even_parallel_with_profile(
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .filter(|&d| d >= 2)
-        .unwrap_or(4);
+        .unwrap_or(3); // mirror production default (drivers.rs); D20 lever ON
 
     let total_t0 = Instant::now();
 

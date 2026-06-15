@@ -11,9 +11,14 @@ single-wheel knob A/B whose `DOUBLY_EVEN_CANON_LABELLING=full` control
 reproduced the 2026-06-11 walls (0.683 / 6.27 / 81.5 s sequential), so
 the "vs full labelling" column is exactly
 [`algorithm.md`](algorithm.md) lever 10's same-session delta. All
-DFGHILM Table 3 cells verified per run. `d = 4` is the best frontier
-depth at every benched `N`. (The walls below predate the 2026-06-14
-canon-cache removal, which was wall-neutral — see "Memory" below.)
+DFGHILM Table 3 cells verified per run. The walls in the table below
+were measured with `d = 4` and the D20 tail lever OFF (the defaults at
+the time). **As of 2026-06-15 the shipped default is D20 self-subdivision
+ON, `frontier_depth = 3`, `δ = 3`**, which is 1.4–2.4× faster in parallel
+at these sizes (new-default row directly below the table); sequential
+walls are unchanged — D20 is parallel-only. (The walls below predate the
+2026-06-14 canon-cache removal, which was wall-neutral — see "Memory"
+below.)
 
 | N  | classes   | sequential | parallel best           | vs full labelling |
 |----|----------:|-----------:|-------------------------|------------------------:|
@@ -23,6 +28,13 @@ canon-cache removal, which was wall-neutral — see "Memory" below.)
 | 24 |    37,496 |     5.72 s | **~1.7 s** (t=24, d=4)  | 1.096× (seq) |
 | 26 |   494,272 | **74.6 s** | **9.21 s** (t=24, d=4)  | 1.092× (seq), 1.035× (par) |
 | 27 | 2,673,492 |          — | **~63–66 s** (t=24, d=4) | ~1.0× (par; worker-bound, session noise ±10 %) |
+
+**Current default (D20 self-subdivision on, `d = 3`, `δ = 3`),
+2026-06-15, 13700K dev container, single run, in-memory path:** `N = 24`
+**0.70 s** parallel (was 1.7 s at d=4 — 2.4×), `N = 26` **6.29 s**
+parallel (was 9.21 s — 1.46×); counts-mode `N = 26` is 5.25 s. All
+classes and DFGHILM Table 3 cells verified; sequential walls unchanged
+(D20 is parallel-only).
 
 The four-Russians + codegen epoch (2026-06-11):
 `N = 22` 0.685 s seq / 0.24 s par; `N = 24` 6.26 s seq; `N = 26`
@@ -65,6 +77,8 @@ run the sequential savings carry into the core-hours directly.
 | GCP `c4a-standard-72` (Axion / Neoverse V2, aarch64) | 72 phys (no SMT) | 288 GB | 28 | **3669 s (61.2 min)** | first reproducible N=28 enumeration; ~$3 of compute; `CAP=300K` |
 | GCP `c4a-standard-72` (Axion, aarch64) | 72 phys | 288 GB | 29 | **44 356 s (12.3 hr)** | **first publicly reproducible N=29 enumeration**; mass-formula certified; ~$35 of compute; `CAP=200K` (cgroup-tight); **pre-mutex-fix** |
 | GCP `c4a-highmem-96-metal` (Axion, aarch64) | 96 phys | 768 GB | 29 | **1 986 s (33.1 min)** | **post-mutex-fix re-run 2026-06-14** (`a957200`, d=5/96t, counts mode): **22×** the c4a-72 row above; same 239,465,540 classes, mass cert PASSED; `sy`~0 % (futex storm gone). Live limiter now = tail load-imbalance |
+| GCP `c4a-highmem-96-metal` (Axion, aarch64) | 96 phys | 768 GB | 28 | **54.8 s** | **D20 lever (now the default)**, d=3/δ=3, counts mode, 2026-06-14; tail 2.75 s; 21,505,546 classes, mass cert PASSED — **~67×** the 61.2 min c4a-72 row |
+| GCP `c4a-highmem-96-metal` (Axion, aarch64) | 96 phys | 768 GB | 29 | **748 s (12.46 min)** | **D20 lever (now the default)**, d=3/δ=3, counts mode: **2.66×** the 33.1 min row above, **~59×** the 12.3 hr c4a-72 row; same 239,465,540 classes, mass cert PASSED. **Current headline** |
 
 The Emerald-Rapids cross-port has zero per-IPC penalty; the Axion
 port builds unchanged — the x86-only `popcnt` feature of
@@ -84,8 +98,10 @@ had not been independently reproduced from a published implementation;
 DFGHILM's enumeration ran on the OSU Glenn supercomputer in 2011 and
 no enumerator was released.
 
-We reproduced the `N = 28` row on a single GCP `c4a-standard-72` VM
-in 61.2 min of wall time, ~$3 of on-demand compute:
+We first reproduced the `N = 28` row on a single GCP `c4a-standard-72`
+VM in 61.2 min of wall time, ~$3 of on-demand compute (the current
+default does the same `N = 28` in **54.8 s** on a 96-core `c4a` — see
+the cloud table above):
 
 - **classes:** 21,505,546
 - **canon calls:** 5,358,750,799
@@ -256,14 +272,20 @@ in [`references.md`](references.md#robert-l-millers-de_codes-site).
 ## Sage comparison
 
 `sage.coding.databases.self_orthogonal_binary_codes(N, N//2, 4)` is
-the comparable Sage entry point. Measured on the same 13700K host,
-single-threaded:
+the comparable Sage entry point — the `4` is `d = 4`, Sage's doubly-even
+mode, so both sides enumerate exactly the same set. Measured on the same
+13700K host:
 
-| N  | Sage         | `doubly-even` seq | `doubly-even` parallel | ratio (par)   |
-|----|-------------:|------------------:|-----------------------:|--------------:|
-| 22 |    363.85 s  |            6.64 s |             **0.691 s** | **~525×**    |
+| N  | Sage (1 thread) | `doubly-even`            | seq     | parallel         | vs Sage                     |
+|----|----------------:|--------------------------|--------:|-----------------:|----------------------------:|
+| 22 |       363.85 s  | current (coset-spectrum) | 0.623 s | **0.24 s** (24t) | **≈584× seq / ≈1516× par**  |
+| 22 |       363.85 s  | legacy rule (engine A/B) | 6.64 s  | 0.691 s (20t)    | ≈55× seq / ≈525× par        |
 
-The 525× is not "Sage runs the naive canon-everything baseline" — a
+The legacy-rule row isolates the canonicaliser-and-kernel engineering
+like-for-like (both Sage and the legacy rule canonicalise every
+candidate); the current row adds the coset-spectrum parent rule on top
+— ~10.6× more, by deleting most of those calls. Neither figure is
+"Sage runs the naive canon-everything baseline" — a
 2026-05-23 prior-art audit (see
 [`algorithm.md` §1](algorithm.md#1-quotient-space-orbit-min-prefilter))
 confirmed that Sage's `binary_code.pyx` already has the quotient-space

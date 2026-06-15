@@ -232,6 +232,20 @@ canon calls whose labelling no decision reads; 1.09–1.10× seq,
 decisions bit-identical): N=22 seq 0.623 s / par 0.24 s; N=24 seq
 5.72 s; N=26 seq 74.6 s / par 9.21 s (t=24 d=4 cap=500K).
 
+**D20 SHIPPED + flipped to default-ON 2026-06-15.** Demand-driven
+self-subdivision (the tail lever designed 2026-06-14, below) is built,
+merged, and now the **shipped default** together with
+`frontier_depth=3` / `δ=3` (the cloud `(d,δ)` sweep optimum). Byte-identical
+(pure scheduling; 552 tests pass). Headline: **N=29 in 12.46 min** (96c,
+2.66× over the 33.1 min default-off run, ~59× over the original 12.3 h
+c4a-72), **N=28 in 54.8 s** (~67× over 61.2 min). Desktop also faster:
+in-mem par N=24 1.7→0.70 s (2.4×), N=26 9.21→6.29 s (1.46×). The d=3/δ=3
+regime **supersedes the no-lever "d=5 knee"** reading just below. Public
+docs (README, performance.md, references.md) updated to match. Provenance
+to re-confirm before a citable re-publish: `n29-ship/n29.json` records
+`FRONTIER_DEPTH=3` but not the D20 knobs (lever-on inferred from the
+2.66× + `SESSION-WRAPUP.md`, not stamped).
+
 **Cloud days DONE 2026-06-14.** The parallel mass-mutex futex storm
 (D13 single global `Mutex`, 85 % `sy` at 96t) is FIXED and
 cloud-confirmed on c4a-highmem-96-metal (`a957200`, batched writes +
@@ -265,7 +279,7 @@ Knob quick-reference (details in `docs/benchmarking.md` §3):
 | knob | default | note |
 |---|---|---|
 | `DOUBLY_EVEN_THREADS` | unset (seq) | cores−2 at N≤22, full count at N≥24 |
-| `DOUBLY_EVEN_FRONTIER_DEPTH` | 4 | d=4 best ≤24 cores; **d=5 is the knee at 96 cores** (N=28 d=4/5/6 = 301.6/139.8/220.1 s, cloud 2026-06-14). Granularity knob — deeper splits the tail finer at the cost of a longer serial seeder walk |
+| `DOUBLY_EVEN_FRONTIER_DEPTH` | **3** (since 2026-06-15) | With D20 ON (now default), **d=3/δ=3 is the universal best**: desktop N=24/26 1.33–1.43× over the old d=4, cloud N=28 54.8 s / N=29 12.46 min. The pre-D20 reading (d=4 best ≤24c, d=5 knee at 96c — N=28 d=4/5/6 = 301.6/139.8/220.1 s no-lever) was a no-lever artifact. Granularity knob — deeper splits the tail finer at the cost of a longer serial seeder walk |
 | ~~`DOUBLY_EVEN_CANON_CACHE_CAP`~~ | — | **REMOVED 2026-06-14.** The primary per-worker canon cache was deleted: post-D15 hit rate ~0.003 % (inert for speed) but ~90 % of process RSS (N=26: 793→60 MB seq, 1416→295 MB par t=24). No cap to tune; OOM headroom is now automatic. Was the worker-count ceiling at N≥28 |
 | `DOUBLY_EVEN_PARENT_RULE` | coset-spectrum | `legacy` = kill-switch, `audit` = measurement |
 | `DOUBLY_EVEN_CANON_LABELLING` | autom-only | `full` = D19 kill-switch (labelling on every call + per-class ccol in output) |
@@ -276,8 +290,8 @@ Knob quick-reference (details in `docs/benchmarking.md` §3):
 | `DOUBLY_EVEN_SEEDER_PAR_MIN_L` | 22 | load-bearing; don't lower |
 | `DOUBLY_EVEN_NO_MASS_STOP` | off | ablation knob (mass-stop measured ~inert post-D19: ≤26 candidates pruned at N=27) |
 | `DOUBLY_EVEN_MASS_FLUSH_INTERVAL` | 2048 | parallel only: emissions/worker between shared-mass-tracker flushes; the 96-thread futex-storm fix. Contention knob, not pruning — classes+mass identical at any value |
-| `DOUBLY_EVEN_SELF_SUBDIVIDE` | **off** | **D20 demand-driven self-subdivision** (MERGED to main, default OFF = byte-identical). On: a busy worker at shallow depth donates an accepted child onto the seed channel when peers are idle (victim-initiated work-sharing) — adaptive tail depth for the N>27 load-imbalance. Local ladder PASS; **first scaled signal N=27 1.30× / −23 %** (20-core, contended, single run). Not yet the production default — `(d, δ)` co-optimised on cloud (`scripts/cloud_depth_sweep.py`) then flip ON |
-| `DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA` | 1 | D20 donatable depth past `frontier_depth` (parent gate `k ≤ frontier_depth+δ`); sets adaptive granularity `frontier_depth+δ+1`. **Decouples seed granularity from seeder span** — co-optimise `(FRONTIER_DEPTH × δ)` on cloud; the old "d=5 knee" is a no-lever result |
+| `DOUBLY_EVEN_SELF_SUBDIVIDE` | **on** (since 2026-06-15) | **D20 demand-driven self-subdivision**, byte-identical (pure scheduling). On: a busy worker at shallow depth donates an accepted child onto the seed channel when peers are idle (victim-initiated work-sharing) — adaptive tail depth for the N>27 load-imbalance. **Flipped to default-ON** after the cloud `(d, δ)` sweep (`scripts/cloud_depth_sweep.py`) picked d=3/δ=3: **2.66× at N=29** (33.1→12.46 min, 96c), **1.33–1.43× desktop** (N=24/26, 24t in-mem 0.70/6.29 s), 552 tests byte-identical. `=0` restores the pre-D20 blocking-recv loop |
+| `DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA` | **3** (since 2026-06-15) | D20 donatable depth past `frontier_depth` (parent gate `k ≤ frontier_depth+δ`); sets adaptive granularity `frontier_depth+δ+1`. **Decouples seed granularity from seeder span**. Cloud sweep picked δ=3 with d=3; raise toward δ=4–5 at N≥30 (δ increments with N) |
 | `DOUBLY_EVEN_SELF_SUBDIVIDE_POLL_MS` | 2 | D20 worker `recv_timeout` poll for the donation-aware termination loop |
 | `M4R_MIN_L = 14` | const in `core/src/orbit.rs` | orbit-BFS byte-table crossover |
 
@@ -295,7 +309,7 @@ x86-64-v3 codegen (no label) · **D19 autom-only canon**
 (getcanon=FALSE on accepts; public name "automorphism-only
 canonicalisation", algorithm.md lever 10) · **D20 demand-driven
 self-subdivision** (victim-initiated tail work-sharing,
-`feature/tail-self-subdivision`, default OFF; public name
+**default ON since 2026-06-15** with `frontier_depth=3`/`δ=3`; public name
 "demand-driven self-subdivision"). Public docs use the descriptive names
 only.
 
@@ -312,10 +326,10 @@ the wrapup notes). Next-session entry points live in
 scripts/install-kernel.sh parallel       # build + install the wheel
                                          # (cd's into rust/ for the v3
                                          # config; probes avx2 + module)
-uv run pytest                            # 549 passed + 41 slow-skipped
+uv run pytest                            # 552 passed + 41 slow-skipped
 uv run python scripts/bench.py --label <arm>-seq --N 18,22,24
-DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=4 \
-  uv run python scripts/bench.py --label <arm>-par-n26 --N 26
+DOUBLY_EVEN_THREADS=24 \
+  uv run python scripts/bench.py --label <arm>-par-n26 --N 26   # default d=3/δ=3, lever on
 ```
 
 The full bench-a-change protocol (one-wheel-one-label, the uv-cwd

@@ -200,17 +200,22 @@ pub(crate) struct SelfSubdivideCfg {
 #[cfg(feature = "parallel")]
 impl SelfSubdivideCfg {
     pub(crate) fn from_env() -> Self {
+        // Default ON since 2026-06-15: D20 self-subdivision is byte-identical
+        // (pure scheduling — classes/mass unchanged) and the cloud (d, δ) sweep
+        // it was gated on (scripts/cloud_depth_sweep.py) picked d=3/δ=3, giving
+        // ~2.6× at N=29 (33.1 → 12.46 min, 96c) and ~1.3× on desktop at N=27.
+        // Set DOUBLY_EVEN_SELF_SUBDIVIDE=0 for the pre-D20 blocking-recv loop.
         let enabled = std::env::var("DOUBLY_EVEN_SELF_SUBDIVIDE")
             .ok()
             .map(|s| {
                 let s = s.trim();
                 !(s.is_empty() || s == "0" || s.eq_ignore_ascii_case("false"))
             })
-            .unwrap_or(false);
+            .unwrap_or(true);
         let delta = std::env::var("DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA")
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
-            .unwrap_or(1);
+            .unwrap_or(3);
         let poll_ms = std::env::var("DOUBLY_EVEN_SELF_SUBDIVIDE_POLL_MS")
             .ok()
             .and_then(|s| s.trim().parse::<u64>().ok())
@@ -603,12 +608,14 @@ pub fn enumerate_doubly_even_parallel_with_seeder(
     // the heaviest subtree was ~30 % of total work; bumping the cut to
     // depth 4 splits it into ~3–5 pieces, pushing the ceiling from
     // ~3.3× toward ~6–8×. Configurable via env so heavy users (large N)
-    // can tune. Default = 4 at runtime, clamped to ≥ 2.
+    // can tune. Default = 3 since 2026-06-15 (with the D20 lever ON a shallow
+    // frontier + δ replaces a deep frontier's granularity at lower seeder
+    // span; co-optimised with δ=3 on the cloud sweep); clamped to ≥ 2.
     let frontier_depth: u32 = std::env::var("DOUBLY_EVEN_FRONTIER_DEPTH")
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .filter(|&d| d >= 2)
-        .unwrap_or(4);
+        .unwrap_or(3);
 
     if num_threads <= 1 || max_k <= frontier_depth {
         return enumerate_doubly_even_with_rule(n, max_k, quota, factorial_n, rule);
@@ -825,7 +832,7 @@ pub fn enumerate_doubly_even_parallel_streaming(
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .filter(|&d| d >= 2)
-        .unwrap_or(4);
+        .unwrap_or(3);
 
     if num_threads <= 1 || max_k <= frontier_depth {
         return enumerate_doubly_even_streaming(n, max_k, quota, factorial_n, output_dir);
@@ -1139,7 +1146,7 @@ pub fn enumerate_doubly_even_parallel_counts(
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .filter(|&d| d >= 2)
-        .unwrap_or(4);
+        .unwrap_or(3);
 
     if num_threads <= 1 || max_k <= frontier_depth {
         return enumerate_doubly_even_counts(n, max_k, quota, factorial_n, progress);
