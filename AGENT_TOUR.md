@@ -18,12 +18,13 @@ problem in supersymmetric representation theory (Doran–Faux–Gates–Hübsch�
 Iga–Landweber–Miller, **DFGHILM**). The canonical algorithmic spec is
 [`/workspace/inbox/mathpix/DFGHILM_ATMP.md`](../inbox/mathpix/DFGHILM_ATMP.md)
 Appendix B. The project replicates DFGHILM Table 3 exactly through
-`N = 28` and published the first publicly reproducible `N = 29`
-enumeration (239,465,540 classes, mass-formula certified at every rank —
-certificate at [`docs/results/n29.json`](docs/results/n29.json)),
-verified against four independent oracles (mass formula, DFGHILM
-published counts, Sage's `self_orthogonal_binary_codes`, and
-rlmiller.org's `N = 28` tables).
+`N = 28` and published the first publicly reproducible `N = 29` and
+`N = 30` enumerations (239,465,540 and 3,786,528,214 classes,
+mass-formula certified at every rank — certificates at
+[`docs/results/n29.json`](docs/results/n29.json) and
+[`docs/results/n30.json`](docs/results/n30.json)), verified against four
+independent oracles (mass formula, DFGHILM published counts, Sage's
+`self_orthogonal_binary_codes`, and rlmiller.org's `N = 28` tables).
 
 ---
 
@@ -49,7 +50,7 @@ different questions:
 | Paradigm | Where | When to read it |
 |---|---|---|
 | **Clean Python** (pedagogical) | `src/doubly_even/clean/` | "What does the algorithm actually do?" Closest to executable pseudocode. 651 LOC standalone, no perf clutter. `N=22` in 31 s. **One deliberate divergence**: clean implements the legacy σ-derived parent rule; production uses the coset-spectrum rule (same classes, different representatives — see [`docs/theory.md`](docs/theory.md)). |
-| **Production Rust** (optimised) | `rust/` (workspace: `core/` = algorithms, root = pyo3 wrapper) | "Why is the production code shaped this way?" ~1500× faster than Sage at `N=22`. Heavy perf engineering. FFI to nauty/sparsenauty. `N=22` in 0.24 s parallel / 0.69 s sequential; `N=26` in ~10 s parallel. |
+| **Production Rust** (optimised) | `rust/` (workspace: `core/` = algorithms, root = pyo3 wrapper) | "Why is the production code shaped this way?" ~1500× faster than Sage at `N=22`. Heavy perf engineering. FFI to nauty/sparsenauty. `N=22` in 0.24 s parallel / 0.69 s sequential; `N=26` in ~6.3 s parallel (24t, default d=3/δ=3 with D20 self-subdivision). |
 | **Lean 4 spec** (formal) | `lean/` | "What is the *exact* mathematical object?" Dependent types pin down the definitions; you can verify your understanding against `Code N k`'s type signature. **Spec scaffold only as of 2026-05-21**, no enumerator yet. |
 
 **Each is a different lens**. The clean Python rewrite (2026-05-21)
@@ -130,9 +131,12 @@ directly, so their "production arms" are production code. Key files
 
 - [`enumerate/`](rust/core/src/enumerate/) — the recursion, split by
   concern: `worker.rs` (traversal + candidate test), `cache.rs`
-  (two-tier canon cache), `stats.rs` (the stats layout — single source
-  of truth, exported to Python), `drivers.rs` (sequential / parallel /
-  streaming entries; crossbeam worker pool fed by a pipelined seeder).
+  (canon-info computation + the secondary weight-enumerator cache; the
+  primary RREF-keyed per-worker LRU was removed 2026-06-14), `stats.rs`
+  (the stats layout — single source of truth, exported to Python),
+  `drivers.rs` (sequential / parallel / streaming entries; crossbeam
+  worker pool fed by a pipelined seeder with demand-driven
+  self-subdivision).
 - [`parent_rule.rs`](rust/core/src/parent_rule.rs) — the coset-spectrum
   φ cascade, where most candidates die. The module doc-comment is a
   compact statement of the math; proofs in [`docs/theory.md`](docs/theory.md).
@@ -152,7 +156,8 @@ how to measure is [`docs/benchmarking.md`](docs/benchmarking.md). A
 algorithmic level"; the coset-spectrum parent rule (2026-06) broke it
 by 7.6× sequential — the claim held only inside the fixed-parent-rule
 frame. Treat every "closed" claim as scoped to the bottleneck profile
-that produced it. Scaling plans for `N = 30..32`:
+that produced it. With `N = 30` now complete (2026-06-15), the open
+frontier is `N = 31..32`; scaling plans:
 [`/workspace/markdown/architecture/06-scaling-frontier.md`](../markdown/architecture/06-scaling-frontier.md).
 
 ---

@@ -7,11 +7,22 @@ post-pass; the `N = 30` result is from `scripts/run_counts.py`
 (counts-only mode, the `N ≥ 30`-capable entry — no per-class binaries
 are emitted).
 
+**A note on the `N = 29` wall time.** `n29.json` records the *original*
+2026-05-23 streaming run (12.32 hr on c4a-standard-72). The **12.46 min**
+`N = 29` figure headlined in [`../../README.md`](../../README.md) and
+[`../performance.md`](../performance.md) is a *later* counts-only re-run
+on a 96-core c4a-highmem-96-metal at `frontier_depth = 3` / `δ = 3` with
+the D20 self-subdivision lever and the parallel mass-mutex fix — it emits
+no per-class binaries, so it is not the certificate here. The per-rank
+data (classes, mass, `gaborit_sigma`) is **identical** between the two
+runs; only the `run_metadata` block is run-specific (see its
+`_walltime_note`).
+
 ## What's in this directory
 
 | file | what it is |
 |------|------------|
-| [`n29.json`](n29.json) | The `N = 29` result: per-`k` class counts, per-`k` mass `Σ N!/|Aut(C)|`, per-`k` `gaborit_sigma(29, k)`, total class count (239,465,540), wall time (12.32 hr), platform, and the git SHA the kernel was built from. |
+| [`n29.json`](n29.json) | The `N = 29` result: per-`k` class counts, per-`k` mass `Σ N!/|Aut(C)|`, per-`k` `gaborit_sigma(29, k)`, total class count (239,465,540), and the git SHA the kernel was built from. The `run_metadata` wall time (12.32 hr) is the original streaming run; the faster 12.46-min re-run is described in the note above and in the file's `_walltime_note`. |
 | [`n30.json`](n30.json) | The `N = 30` result: same schema, ranks `k = 0..14`, total class count (3,786,528,214), wall time (4.70 hr) on a 96-core `c4a-highmem-96-metal` (Axion) at `frontier_depth = 3` / `δ = 5`, and the git SHA. Counts-only run, so no companion binary stream exists. |
 
 ## Schema

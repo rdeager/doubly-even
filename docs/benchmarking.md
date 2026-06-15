@@ -67,8 +67,9 @@ uv run python scripts/bench.py --label <arm>-seq --N 18,22,24
 # sequential N=26 (since 2026-06-14 the canon cache is gone — N=26 fits
 # in ~60 MB, no cap to set)
 uv run python scripts/bench.py --label <arm>-seq-n26 --N 26
-# parallel N>=24 — full logical-core count, frontier depth 4
-DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=4 \
+# parallel N>=24 — full logical-core count; the shipped defaults
+# (frontier depth 3, D20 self-subdivision ON, δ=3) need no env override
+DOUBLY_EVEN_THREADS=24 \
   uv run python scripts/bench.py --label <arm>-par-n26 --N 26
 ```
 
@@ -78,7 +79,7 @@ N ≥ 28 cloud run):
 | knob | value | note |
 |---|---|---|
 | `DOUBLY_EVEN_THREADS` | cores − 2 at N ≤ 22; full logical count at N ≥ 24 | hybrid topologies are empirical |
-| `DOUBLY_EVEN_FRONTIER_DEPTH` | 4 | d=4 best ≤24 cores; **d=5 is the knee at 96 cores** (N=28 d=4/5/6 = 301.6/139.8/220.1 s, cloud 2026-06-14) — a granularity knob, deeper splits the tail finer for a longer serial seeder walk |
+| `DOUBLY_EVEN_FRONTIER_DEPTH` | **3** (default since 2026-06-15) | With D20 self-subdivision ON (now the default), **d=3/δ=3 is the universal best** — desktop N=24/26 1.33–1.43× over the old d=4, cloud N=28 54.8 s / N=29 12.46 min. The pre-D20 reading (d=4 best ≤24c, d=5 knee at 96c — N=28 d=4/5/6 = 301.6/139.8/220.1 s) was a no-lever artifact. A granularity knob: deeper splits the tail finer for a longer serial seeder walk |
 | ~~`DOUBLY_EVEN_CANON_CACHE_CAP`~~ | **removed 2026-06-14** | The primary canon cache was deleted (post-D15 ~0.003 % hit = inert for speed, but ~90 % of process RSS). No cap to set; the var is now ignored. N=26 fits in 60 MB seq / 295 MB par |
 | `DOUBLY_EVEN_SEEDER_THREADS` | default (= threads) | 0 disables the seeder pool (A/B control) |
 | `DOUBLY_EVEN_SEEDER_PAR_MIN_L` | 22 (default) | load-bearing; lowering it loses to helper-vs-worker contention |
@@ -86,8 +87,8 @@ N ≥ 28 cloud run):
 | `DOUBLY_EVEN_PARENT_RULE` | default | `legacy` is the whole-rule kill-switch, `audit` the measurement mode |
 | `DOUBLY_EVEN_CANON_LABELLING` | default (`autom-only`) | `full` is the autom-only-lever kill-switch: computes nauty's canonical labelling on every call and restores per-class `canonical_column_order` in the output |
 | `DOUBLY_EVEN_TIE_DUMP` | unset | path to a JSONL sink for φ-tie records (collision analysis). **Sequential drivers only** — parallel drivers panic. Analysis: `scripts/experimental/tie_collision_analysis.py` |
-| `DOUBLY_EVEN_SELF_SUBDIVIDE` | off (merged to main, OFF default) | demand-driven self-subdivision (D20): a busy worker at shallow depth donates an accepted child onto the seed channel when peers are idle, deepening the frontier adaptively in the heavy N>27 tail. Victim-initiated work-sharing, not work-stealing. **OFF byte-identical to main.** Local ladder PASS; first scaled signal N=27 **1.30×** (contended, single run). Cloud `(d, δ)` sweep determines the production default |
-| `DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA` | 1 | D20: donatable depth past `frontier_depth` (parent gate `k ≤ frontier_depth+δ`; finest granularity `frontier_depth+δ+1`). Decouples granularity from seeder span — co-optimise via `scripts/cloud_depth_sweep.py` |
+| `DOUBLY_EVEN_SELF_SUBDIVIDE` | **on** (default since 2026-06-15) | demand-driven self-subdivision (D20): a busy worker at shallow depth donates an accepted child onto the seed channel when peers are idle, deepening the frontier adaptively in the heavy N>27 tail. Victim-initiated work-sharing, not work-stealing. **Byte-identical to OFF (pure scheduling — classes/mass unchanged).** Flipped to default-ON after the cloud `(d, δ)` sweep picked d=3/δ=3: **2.66× at N=29** (33.1→12.46 min, 96c), **1.33–1.43× desktop** (N=24/26). `=0` restores the pre-D20 blocking-recv loop |
+| `DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA` | **3** (default since 2026-06-15) | D20: donatable depth past `frontier_depth` (parent gate `k ≤ frontier_depth+δ`; finest granularity `frontier_depth+δ+1`). Decouples granularity from seeder span — co-optimise via `scripts/cloud_depth_sweep.py`. Raise toward δ=4–5 at N≥30 (the N=30 record used δ=5) |
 | `DOUBLY_EVEN_SELF_SUBDIVIDE_POLL_MS` | 2 | D20: `recv_timeout` poll interval for the donation-aware worker loop (shutdown latency, negligible vs a minutes-long run) |
 
 The **`(frontier_depth × delta)` cloud sweep** is `scripts/cloud_depth_sweep.py`:

@@ -218,8 +218,10 @@ recipe applies:
 
 ```sh
 # Local long-running N=26 (under a minute on a 13700K post-2026-06 levers;
-# canon cache removed 2026-06-14, so no CANON_CACHE_CAP to set):
-DOUBLY_EVEN_THREADS=24 DOUBLY_EVEN_FRONTIER_DEPTH=4 \
+# canon cache removed 2026-06-14, so no CANON_CACHE_CAP to set; the
+# shipped defaults — frontier depth 3, D20 self-subdivision ON, δ=3 —
+# need no env override):
+DOUBLY_EVEN_THREADS=24 \
     uv run python scripts/run_streaming.py --N 26 \
     --output-dir /tmp/n26-local
 

@@ -168,7 +168,10 @@ def main() -> int:
                 for k in sorted(counts)
             },
             "mass_formula_ok": not mass_diffs,
-            "dfghilm_table3_ok": not table_diffs,
+            # null when DFGHILM Table 3 has no cells at this N (nothing to
+            # cross-check) — matches scripts/run_counts.py. Avoids a
+            # misleading degenerate-True from `not []` at N >= 29.
+            "dfghilm_table3_ok": (not table_diffs) if table3_cells_checked > 0 else None,
         }
         args.stats_json.write_text(json.dumps(payload, indent=2, default=str) + "\n")
         print(f"\nWrote {args.stats_json}")

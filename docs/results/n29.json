@@ -2,8 +2,8 @@
   "N": 29,
   "total_classes": 239465540,
   "mass_formula_ok": true,
-  "dfghilm_table3_ok": true,
-  "_dfghilm_table3_note": "DFGHILM Table 3 has no published cells for N=29; the boolean is degenerate-True because the cross-check loop has no entries to fail. The mass-formula certificate (mass_formula_ok) is the load-bearing oracle at this length.",
+  "dfghilm_table3_ok": null,
+  "_dfghilm_table3_note": "DFGHILM Table 3 has no published cells for N=29; the boolean is null because there is nothing to cross-check. The Gaborit mass-formula certificate (mass_formula_ok) is the load-bearing oracle at this length.",
   "per_k": {
     "0":  {"classes": 1,           "mass": 1,                                              "gaborit_sigma": 1},
     "1":  {"classes": 7,           "mass": 134209535,                                      "gaborit_sigma": 134209535},
@@ -36,7 +36,8 @@
     "canon_calls": 87205911575,
     "nauty_seconds": 2569622.95,
     "us_per_call_mean": 29.47,
-    "nauty_utilisation": 0.805
+    "nauty_utilisation": 0.805,
+    "_walltime_note": "This certificate records the ORIGINAL 2026-05-23 streaming run on GCP c4a-standard-72 (12.32 hr, frontier_depth=5, pre-mutex-fix, canon cache still present at cap=200000) — the run whose per-class binaries are 'available on request' (docs/results/README.md). The 12.46-min N=29 figure headlined in README.md and docs/performance.md is a LATER counts-only re-run on c4a-highmem-96-metal at frontier_depth=3 / delta=3 with the D20 self-subdivision lever and the parallel mass-mutex fix; it emits no per-class binaries. The per-rank certificate (classes, mass, gaborit_sigma) is identical between the two runs; only this run_metadata block is run-specific."
   },
   "schema_note": "Per-k 'mass' and 'gaborit_sigma' are exact Python ints serialised as JSON integers. Both equal Σ N!/|Aut(C)| over emitted classes at rank k; equality at every k is the Gaborit mass-formula certificate. The `kernel_wall_seconds` is end-to-end kernel wall time excluding Python startup."
 }

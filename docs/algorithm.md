@@ -2,9 +2,12 @@
 
 This doc walks through what `doubly-even` adds on top of the DFGHILM
 Appendix B canonical-augmentation recipe to make the enumeration tractable
-on a desktop or modest cloud VM. Ten levers carry the load; each delivered
-a measurable wall-time reduction on its own, and they compose to roughly
-~640× over the pure-Python baseline at `N = 22` and, versus Sage's
+on a desktop or modest cloud VM. Eleven levers carry the load: the first
+ten each cut measurable wall-time on their own and compose to roughly
+~640× over the pure-Python baseline at `N = 22` (sequential), while the
+eleventh is a pure parallel-scheduling lever — byte-identical output —
+that delivers the headline `N ≥ 29` speedups (2.66× at `N = 29`). Versus
+Sage's
 `self_orthogonal_binary_codes` (doubly-even mode, `d = 4`), ≈584×
 single-threaded / ≈1500× with all 24 desktop threads at the same length.
 
@@ -188,20 +191,21 @@ never communicate. The kernel implements this with a producer-consumer
 recipe — exactly the model DFGHILM Section B.4 describes:
 
 1. The seeder runs on the main thread and walks the DFS down to
-   `DOUBLY_EVEN_FRONTIER_DEPTH` (default 4; 5 at `N ≥ 24`).
+   `DOUBLY_EVEN_FRONTIER_DEPTH` (default 3 since 2026-06-15, paired with
+   D20 demand-driven self-subdivision — see lever 11 below).
 2. Each accepted seed at the frontier is pushed into a bounded crossbeam
    channel.
 3. A pool of worker threads spawn first and block on the channel;
    they consume seeds as the seeder produces them and run each subtree
-   on their own thread with per-worker canon caches.
+   on their own thread.
 4. A shared atomic mass-tracker (`Arc<Mutex<Vec<u128>>>`) lets workers
    check the rank-`k+1` mass quota across the pool — saving the rest of
    a subtree as soon as the quota for the rank above is hit.
 
 The bounded channel doubles as backpressure: if workers fall behind the
 seeder, the seeder blocks until they catch up. This is essential —
-unbounded queueing degrades cache behaviour at the seeder and starves
-the canon caches.
+unbounded queueing inflates the seed backlog and the seeder's working
+set without putting workers to work any sooner.
 
 Measured wall, mean of 3 runs on the 13700K (16 physical / 24 logical):
 
@@ -217,10 +221,12 @@ the full table):
 
 - `N ≤ 22`: `DOUBLY_EVEN_THREADS = logical_cores − 2` (leave 2 cores
   for the scheduler).
-- `N ≥ 24`: `DOUBLY_EVEN_THREADS = logical_cores`. (The
-  `FRONTIER_DEPTH=5` advice from this lever's era is obsolete — the
-  default `d = 4` is the measured best everywhere since the
-  coset-spectrum rule.)
+- `N ≥ 24`: `DOUBLY_EVEN_THREADS = logical_cores`. (Both the
+  `FRONTIER_DEPTH=5` advice from this lever's era *and* the later
+  no-lever `d = 4` reading are obsolete — with D20 self-subdivision now
+  the default, `d = 3` / `δ = 3` is the measured best everywhere. The
+  walls in the table above are from the pre-D20 `d = 4/5` era; the
+  current defaults beat them, see [`performance.md`](performance.md).)
   (The per-worker canon cache that `DOUBLY_EVEN_CANON_CACHE_CAP` used to
   bound was removed 2026-06-14 — it was inert for speed at ~0.003 % hits
   and ~90 % of process RSS — so there is no longer a memory knob to set.)
@@ -567,6 +573,50 @@ output; the streaming format never carried it). Code:
 `rust/core/src/canon.rs`, `qd_graph.rs` (the `get_canon` flag),
 `rust/core/src/enumerate/cache.rs` (label modes, upgrade-on-hit).
 
+### 11. Demand-driven self-subdivision
+
+Lever 4's frontier depth is a *fixed* cut: the seeder splits the tree
+into subtrees at one depth and the worker pool drains them. That is
+optimal only if the subtrees are evenly sized. Past `N = 27` they are
+not — a handful of heavy subtrees run long after the rest of the pool
+has gone idle, so the wall is set by the slowest single subtree rather
+than the total work. On the first `N = 29` cloud run this *tail
+load-imbalance* roughly doubled the wall: ~92 % of the mass was emitted
+in the first 13 minutes, the last 8 % took another 20.
+
+Deepening the fixed frontier does not fix it: a deeper cut lengthens
+the serial seeder walk for *every* subtree to subdivide the few heavy
+ones. The lever instead subdivides **on demand**. Workers share an
+atomic idle-count (a balancer); a worker still inside a *shallow* node
+(`k ≤ frontier_depth + δ`) that observes idle peers donates one of its
+accepted children back onto the seed channel via a non-blocking
+`try_send`. Idle workers pick the donation up. Heavy subtrees thus get
+subdivided exactly where and when the imbalance appears, while flat
+regions of the tree pay nothing. This is *victim-initiated*
+work-sharing — the busy worker pushes work out — not classic
+work-stealing, so it needs no per-worker deque or lock-free steal
+protocol, just the existing channel plus one shared counter.
+
+It is **pure scheduling**: the set of emitted classes, every per-rank
+count, and every `|Aut|` are byte-identical to the lever-off path (552
+tests pass with it on); only *which thread* visits a node changes.
+That is what let it ship as the default. After a cloud `(d, δ)` sweep
+(`scripts/cloud_depth_sweep.py`) it was flipped to **default-ON on
+2026-06-15** with `frontier_depth = 3`, `δ = 3` — the shallow frontier
+plus on-demand depth replaces a deep fixed frontier at a fraction of
+the seeder span. Measured: **2.66× at `N = 29`** (33.1 → 12.46 min,
+96 cores), 1.33–1.43× on the 24-core desktop at `N = 24/26`, `N = 28`
+in 54.8 s, and the `N = 30` record in 4.70 hr (with `δ` raised to 5,
+the recommended bump for `N ≥ 30`).
+
+Knobs: `DOUBLY_EVEN_SELF_SUBDIVIDE=0` restores the pre-lever
+blocking-receive loop (for A/B); `DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA`
+(default 3) is the donatable depth past the frontier and sets the
+finest adaptive granularity `frontier_depth + δ + 1`;
+`DOUBLY_EVEN_SELF_SUBDIVIDE_POLL_MS` (default 2) is the donation-aware
+termination poll. Code: `rust/core/src/enumerate/drivers.rs`
+(`SelfSubdivideCfg`, the donation gate, the balancer).
+
 ## Cumulative result
 
 At `N = 22`, mean of 3 runs, parallel kernel at the recommended tuning
@@ -590,6 +640,10 @@ pair-structure chain, the four-Russians orbit BFS) plus the codegen
 flag leave the `N = 22` parallel wall essentially unchanged at 0.24 s —
 they bind at `N ≥ 24`, where the ablation table at the top of this doc
 tracks them — though `N = 22` *sequential* did drop 0.85 → 0.69 s.
+Demand-driven self-subdivision (lever 11) is likewise absent from this
+`N = 22` table by design: it is a tail-load-balancing lever with no
+effect until the heavy-subtree tail appears at `N > 27`, where it is
+the headline multiplier (2.66× at `N = 29`).
 
 ## What we beat last, and what is left
 

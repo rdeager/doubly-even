@@ -94,10 +94,12 @@ DOUBLY_EVEN_THREADS=24 \
     uv run python scripts/bench.py --label par-t24-n26 --N 26
 ```
 
-The default frontier depth (`DOUBLY_EVEN_FRONTIER_DEPTH=4`) is the
-measured best at every benched `N` — the older "raise to 5 at
-`N ≥ 24`" advice predates the coset-spectrum parent rule and is
-obsolete. Each run prints the wall time, the per-`k` class count, and
+The shipped defaults — `DOUBLY_EVEN_FRONTIER_DEPTH=3` with D20
+self-subdivision ON (`DOUBLY_EVEN_SELF_SUBDIVIDE=1`, `δ=3`), since
+2026-06-15 — are the measured best at every benched `N`; both older
+readings ("raise depth to 5 at `N ≥ 24`" and the no-lever "d=4 best /
+d=5 knee") predate the parent-rule and self-subdivision levers and are
+obsolete (see `bottlenecks.md` §3). Each run prints the wall time, the per-`k` class count, and
 (after the run) cross-checks DFGHILM Table 3. The expected class
 counts:
 
@@ -172,17 +174,21 @@ scripts/gcp-bench.sh shakedown-c4a-72
 ```sh
 cd ~/doubly-even
 # Canon cache removed 2026-06-14: no CANON_CACHE_CAP to set.
-DOUBLY_EVEN_THREADS=72 DOUBLY_EVEN_FRONTIER_DEPTH=4 \
+# Shipped defaults (frontier depth 3, D20 self-subdivision ON, δ=3) need
+# no env override; set DOUBLY_EVEN_FRONTIER_DEPTH only to deviate.
+DOUBLY_EVEN_THREADS=72 \
     uv run python scripts/run_streaming.py \
     --N 28 \
     --output-dir /home/$USER/n28-out \
     --label n28-c4a72-shakedown
 ```
 
-(The original 2026-05-21 record used `FRONTIER_DEPTH=5`; depth 4 has
-been the better setting at every benched `N` since the parent-rule
-levers landed — see `bottlenecks.md` §3. Walls quoted below are from
-the depth-5 era and should improve.)
+(The original 2026-05-21 record used `FRONTIER_DEPTH=5` with no tail
+lever; the current default — depth 3 + D20 self-subdivision (δ=3) — is
+the better setting at every benched `N`, see `bottlenecks.md` §3. The
+c4a-72 walls quoted below are from that depth-5 / no-lever era and the
+defaults now beat them substantially — e.g. N=28 54.8 s on a 96-core
+c4a vs the 61 min row here.)
 
 Per-worker binary files are written to `~/n28-out/out.w<wid>.bin`;
 peak RSS is ~71 GB. Wall time on c4a-72: ~61 min. On a smaller host
