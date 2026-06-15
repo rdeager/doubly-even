@@ -1,0 +1,105 @@
+{
+  "N": 30,
+  "total_classes": 3786528214,
+  "mass_formula_ok": true,
+  "dfghilm_table3_ok": null,
+  "_dfghilm_table3_note": "DFGHILM Table 3 has no published cells for N=30; the boolean is null because there is nothing to cross-check. The Gaborit mass-formula certificate (mass_formula_ok) is the load-bearing oracle at this length.",
+  "per_k": {
+    "0": {
+      "classes": 1,
+      "mass": 1,
+      "gaborit_sigma": 1
+    },
+    "1": {
+      "classes": 7,
+      "mass": 268435455,
+      "gaborit_sigma": 268435455
+    },
+    "2": {
+      "classes": 46,
+      "mass": 6004799391312555,
+      "gaborit_sigma": 6004799391312555
+    },
+    "3": {
+      "classes": 359,
+      "mass": 14391972917131409633475,
+      "gaborit_sigma": 14391972917131409633475
+    },
+    "4": {
+      "classes": 3866,
+      "mass": 4024286345482868187994206195,
+      "gaborit_sigma": 4024286345482868187994206195
+    },
+    "5": {
+      "classes": 61871,
+      "mass": 136121485635958016458904024545875,
+      "gaborit_sigma": 136121485635958016458904024545875
+    },
+    "6": {
+      "classes": 1477074,
+      "mass": 566401501731221306485499646135385875,
+      "gaborit_sigma": 566401501731221306485499646135385875
+    },
+    "7": {
+      "classes": 36414992,
+      "mass": 292276554456343215122261569366004041875,
+      "gaborit_sigma": 292276554456343215122261569366004041875
+    },
+    "8": {
+      "classes": 468618055,
+      "mass": 18777908986895179973913769768326447913875,
+      "gaborit_sigma": 18777908986895179973913769768326447913875
+    },
+    "9": {
+      "classes": 1740387920,
+      "mass": 150480503525118908010130894718780438761875,
+      "gaborit_sigma": 150480503525118908010130894718780438761875
+    },
+    "10": {
+      "classes": 1340234496,
+      "mass": 150480503525118908010130894718780438761875,
+      "gaborit_sigma": 150480503525118908010130894718780438761875
+    },
+    "11": {
+      "classes": 193234425,
+      "mass": 18745739325307924544496032317190528521875,
+      "gaborit_sigma": 18745739325307924544496032317190528521875
+    },
+    "12": {
+      "classes": 6023627,
+      "mass": 288395989620121916069169727956777361875,
+      "gaborit_sigma": 288395989620121916069169727956777361875
+    },
+    "13": {
+      "classes": 70744,
+      "mass": 528133298046859814557141486918771875,
+      "gaborit_sigma": 528133298046859814557141486918771875
+    },
+    "14": {
+      "classes": 731,
+      "mass": 96709997811181068404530578084375,
+      "gaborit_sigma": 96709997811181068404530578084375
+    }
+  },
+  "run_metadata": {
+    "git_sha": "d074d01c6696e89281840dc5a25628e81a7453de",
+    "timestamp_utc": "20260615T011337Z",
+    "platform": "Linux-6.17.0-1016-gcp-aarch64-with-glibc2.39",
+    "machine": "GCP c4a-highmem-96-metal (Google Axion / Arm Neoverse V2), 96 physical cores, aarch64",
+    "memory_gib": 743.1,
+    "python_version": "3.12.3",
+    "build_info": "baseline",
+    "num_threads": 96,
+    "frontier_depth": 3,
+    "self_subdivide": true,
+    "self_subdivide_delta": 5,
+    "output_mode": "counts-only",
+    "kernel_wall_seconds": 16920.899,
+    "wall_hours": 4.7002,
+    "canon_calls": 4106559389,
+    "nauty_seconds": 157259.3,
+    "us_per_call_mean": 38.29,
+    "_provenance_note": "frontier_depth/self_subdivide/self_subdivide_delta reflect the run command (DOUBLY_EVEN_FRONTIER_DEPTH=3 DOUBLY_EVEN_SELF_SUBDIVIDE=1 DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA=5). The kernel's env_knobs recorder did not capture the two self-subdivide vars at git d074d01, so they are restored here from the invocation rather than read back from the run output."
+  },
+  "schema_note": "Per-k 'mass' and 'gaborit_sigma' are exact Python ints serialised as JSON integers. Both equal Sum N!/|Aut(C)| over emitted classes at rank k; equality at every k is the Gaborit mass-formula certificate. 'kernel_wall_seconds' is end-to-end kernel wall time excluding Python startup. Counts-only run: no per-class binaries were emitted (sigma(30,.) reaches ~2^136, served by the 256-bit mass spine)."
+}

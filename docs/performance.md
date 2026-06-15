@@ -78,7 +78,8 @@ run the sequential savings carry into the core-hours directly.
 | GCP `c4a-standard-72` (Axion, aarch64) | 72 phys | 288 GB | 29 | **44 356 s (12.3 hr)** | **first publicly reproducible N=29 enumeration**; mass-formula certified; ~$35 of compute; `CAP=200K` (cgroup-tight); **pre-mutex-fix** |
 | GCP `c4a-highmem-96-metal` (Axion, aarch64) | 96 phys | 768 GB | 29 | **1 986 s (33.1 min)** | **post-mutex-fix re-run 2026-06-14** (`a957200`, d=5/96t, counts mode): **22×** the c4a-72 row above; same 239,465,540 classes, mass cert PASSED; `sy`~0 % (futex storm gone). Live limiter now = tail load-imbalance |
 | GCP `c4a-highmem-96-metal` (Axion, aarch64) | 96 phys | 768 GB | 28 | **54.8 s** | **D20 lever (now the default)**, d=3/δ=3, counts mode, 2026-06-14; tail 2.75 s; 21,505,546 classes, mass cert PASSED — **~67×** the 61.2 min c4a-72 row |
-| GCP `c4a-highmem-96-metal` (Axion, aarch64) | 96 phys | 768 GB | 29 | **748 s (12.46 min)** | **D20 lever (now the default)**, d=3/δ=3, counts mode: **2.66×** the 33.1 min row above, **~59×** the 12.3 hr c4a-72 row; same 239,465,540 classes, mass cert PASSED. **Current headline** |
+| GCP `c4a-highmem-96-metal` (Axion, aarch64) | 96 phys | 768 GB | 29 | **748 s (12.46 min)** | **D20 lever (now the default)**, d=3/δ=3, counts mode: **2.66×** the 33.1 min row above, **~59×** the 12.3 hr c4a-72 row; same 239,465,540 classes, mass cert PASSED |
+| GCP `c4a-highmem-96-metal` (Axion, aarch64) | 96 phys | 768 GB | 30 | **16 921 s (4.70 hr)** | **D20 lever, d=3/δ=5** (δ raised for `N ≥ 30`), counts mode, 2026-06-15; **first publicly reproducible N=30 enumeration**, 3,786,528,214 classes, mass cert PASSED at every rank `k = 0..14`. **Current headline** — certificate at [`results/n30.json`](results/n30.json) |
 
 The Emerald-Rapids cross-port has zero per-IPC penalty; the Axion
 port builds unchanged — the x86-only `popcnt` feature of

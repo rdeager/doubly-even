@@ -116,6 +116,10 @@ def main() -> int:
         var: os.environ.get(var, "default")
         for var in (
             "DOUBLY_EVEN_FRONTIER_DEPTH",
+            "DOUBLY_EVEN_SELF_SUBDIVIDE",
+            "DOUBLY_EVEN_SELF_SUBDIVIDE_DELTA",
+            "DOUBLY_EVEN_SELF_SUBDIVIDE_POLL_MS",
+            "DOUBLY_EVEN_MASS_FLUSH_INTERVAL",
             "DOUBLY_EVEN_PARENT_RULE",
             "DOUBLY_EVEN_CANON_LABELLING",
             "DOUBLY_EVEN_PHI_MAX_RANK",

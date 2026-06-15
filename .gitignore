@@ -20,3 +20,8 @@ scripts/microbench/target/
 
 # Local agent-harness settings (never commit).
 .claude/
+
+# Raw cloud counts-run scratch (kept off-repo like the N=29 binaries;
+# the curated certificate lives at docs/results/nNN.json).
+n30-ship/
+n30_ship.log

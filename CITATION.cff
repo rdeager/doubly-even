@@ -2,10 +2,12 @@ cff-version: 1.2.0
 message: >-
   If you use this software in academic work, please cite both this
   repository and the underlying algorithmic spec (DFGHILM 2011 and
-  Gaborit 1996). The first reproducible-from-source enumeration of
-  doubly even [29, k] binary linear codes (239,465,540 classes,
-  mass-formula certified) was computed with this software on
-  2026-05-23 — see docs/results/n29.json.
+  Gaborit 1996). The first reproducible-from-source enumerations of
+  doubly even binary linear codes at lengths beyond every published
+  table were computed with this software: [29, k] (239,465,540
+  classes) on 2026-05-23 and [30, k] (3,786,528,214 classes) on
+  2026-06-15, each mass-formula certified at every rank — see
+  docs/results/n30.json and docs/results/n29.json.
 title: "doubly-even — enumerator of doubly even binary linear codes [N, k]"
 type: software
 authors:
@@ -14,9 +16,9 @@ authors:
 repository-code: "https://github.com/rdeager/doubly-even"
 url: "https://github.com/rdeager/doubly-even"
 license: MIT
-version: "0.1.0+n29"
-commit: 5a1341468c98d2e58e39a37c9dc3ac62b7d25f46
-date-released: 2026-05-23
+version: "0.1.0+n30"
+commit: d074d01c6696e89281840dc5a25628e81a7453de
+date-released: 2026-06-15
 keywords:
   - doubly-even codes
   - binary linear codes

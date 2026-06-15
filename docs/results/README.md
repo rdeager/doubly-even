@@ -1,15 +1,18 @@
 # Published results
 
 Citable, machine-readable artefacts for the enumerations this package
-has produced. Each result here is the final state of one
+has produced. The `N = 29` result is the final state of one
 `scripts/run_streaming.py` run plus its `scripts/merge_stream.py`
-post-pass.
+post-pass; the `N = 30` result is from `scripts/run_counts.py`
+(counts-only mode, the `N ≥ 30`-capable entry — no per-class binaries
+are emitted).
 
 ## What's in this directory
 
 | file | what it is |
 |------|------------|
 | [`n29.json`](n29.json) | The `N = 29` result: per-`k` class counts, per-`k` mass `Σ N!/|Aut(C)|`, per-`k` `gaborit_sigma(29, k)`, total class count (239,465,540), wall time (12.32 hr), platform, and the git SHA the kernel was built from. |
+| [`n30.json`](n30.json) | The `N = 30` result: same schema, ranks `k = 0..14`, total class count (3,786,528,214), wall time (4.70 hr) on a 96-core `c4a-highmem-96-metal` (Axion) at `frontier_depth = 3` / `δ = 5`, and the git SHA. Counts-only run, so no companion binary stream exists. |
 
 ## Schema
 
@@ -23,7 +26,7 @@ The per-`k` block has three integer columns:
 - `classes` — equivalence classes emitted at rank `k`.
 - `mass` — running `Σ_{C ∈ rank-k classes} N! / |Aut(C)|`.
 - `gaborit_sigma` — closed-form `σ(N, k)` from
-  [`doubly_even.spec.mass.gaborit_sigma`](../../doubly_even/spec/mass.py).
+  [`doubly_even.spec.mass.gaborit_sigma`](../../src/doubly_even/spec/mass.py).
 
 Equality `mass == gaborit_sigma` at every `k` is the
 **Gaborit mass-formula certificate** (DFGHILM B.1) — the load-bearing
@@ -54,6 +57,12 @@ This proves the JSON is **internally consistent and correctly
 labelled against the closed-form `σ`**. It does not re-verify the
 underlying enumeration; for that you would need the per-class
 binaries (see below).
+
+The same audit applies to `n30.json` — substitute `30`, the rank
+range `k = 0..14`, and the total `3_786_528_214`. (`n30.json` is a
+counts-only run, so there are no per-class binaries to fall back on;
+the mass-formula certificate is the sole correctness oracle, as for
+`N = 29`.)
 
 ## On request
 

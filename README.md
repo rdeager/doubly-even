@@ -8,18 +8,19 @@ Gaborit's mass formula.
 The current release reproduces the [DFGHILM Appendix
 B](docs/references.md#dfghilm-2011--the-algorithmic-spec) Table 3 cells
 through `N = 28` — 21,505,546 equivalence classes at `N = 28`, in
-**54.8 seconds** on a 96-core GCP `c4a` (Axion) VM. It also adds a
-mass-certified `N = 29` enumeration: **239,465,540 equivalence
-classes** in **12.5 minutes** on the same VM, the first publicly
-reproducible enumeration at this length — both with the shipped
-defaults. The per-rank certificate is at
-[`docs/results/n29.json`](docs/results/n29.json).
+**54.8 seconds** on a 96-core GCP `c4a` (Axion) VM. It also adds
+mass-certified enumerations beyond every published table: `N = 29`
+(**239,465,540** classes in **12.5 minutes**) and `N = 30`
+(**3,786,528,214** classes in **4.7 hours**) on the same VM — the first
+publicly reproducible enumerations at these lengths. The per-rank
+certificates are at [`docs/results/n29.json`](docs/results/n29.json)
+and [`docs/results/n30.json`](docs/results/n30.json).
 
 ## Highlights
 
 - Reproduces DFGHILM Table 3 cell-for-cell through `N = 28`.
-- First publicly reproducible `N = 29` enumeration, mass-formula
-  certified at every rank `k = 0..13`.
+- First publicly reproducible `N = 29` and `N = 30` enumerations,
+  mass-formula certified at every rank (`k = 0..13` and `k = 0..14`).
 - Emits one canonical representative and `|Aut(C)|` per class.
 - Parallel Rust kernel with a streaming-output path for long runs.
 - Cross-checked against Gaborit's mass formula, DFGHILM Table 3, Sage
@@ -95,16 +96,18 @@ cloud run) is in [`docs/reproducing.md`](docs/reproducing.md).
 ## Performance
 
 Reference platform: a **96-core GCP `c4a`** (Axion / Arm Neoverse V2,
-aarch64), parallel Rust kernel at the shipped defaults (demand-driven
-self-subdivision on, `frontier_depth = 3`, `δ = 3`). All wall times are
+aarch64), parallel Rust kernel with demand-driven self-subdivision on,
+tuned per length (exact knobs per run in
+[`docs/performance.md`](docs/performance.md)). All wall times are
 kernel-only, counts-mode (the `N ≥ 28` output mode), every rank
 mass-formula certified:
 
-| `N` | wall                  | classes       |
-|----:|----------------------:|--------------:|
-|  27 |                7.4 s  |     2,673,492 |
-|  28 |       **54.8 s**      |    21,505,546 |
-|  29 | **12.46 min (748 s)** |   239,465,540 |
+| `N` | wall                   | classes        |
+|----:|-----------------------:|---------------:|
+|  27 |                 7.4 s  |      2,673,492 |
+|  28 |        **54.8 s**      |     21,505,546 |
+|  29 | **12.46 min (748 s)**  |    239,465,540 |
+|  30 | **4.70 hr (16,921 s)** |  3,786,528,214 |
 
 On a 24-core desktop (13700K) the same defaults do `N = 24` in 0.75 s
 and `N = 26` in 5.3 s (counts-mode).
@@ -130,31 +133,33 @@ and the Sage comparison (single-threaded **≈584×** at `N = 22` in Sage's
 doubly-even mode `d = 4`; ≈1500× with all 24 desktop threads) are in
 [`docs/performance.md`](docs/performance.md).
 
-### `N = 29` per-rank class counts
+### `N = 30` per-rank class counts
 
-Every row mass-formula certified (`Σ N!/|Aut(C_i)| == σ(29, k)`). Full
+Every row mass-formula certified (`Σ N!/|Aut(C_i)| == σ(30, k)`). Full
 integer-precision mass values, σ values, and the audit recipe are in
-[`docs/results/n29.json`](docs/results/n29.json).
+[`docs/results/n30.json`](docs/results/n30.json); the `N = 29`
+breakdown is in [`docs/results/n29.json`](docs/results/n29.json).
 
 |     `k` | classes              |
 |--------:|---------------------:|
 |       0 |                    1 |
 |       1 |                    7 |
-|       2 |                   39 |
-|       3 |                  287 |
-|       4 |                2,693 |
-|       5 |               34,233 |
-|       6 |              555,804 |
-|       7 |            8,084,014 |
-|       8 |           57,432,707 |
-|       9 |          116,908,496 |
-|      10 |           51,474,285 |
-|      11 |            4,837,471 |
-|      12 |              133,563 |
-|      13 |                1,940 |
-| **total** |    **239,465,540** |
+|       2 |                   46 |
+|       3 |                  359 |
+|       4 |                3,866 |
+|       5 |               61,871 |
+|       6 |            1,477,074 |
+|       7 |           36,414,992 |
+|       8 |          468,618,055 |
+|       9 |        1,740,387,920 |
+|      10 |        1,340,234,496 |
+|      11 |          193,234,425 |
+|      12 |            6,023,627 |
+|      13 |               70,744 |
+|      14 |                  731 |
+| **total** |  **3,786,528,214** |
 
-(`σ(29, 14) = 0` — no `[29, 14]` doubly-even codes exist.)
+(`σ(30, 15) = 0` — no `[30, 15]` doubly-even codes exist.)
 
 ## Validation
 
@@ -291,9 +296,15 @@ implementation.
 - `N = 29` is complete: 239,465,540 classes in **12.5 minutes** on the
   same VM, mass-formula certified at every rank
   ([`docs/results/n29.json`](docs/results/n29.json)).
-- `N ≥ 30` requires either a much bigger single machine
-  (`c4-standard-288-metal` or similar) or a small cluster. The per-node
-  streaming-output path is shipped; the cross-node coordinator is not.
+- `N = 30` is complete (counts-only mode): 3,786,528,214 classes in
+  **4.7 hours** on the same 96-core VM, mass-formula certified at every
+  rank ([`docs/results/n30.json`](docs/results/n30.json)) — the first
+  publicly reproducible enumeration at this length.
+- `N ≥ 31` is the open frontier. Counts-only enumeration should scale
+  to a larger single machine (more cores/RAM, longer wall); emitting
+  every canonical representative at those lengths additionally needs the
+  streaming path and a cross-node coordinator for the multi-TB output —
+  the per-node streaming path is shipped, the coordinator is not.
 
 The `N ≤ 22` wall-time frontier was long believed saturated at the
 algorithmic level (~90 % of the parallel wall inside `sparsenauty`'s
@@ -376,7 +387,8 @@ same terms.
 
 If you use this in academic work, please cite DFGHILM (the algorithmic
 spec) and this repository. See [`CITATION.cff`](CITATION.cff) for the
-machine-readable citation pinned to the `N = 29` build SHA, including
+machine-readable citation pinned to the `N = 30` build SHA, including
 references to DFGHILM 2011, Gaborit 1996, McKay–Piperno 2014, and
-McKay 1998. The `N = 29` result certificate is at
+McKay 1998. The result certificates are at
+[`docs/results/n30.json`](docs/results/n30.json) and
 [`docs/results/n29.json`](docs/results/n29.json).
