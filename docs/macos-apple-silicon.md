@@ -6,9 +6,10 @@ set up `uv` and `rust` yourself (no bootstrap script) and works for **M1
 through M5 Pro** — they are all the same Rust target,
 `aarch64-apple-darwin`.
 
-> Status: this is the first-pass walkthrough. The build is expected to work
-> with the one manifest change in step 3; treat the perf numbers as
-> *to be measured on your machine* until a row lands in
+> Status: this is the first-pass walkthrough. The kernel already targets
+> aarch64 cleanly — the mimalloc and nauty dependencies are OS/arch-gated
+> in-tree, so there are **no source edits to make** (see step 3). Treat the
+> perf numbers as *to be measured on your machine* until a row lands in
 > [`performance.md`](performance.md).
 
 ## At a glance
@@ -16,7 +17,7 @@ through M5 Pro** — they are all the same Rust target,
 ```sh
 # prerequisites (once): Xcode CLT, rustup, uv  — see step 1
 git clone <repo-url> doubly-even && cd doubly-even
-# apply the one-line mimalloc change in rust/Cargo.toml  — see step 3
+# (no source edits needed — deps are already OS/arch-gated, see step 3)
 export MACOSX_DEPLOYMENT_TARGET=11.0
 uv python install 3.12
 uv sync --all-extras --dev
@@ -74,33 +75,32 @@ cd doubly-even
 uv sync --all-extras --dev      # creates .venv with Python 3.12
 ```
 
-## 3. The one required code change — make mimalloc's TLS flag Linux-only
+## 3. mimalloc TLS flag — already scoped to Linux (no action needed)
 
-`rust/Cargo.toml` pins mimalloc with `local_dynamic_tls`, which is a
-**Linux/glibc static-TLS workaround** (it keeps the dlopen'd `cdylib` off
-glibc's ~1.6 KB static-TLS surplus). Mach-O has no such surplus, so the flag
-is irrelevant and untested on macOS — scope it to Linux, mirroring the
-`nauty-Traces-sys` target-split already in `rust/core/Cargo.toml`.
+`rust/Cargo.toml` pins mimalloc with `local_dynamic_tls`, a **Linux/glibc
+static-TLS workaround** (it keeps the dlopen'd `cdylib` off glibc's ~1.6 KB
+static-TLS surplus). Mach-O has no such surplus, so the flag is irrelevant
+and untested on macOS. The dependency is **already split by `target_os`** in
+the tree (mirroring the `nauty-Traces-sys` split in `rust/core/Cargo.toml`),
+so there is nothing to edit — an Apple Silicon build takes the non-Linux
+branch automatically:
 
-Replace the single mimalloc dependency line (keep the rationale comment block
-above it):
+```toml
+[target.'cfg(target_os = "linux")'.dependencies]
+mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
 
-```diff
--mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
-+[target.'cfg(target_os = "linux")'.dependencies]
-+mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
-+
-+[target.'cfg(not(target_os = "linux"))'.dependencies]
-+mimalloc = { version = "0.1", default-features = false }
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
 ```
 
-The Linux feature set is unchanged, so the Linux wheel stays byte-identical;
-only macOS (and any other non-Linux target) drops the irrelevant flag. You
-can confirm the resolution from any machine (no compiler needed):
+The gate is on `target_os`, **not** architecture, so every Linux target keeps
+the flag byte-identical — x86_64 and the aarch64 Axion (`c4a`) fleet alike;
+only non-Linux (Mach-O) drops it. Confirm the resolution on your Mac (no
+compiler needed):
 
 ```sh
 cd rust && cargo tree --target aarch64-apple-darwin -e features -i mimalloc
-# mimalloc should appear WITHOUT the local_dynamic_tls feature
+# mimalloc appears WITHOUT the local_dynamic_tls feature
 ```
 
 ## 4. Build the kernel
@@ -198,9 +198,10 @@ they just make the *existing* tooling display correctly on macOS:
 
 ## 8. Troubleshooting
 
-- **`import doubly_even_kernel` fails with a static-TLS error** — you didn't
-  apply step 3 (or built before applying it). Re-apply, then
-  `scripts/install-kernel.sh parallel`.
+- **`import doubly_even_kernel` fails with a static-TLS error** — your build
+  picked up the Linux `local_dynamic_tls` mimalloc feature on macOS. The §3
+  `target_os` split (which ships in-tree) prevents this; confirm it's present
+  in `rust/Cargo.toml`, then rebuild `scripts/install-kernel.sh parallel`.
 - **`bindgen` / "libclang not found"** — Xcode CLT isn't installed or
   `xcrun` can't find it. `xcode-select --install`, then verify
   `xcrun --find clang`.

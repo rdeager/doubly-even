@@ -85,7 +85,19 @@ pyo3 = { version = "0.23", features = ["extension-module"] }
 # A/B'd at < 1 % on the D16 ship bench.
 # The allocator MUST stay in this wrapper crate: in core it would leak
 # into every test binary and microbench bin.
+#
+# Gated on target_os, NOT target_arch: the static-TLS surplus is a
+# glibc/dlopen property, so EVERY Linux target keeps the flag — x86_64
+# AND aarch64 Linux (the GCP Axion c4a fleet) resolve identically to the
+# pre-split line. Only non-Linux (Mach-O on Apple Silicon) drops it,
+# where the initial-exec TLS model is harmless and `local_dynamic_tls`
+# is untested. Mirrors the OS/arch-gated nauty-Traces-sys split in
+# core/Cargo.toml.
+[target.'cfg(target_os = "linux")'.dependencies]
 mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
 
 [profile.release]
 lto = "thin"
