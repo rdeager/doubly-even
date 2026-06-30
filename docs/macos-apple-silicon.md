@@ -205,6 +205,12 @@ they just make the *existing* tooling display correctly on macOS:
 - **`bindgen` / "libclang not found"** — Xcode CLT isn't installed or
   `xcrun` can't find it. `xcode-select --install`, then verify
   `xcrun --find clang`.
+- **maturin: "couldn't find any python interpreters from python3"** — the
+  stale macOS system `/usr/bin/python3` (3.9) is on `PATH` and doesn't
+  satisfy `requires-python`, so maturin reports none. `install-kernel.sh`
+  pins maturin to `.venv/bin/python`, which avoids this; on an older
+  checkout, `source .venv/bin/activate` before rebuilding. Confirm the venv
+  is the arm64 3.12 (not the system 3.9): `.venv/bin/python --version`.
 - **The extension is x86_64 / Rosetta surprises** — recheck step 1.4; you're
   in an x86 shell or using an x86 Python. Use a native arm64 shell and the
   uv-provisioned arm64 Python.

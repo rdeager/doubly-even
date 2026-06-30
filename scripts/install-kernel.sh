@@ -28,7 +28,18 @@ if [[ "${1:-}" == "--target-cpu" ]]; then
 elif [[ "${2:-}" == "--target-cpu" ]]; then
     TARGET_CPU="${3:?--target-cpu needs a value}"
 fi
-MATURIN_ARGS=(build --release -m Cargo.toml)
+# Pin maturin to the project venv's interpreter. Without --interpreter,
+# maturin discovers via `python3` on PATH, which fails on a fresh macOS
+# (uv's Python isn't exposed as `python3` unless the venv is activated:
+# "couldn't find any python interpreters from python3"). The rest of the
+# script is already venv-centric (installs into .venv, probes with
+# .venv/bin/python), so pin the build interpreter to match on every OS.
+VENV_PYTHON="$PWD/.venv/bin/python"
+if [[ ! -x "$VENV_PYTHON" ]]; then
+    echo "error: $VENV_PYTHON not found — run 'uv sync --all-extras --dev' first" >&2
+    exit 1
+fi
+MATURIN_ARGS=(build --release -m Cargo.toml --interpreter "$VENV_PYTHON")
 if [[ -n "$FEATURES" ]]; then
     MATURIN_ARGS+=(--features "$FEATURES")
 fi
